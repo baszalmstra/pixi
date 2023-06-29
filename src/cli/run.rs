@@ -5,6 +5,7 @@ use std::{fmt::Write, path::PathBuf};
 
 use clap::Parser;
 use is_executable::IsExecutable;
+use minijinja::Environment;
 use rattler_conda_types::Platform;
 
 use crate::{
@@ -117,9 +118,23 @@ pub async fn create_command(args: Args) -> anyhow::Result<RunScriptCommand> {
         s2.push_back(command)
     }
 
+    let mut env = minijinja::Environment::new();
+    env.set_syntax(minijinja::Syntax {
+        variable_start: "${{".into(),
+        variable_end: "}}".into(),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let ctx = minijinja::context! {};
+
     while let Some(command) = s2.pop_back() {
-        // Write the invocation of the command into the script.
-        command.write_invoke_script(&mut script, &shell, &project, &activator_result)?;
+        let args = evaluate_command_args(&command, &env, &ctx)?;
+        if let Some(args) = args {
+            shell
+                .run_command(&mut script, args.iter().map(|arg| arg.as_ref()))
+                .expect("failed to write script");
+        }
     }
 
     tracing::debug!("Activation script:\n{}", script);
@@ -283,4 +298,33 @@ impl Command {
 
         Ok(())
     }
+}
+
+pub fn evaluate_command_args(
+    command: &Command,
+    env: &Environment,
+    ctx: &minijinja::value::Value,
+) -> anyhow::Result<Option<Vec<String>>> {
+    Ok(match command {
+        Command::Process(ProcessCmd {
+            cmd: CmdArgs::Single(cmd),
+            ..
+        })
+        | Command::Plain(cmd) => {
+            let evaluated_command = env.render_str(cmd, ctx)?;
+            Some(
+                shlex::split(&evaluated_command)
+                    .ok_or_else(|| anyhow::anyhow!("invalid quoted command arguments"))?,
+            )
+        }
+        Command::Process(ProcessCmd {
+            cmd: CmdArgs::Multiple(args),
+            ..
+        }) => Some(
+            args.into_iter()
+                .map(|arg| env.render_str(arg, ctx))
+                .collect::<Result<Vec<String>, _>>()?,
+        ),
+        _ => None,
+    })
 }
