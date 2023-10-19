@@ -2069,6 +2069,7 @@ dependencies = [
  "signal-hook",
  "spdx",
  "strsim",
+ "tabwriter",
  "tempfile",
  "thiserror",
  "tokio",
@@ -3153,6 +3154,15 @@ dependencies = [
  "once_cell",
  "rayon",
  "winapi",
+]
+
+[[package]]
+name = "tabwriter"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08e1173ee641651a3095fe95d86ae314cd1f959888097debce3e0f9ca532eef1"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]

@@ -34,6 +34,34 @@ use std::{
     time::Duration,
 };
 
+/// Load or update the lock-file of the specified project.
+///
+/// Use `frozen` or `locked` to skip the update of the lockfile. Use frozen when you don't even want
+/// to check the lockfile status.
+pub async fn load_or_update_lock_file(
+    project: &Project,
+    frozen: bool,
+    locked: bool,
+) -> miette::Result<CondaLock> {
+    if frozen && locked {
+        miette::bail!("Frozen and Locked can't be true at the same time, as using frozen will ignore the locked variable.");
+    }
+    if frozen && !project.lock_file_path().is_file() {
+        miette::bail!("No lockfile available, can't do a frozen installation.");
+    }
+
+    let mut lock_file = load_lock_file(project).await?;
+
+    if !frozen && !lock_file_up_to_date(project, &lock_file)? {
+        if locked {
+            miette::bail!("Lockfile not up-to-date with the project");
+        }
+        lock_file = update_lock_file(project, lock_file, None).await?
+    }
+
+    Ok(lock_file)
+}
+
 /// Returns the prefix associated with the given environment. If the prefix doesn't exist or is not
 /// up to date it is updated.
 /// Use `frozen` or `locked` to skip the update of the lockfile. Use frozen when you don't even want
@@ -70,22 +98,8 @@ pub async fn get_up_to_date_prefix(
         tokio::spawn(async move { prefix.find_installed_packages(None).await })
     };
 
-    // Update the lock-file if it is out of date.
-    if frozen && locked {
-        miette::bail!("Frozen and Locked can't be true at the same time, as using frozen will ignore the locked variable.");
-    }
-    if frozen && !project.lock_file_path().is_file() {
-        miette::bail!("No lockfile available, can't do a frozen installation.");
-    }
-
-    let mut lock_file = load_lock_file(project).await?;
-
-    if !frozen && !lock_file_up_to_date(project, &lock_file)? {
-        if locked {
-            miette::bail!("Lockfile not up-to-date with the project");
-        }
-        lock_file = update_lock_file(project, lock_file, None).await?
-    }
+    // Load and/or update the lock file
+    let lock_file = load_or_update_lock_file(project, frozen, locked).await?;
 
     // Update the environment
     update_prefix(
@@ -142,7 +156,15 @@ pub async fn load_lock_file(project: &Project) -> miette::Result<CondaLock> {
     let lock_file_path = project.lock_file_path();
     tokio::task::spawn_blocking(move || {
         if lock_file_path.is_file() {
-            CondaLock::from_path(&lock_file_path).into_diagnostic()
+            // TOOD: Handle merge conflicts in lock-file
+            CondaLock::from_path(&lock_file_path)
+                .into_diagnostic()
+                .with_context(|| {
+                    format!(
+                        "failed to load lock-file from {}. Did it get corrupted?",
+                        lock_file_path.display()
+                    )
+                })
         } else {
             LockFileBuilder::default().build().into_diagnostic()
         }
