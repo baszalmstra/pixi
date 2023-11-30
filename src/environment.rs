@@ -13,6 +13,7 @@ use crate::lock_file::lock_file_satisfies_project;
 use rattler::install::Transaction;
 use rattler_conda_types::{Platform, PrefixRecord, RepoDataRecord};
 use rattler_lock::{CondaLock, LockedDependency};
+use rip::python_env::ByteCodeCompiler;
 use rip::types::Artifact;
 use rip::{
     artifacts::{
@@ -26,6 +27,7 @@ use rip::{
     },
 };
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::{io::ErrorKind, path::Path, str::FromStr, time::Duration};
 use tokio::task::JoinError;
 
@@ -307,6 +309,11 @@ async fn install_python_distributions(
 
     // Concurrently unpack the wheels as they become available in the stream.
     let install_pb = pb.clone();
+    let byte_code_compiler = Arc::new(
+        ByteCodeCompiler::new(python_executable_path)
+            .into_diagnostic()
+            .context("failed to create byte code compiler")?,
+    );
     package_stream
         .try_for_each_concurrent(Some(20), move |(hash, extras, wheel)| {
             let install_paths = install_paths.clone();
@@ -314,6 +321,7 @@ async fn install_python_distributions(
             let message_formatter = message_formatter.clone();
             let pb = install_pb.clone();
             let python_executable_path = python_executable_path.to_owned();
+            let byte_code_compiler = byte_code_compiler.clone();
             async move {
                 let pb_task = message_formatter.start(wheel.name().to_string()).await;
                 let unpack_result = tokio::task::spawn_blocking(move || {
@@ -325,6 +333,7 @@ async fn install_python_distributions(
                             &UnpackWheelOptions {
                                 installer: Some(PIXI_PYPI_INSTALLER.into()),
                                 extras: Some(extras),
+                                byte_code_compiler: Some(&byte_code_compiler),
                                 ..Default::default()
                             },
                         )
