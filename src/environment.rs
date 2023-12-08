@@ -249,8 +249,14 @@ async fn update_python_distributions(
         );
 
     let cache_dir = package_db.cache_dir();
-    let wheel_tags = WheelTags::from_env().await.into_diagnostic()?;
-    let marker_env = Pep508EnvMakers::from_env().await.into_diagnostic()?;
+    let wheel_tags = WheelTags::from_env()
+        .await
+        .into_diagnostic()
+        .context("failed to determine wheel tags from the environment")?;
+    let marker_env = Pep508EnvMakers::from_env()
+        .await
+        .into_diagnostic()
+        .context("failed to determine environment markers")?;
     let resolve_options = ResolveOptions {
         sdist_resolution: SDistResolution::PreferWheels,
     };

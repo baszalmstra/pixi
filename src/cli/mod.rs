@@ -5,7 +5,9 @@ use clap_complete;
 use clap_verbosity_flag::Verbosity;
 use miette::IntoDiagnostic;
 use std::io::IsTerminal;
-use tracing_subscriber::{filter::LevelFilter, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{filter::LevelFilter, EnvFilter, Layer};
 
 pub mod add;
 pub mod auth;
@@ -110,15 +112,35 @@ pub async fn execute() -> miette::Result<()> {
                 .into_diagnostic()?,
         );
 
-    // Setup the tracing subscriber
-    tracing_subscriber::fmt()
-        .with_ansi(use_colors)
-        .with_env_filter(env_filter)
-        .with_writer(IndicatifWriter::new(progress::global_multi_progress()))
-        .without_time()
-        .finish()
-        .try_init()
-        .into_diagnostic()?;
+    if cfg!(feature = "console-subscriber") {
+        // Spawn the console server in the background, returning a `Layer`:
+        let console_layer = console_subscriber::spawn();
+
+        // Setup the tracing subscriber
+        let layer = tracing_subscriber::fmt::layer()
+            .with_ansi(use_colors)
+            .with_writer(IndicatifWriter::new(progress::global_multi_progress()))
+            .without_time()
+            .with_filter(env_filter);
+
+        tracing_subscriber::registry()
+            .with(console_layer)
+            .with(layer)
+            .try_init()
+            .into_diagnostic()?;
+    } else {
+        // Setup the tracing subscriber
+        let layer = tracing_subscriber::fmt::layer()
+            .with_ansi(use_colors)
+            .with_writer(IndicatifWriter::new(progress::global_multi_progress()))
+            .without_time()
+            .with_filter(env_filter);
+
+        tracing_subscriber::registry()
+            .with(layer)
+            .try_init()
+            .into_diagnostic()?;
+    }
 
     // Execute the command
     execute_command(args.command).await

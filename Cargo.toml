@@ -14,6 +14,7 @@ default = ["native-tls"]
 native-tls = ["reqwest/native-tls", "rattler_repodata_gateway/native-tls", "rattler/native-tls", "rip/native-tls"]
 rustls-tls = ["reqwest/rustls-tls", "reqwest/rustls-tls-native-roots", "rattler_repodata_gateway/rustls-tls", "rattler/rustls-tls", "rip/rustls-tls"]
 slow_integration_tests = []
+console_subscriber = ["tokio/tracing", "console-subscriber"]
 
 [dependencies]
 async-once-cell = "0.5.3"
@@ -22,6 +23,7 @@ clap = { version = "4.4.10", default-features = false, features = ["derive", "us
 clap-verbosity-flag = "2.1.0"
 clap_complete = "4.4.4"
 console = { version = "0.15.7", features = ["windows-console-colors"] }
+console-subscriber = { version = "0.2.0", optional = true }
 deno_task_shell = "0.14.2"
 dirs = "5.0.1"
 dunce = "1.0.4"
@@ -47,7 +49,8 @@ rattler_solve = { version = "0.13.0", default-features = false, features = ["res
 rattler_virtual_packages = { version = "0.13.0", default-features = false }
 regex = "1.10.2"
 reqwest = { version = "0.11.22", default-features = false }
-rip = { package = "rattler_installs_packages", git = "https://github.com/prefix-dev/rattler_installs_packages", branch = "main", default-features = false }
+#rip = { package = "rattler_installs_packages", git = "https://github.com/prefix-dev/rattler_installs_packages", branch = "main", default-features = false }
+rip = { package = "rattler_installs_packages", path = "../rattler_installs_packages/crates/rattler_installs_packages", default-features = false }
 serde = "1.0.193"
 serde_json = "1.0.108"
 serde_spanned = "0.6.4"
