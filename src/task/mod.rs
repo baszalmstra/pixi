@@ -6,6 +6,7 @@ use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
 mod executable_task;
+mod hash;
 mod traverse;
 
 pub use executable_task::{
@@ -102,6 +103,14 @@ impl Task {
     pub fn is_custom(&self) -> bool {
         matches!(self, Task::Custom(_))
     }
+
+    /// Returns cache definitions for this task.
+    pub fn cache(&self) -> Option<&CacheDefinition> {
+        match self {
+            Task::Plain(_) | Task::Custom(_) | Task::Alias(_) => None,
+            Task::Execute(exe) => Some(&exe.cache),
+        }
+    }
 }
 
 /// A command script executes a single command from the environment
@@ -120,6 +129,10 @@ pub struct Execute {
 
     /// The working directory for the command relative to the root of the project.
     pub cwd: Option<PathBuf>,
+
+    /// Cache definition
+    #[serde(flatten)]
+    pub cache: CacheDefinition,
 }
 
 impl From<Execute> for Task {
@@ -219,6 +232,13 @@ impl Display for Task {
             Ok(())
         }
     }
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct CacheDefinition {
+    /// An array of globs that refer to files that are used as inputs of the task.
+    pub inputs: Option<Vec<String>>,
 }
 
 /// Quotes a string argument if it requires quotes to be able to be properly represented in our

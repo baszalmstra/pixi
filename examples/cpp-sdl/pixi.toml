@@ -19,7 +19,7 @@ configure = { cmd = [
     # We wanna build in the .build directory
     "-B",
     ".build",
-] }
+], inputs = ["CMakeLists.txt"] }
 
 # Build the executable but make sure CMake is configured first.
 build = { cmd = ["ninja", "-C", ".build"], depends_on = ["configure"] }
