@@ -1,3 +1,5 @@
+use crate::task::file_hashes::{FileHashes, FileHashesError};
+use crate::task::task_hash::TaskHash;
 use crate::{
     task::{quote_arguments, CmdArgs, Custom, Task},
     Project,
@@ -23,12 +25,6 @@ pub struct RunOutput {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
-}
-
-#[derive(Debug, Error, Diagnostic)]
-#[error("could not find the task '{task_name}'")]
-pub struct MissingTaskError {
-    pub task_name: String,
 }
 
 #[derive(Debug, Error, Diagnostic)]
@@ -193,6 +189,74 @@ impl<'p> ExecutableTask<'p> {
             stdout: stdout_handle.await.unwrap(),
             stderr: stderr_handle.await.unwrap(),
         })
+    }
+
+    /// Determines if the task is up-to-date and doesn't need regeneration.
+    pub async fn is_up_to_date(&self) -> Result<bool, FileHashesError> {
+        // Read the current task hash
+        let cache_hash_path = self.cache_hash_path();
+        let previous_task_hash = match tokio::fs::read_to_string(&cache_hash_path).await {
+            Ok(hash) => hash,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // The task hash file doesn't exist. Not up to date.
+                return Ok(false);
+            }
+            Err(err) => return Err(FileHashesError::IoError(cache_hash_path, err)),
+        };
+
+        // Compute the task hash
+        let Some(current_task_hash) = self.hash().await? else {
+            // No valid task hash, not up to date.
+            return Ok(false);
+        };
+
+        // Compare the task hash with the existing hash
+        if previous_task_hash == current_task_hash.hash() {
+            // The task is up to date.
+            return Ok(true);
+        }
+
+        // The task is out of date.
+        Ok(false)
+    }
+
+    /// Returns the name of the task or `<anonymous>` if the task doesn't have a name. This is used
+    /// for caching purposes.
+    pub fn cache_name(&self) -> String {
+        self.name
+            .to_owned()
+            .unwrap_or_else(|| self.display_command().to_string())
+    }
+
+    /// Returns the hash of the cache name. This is used to identify the task in caches.
+    pub fn cache_name_hash(&self) -> u64 {
+        let task_name = self.cache_name();
+        xxhash_rust::xxh3::xxh3_64(task_name.as_bytes())
+    }
+
+    /// Returns the location of where the task hash is stored.
+    pub fn cache_hash_path(&self) -> PathBuf {
+        let task_name_hash = self.cache_name_hash();
+        self.project
+            .root()
+            .join(".pixi/cache/task_hashes")
+            .join(format!("{:x}", task_name_hash))
+    }
+
+    /// Compute the task hash
+    pub async fn hash(&self) -> Result<Option<TaskHash>, FileHashesError> {
+        let Some(cache) = self.task.cache() else {
+            return Ok(None);
+        };
+
+        let Some(inputs) = cache.inputs.as_ref() else {
+            return Ok(None);
+        };
+
+        Ok(Some(TaskHash {
+            inputs: FileHashes::from_files(self.project.root(), inputs).await?,
+            name: self.cache_name().to_string(),
+        }))
     }
 }
 

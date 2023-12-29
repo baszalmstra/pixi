@@ -109,7 +109,7 @@ pub fn sanity_check_project(project: &Project) -> miette::Result<()> {
 }
 
 /// Specifies how the lock-file should be updated.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Copy, Clone)]
 pub enum LockFileUsage {
     /// Update the lock-file if it is out of date.
     #[default]

@@ -1,6 +1,8 @@
 //! Taken from: <https://docs.rs/serde_spanned/latest/serde_spanned/struct.Spanned.html>
 use std::cmp::Ordering;
+use std::fmt::Display;
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 
 // Currently serde itself doesn't have a spanned type, so we map our `Spanned`
 // to a special value in the serde data model. Namely one with these special
@@ -28,6 +30,20 @@ pub struct PixiSpanned<T> {
     pub span: Option<std::ops::Range<usize>>,
     /// The spanned value.
     pub value: T,
+}
+
+impl<T: Display> Display for PixiSpanned<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl<T> Deref for PixiSpanned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
 }
 
 impl<T> From<T> for PixiSpanned<T> {

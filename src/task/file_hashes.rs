@@ -16,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use thiserror::Error;
+use tokio::task::JoinError;
 use xxhash_rust::xxh3::Xxh3;
 
 #[derive(Debug, Error)]
@@ -47,7 +48,7 @@ impl FileHashes {
     /// The hash is computed using the xxh3 algorithm which provides extremely fast hashing
     /// performance. The traversal, filtering and hash computations are also parallelized over all
     /// available CPU cores to maximize performance.
-    pub fn from_files(
+    pub async fn from_files(
         root: &Path,
         filters: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Self, FileHashesError> {
@@ -66,7 +67,7 @@ impl FileHashes {
         // Spawn a thread that will collect the results from a channel.
         let (tx, rx) = crossbeam_channel::bounded(100);
         let collect_handle =
-            std::thread::spawn(move || rx.iter().collect::<Result<HashMap<_, _>, _>>());
+            tokio::task::spawn_blocking(move || rx.iter().collect::<Result<HashMap<_, _>, _>>());
 
         // Iterate over all entries in parallel and send them over a channel to the collection thread.
         let collect_root = root.to_owned();
@@ -104,9 +105,10 @@ impl FileHashes {
         // Drop the local handle to the channel. This will close the channel which in turn will
         // cause the collection thread to finish which allows us to join without deadlocking.
         drop(tx);
-        match collect_handle.join() {
+        match collect_handle.await.map_err(JoinError::try_into_panic) {
             Ok(files) => Ok(Self { files: files? }),
-            Err(panic) => std::panic::resume_unwind(panic),
+            Err(Ok(panic)) => std::panic::resume_unwind(panic),
+            Err(Err(_)) => panic!("the task was cancelled"),
         }
     }
 }
@@ -138,8 +140,8 @@ mod test {
     use std::fs::{create_dir, write};
     use tempfile::tempdir;
 
-    #[test]
-    fn compute_hashes() {
+    #[tokio::test]
+    async fn compute_hashes() {
         let target_dir = tempdir().unwrap();
 
         // Create a directory structure with a few files.
@@ -152,6 +154,7 @@ mod test {
         // Compute the hashes of all files in the directory that match a certain set of includes.
         let hashes =
             FileHashes::from_files(target_dir.path(), vec!["src/*.rs", "*.toml", "!**/lib.rs"])
+                .await
                 .unwrap();
 
         println!("{:#?}", hashes);

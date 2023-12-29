@@ -1,3 +1,4 @@
+use std::future::ready;
 use std::{collections::HashMap, path::PathBuf, string::String};
 
 use clap::Parser;
@@ -5,20 +6,23 @@ use itertools::Itertools;
 use miette::{miette, Context, Diagnostic, IntoDiagnostic};
 use rattler_conda_types::Platform;
 
-use crate::environment::LockFileUsage;
-use crate::task::{
-    ExecutableTask, FailedToParseShellScript, InvalidWorkingDirectory, TraversalError,
-};
 use crate::{
-    environment::get_up_to_date_prefix, prefix::Prefix, progress::await_in_progress,
-    project::environment::get_metadata_env, Project,
+    environment::{get_up_to_date_prefix, LockFileUsage},
+    prefix::Prefix,
+    progress::await_in_progress,
+    project::environment::get_metadata_env,
+    task::{
+        ExecutableTask, FailedToParseShellScript, FileHashesError, InvalidWorkingDirectory,
+        TraversalError,
+    },
+    Project,
 };
 use rattler_shell::{
     activation::{ActivationVariables, Activator, PathModificationBehavior},
     shell::ShellEnum,
 };
 use thiserror::Error;
-use tracing::Level;
+use tracing::{instrument, Level};
 
 /// Runs task in project.
 #[derive(Parser, Debug, Default)]
@@ -56,15 +60,38 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let executable_task =
         ExecutableTask::from_cmd_args(&project, task_args, Some(Platform::current()));
 
-    // Get the environment to run the commands in.
-    let command_env = get_task_env(&project, args.lock_file_usage.into()).await?;
-
     // Traverse the task and its dependencies. Execute each task in order.
+    let lock_file_usage = LockFileUsage::from(args.lock_file_usage);
     match executable_task
         .traverse(
-            (),
-            |_, task| execute_task(task, &command_env),
-            |_, _task| async { true },
+            None,
+            |command_env, task| {
+                let project = &project;
+                async move {
+                    // Check if we need to run this task at all.
+                    if !should_execute_task(&task).await? {
+                        return Ok(command_env);
+                    }
+
+                    // If we don't have a command environment yet, we need to compute it. We
+                    // lazily compute the task environment because we only need the environment
+                    // if a task is actually executed. If the task is cached, we don't need to
+                    // compute the environment either.
+                    let command_env = match command_env {
+                        Some(command_env) => command_env,
+                        None => get_task_env(project, lock_file_usage)
+                            .await
+                            .map_err(|e| TaskExecutionError::FailedToComputeCommandEnv(e.into()))?,
+                    };
+
+                    // Execute the task itself within the command environment.
+                    execute_task(task, &command_env).await?;
+
+                    // Return the command environment for the next task.
+                    Ok(Some(command_env))
+                }
+            },
+            |_, _task| Box::pin(ready(Ok(true))),
         )
         .await
     {
@@ -76,6 +103,32 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Returns true if the specified task should be executed or not.
+#[instrument(skip(task), fields(task=%task.cache_name()))]
+async fn should_execute_task<'p>(task: &ExecutableTask<'p>) -> Result<bool, TaskExecutionError> {
+    // If the task is a custom task, we always execute it.
+    if task.task().is_custom() {
+        return Ok(true);
+    }
+
+    // If the task is not a custom task, we check if the task is up-to-date.
+    if task.is_up_to_date().await? {
+        // Display that we are going to skip the task
+        if tracing::enabled!(Level::WARN) && !task.task().is_custom() {
+            eprintln!(
+                "{}{}{}",
+                console::Emoji("🚀 ", ""),
+                console::style("Skipping (up to date): ").bold(),
+                task.display_command(),
+            );
+        }
+        return Ok(false);
+    }
+
+    // If the task is not up-to-date, we execute it.
+    Ok(true)
 }
 
 #[derive(Debug, Error, Diagnostic)]
@@ -91,11 +144,22 @@ enum TaskExecutionError {
 
     #[error(transparent)]
     TraverseError(#[from] TraversalError),
+
+    #[error(transparent)]
+    FileHashesError(#[from] FileHashesError),
+
+    #[error("failed to write task hash to cache")]
+    FailedToWriteTaskHash(#[source] std::io::Error),
+
+    #[error(transparent)]
+    // #[diagnostic(transparent)]
+    FailedToComputeCommandEnv(#[from] Box<dyn Diagnostic + Send + Sync>),
 }
 
 /// Called to execute a single command.
 ///
 /// This function is called from [`execute`].
+#[instrument(skip(task, command_env), fields(task=%task.cache_name()))]
 async fn execute_task<'p>(
     task: ExecutableTask<'p>,
     command_env: &HashMap<String, String>,
@@ -115,8 +179,9 @@ async fn execute_task<'p>(
     // Showing which command is being run if the level and type allows it.
     if tracing::enabled!(Level::WARN) && !task.task().is_custom() {
         eprintln!(
-            "{}{}",
-            console::style("✨ Pixi task: ").bold(),
+            "{}{}{}",
+            console::Emoji("✨ ", ""),
+            console::style("Pixi task: ").bold(),
             task.display_command(),
         );
     }
@@ -148,6 +213,31 @@ async fn execute_task<'p>(
 
     if status_code != 0 {
         return Err(TaskExecutionError::NonZeroExitCode(status_code));
+    }
+
+    // Store the task hash if the task provides it.
+    let hash = task.hash().await.unwrap_or_else(|err| {
+        tracing::error!(
+            "failed to compute task hash for '{}': {err}, skipping caching..",
+            task.name().unwrap_or_default()
+        );
+        None
+    });
+
+    if let Some(hash) = hash {
+        let computed_hash = hash.hash();
+        tracing::debug!(
+            name_hash = task.cache_name_hash(),
+            "computed hash '{}'",
+            &computed_hash
+        );
+        let path = task.cache_hash_path();
+        tokio::fs::create_dir_all(&path.parent().expect("path must have parent"))
+            .await
+            .map_err(TaskExecutionError::FailedToWriteTaskHash)?;
+        tokio::fs::write(path, computed_hash)
+            .await
+            .map_err(TaskExecutionError::FailedToWriteTaskHash)?
     }
 
     Ok(())

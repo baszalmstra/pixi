@@ -82,7 +82,12 @@ pub struct ListArgs {
 
 impl From<AddArgs> for Task {
     fn from(value: AddArgs) -> Self {
-        let depends_on = value.depends_on.unwrap_or_default();
+        let depends_on = value
+            .depends_on
+            .into_iter()
+            .flatten()
+            .map(Into::into)
+            .collect_vec();
 
         // Convert the arguments into a single string representation
         let cmd_args = if value.commands.len() == 1 {
@@ -116,7 +121,7 @@ impl From<AddArgs> for Task {
 impl From<AliasArgs> for Task {
     fn from(value: AliasArgs) -> Self {
         Self::Alias(Alias {
-            depends_on: value.depends_on,
+            depends_on: value.depends_on.into_iter().map(Into::into).collect_vec(),
         })
     }
 }

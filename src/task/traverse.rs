@@ -1,9 +1,10 @@
-use crate::task::executable_task::MissingTaskError;
+use crate::task::error::MissingTaskError;
 use crate::task::ExecutableTask;
+use futures::future::BoxFuture;
 use miette::Diagnostic;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::future::Future;
+use std::future::{ready, Future};
 use thiserror::Error;
 
 /// An error that might occur when traversing a task (see [`ExecutableTask::traverse`]).
@@ -26,7 +27,7 @@ impl<'p> ExecutableTask<'p> {
                 tasks.push(task);
                 Ok(tasks)
             },
-            |_, _| async { true },
+            |_, _| Box::pin(ready(Ok(true))),
         )
         .await
     }
@@ -38,17 +39,20 @@ impl<'p> ExecutableTask<'p> {
     ///
     /// The `should_visit` function is called for each task. If the `should_visit` function returns
     /// `false`, the task and its dependencies are skipped.
-    pub async fn traverse<State, R, RFut, F, FFut, Err>(
+    ///
+    /// The `should_visit` function should return a Boxed future because the Rust type system is
+    /// not (yet) able to express the lifetime of the returned future. See:
+    /// <https://users.rust-lang.org/t/how-to-express-that-the-future-returned-by-a-closure-lives-only-as-long-as-its-argument/90039>
+    pub async fn traverse<State, R, RFut, F, Err>(
         self,
         initial_state: State,
         mut visit: R,
         mut should_visit: F,
     ) -> Result<State, Err>
     where
-        RFut: Future<Output = Result<State, Err>>,
+        RFut: Future<Output = Result<State, Err>> + 'p,
         R: FnMut(State, ExecutableTask<'p>) -> RFut,
-        FFut: Future<Output = bool>,
-        F: FnMut(&State, &ExecutableTask<'p>) -> FFut,
+        F: for<'t> FnMut(&State, &'t ExecutableTask<'p>) -> BoxFuture<'t, Result<bool, Err>>,
         Err: From<TraversalError>,
     {
         return inner(
@@ -61,7 +65,7 @@ impl<'p> ExecutableTask<'p> {
         .await;
 
         #[async_recursion::async_recursion(?Send)]
-        async fn inner<'p, State, R, RFut, F, FFut, Err>(
+        async fn inner<'p, State, R, RFut, F, Err>(
             state: State,
             task: ExecutableTask<'p>,
             visited: &mut HashSet<String>,
@@ -71,8 +75,7 @@ impl<'p> ExecutableTask<'p> {
         where
             RFut: Future<Output = Result<State, Err>>,
             R: FnMut(State, ExecutableTask<'p>) -> RFut,
-            FFut: Future<Output = bool>,
-            F: FnMut(&State, &ExecutableTask<'p>) -> FFut,
+            F: for<'t> FnMut(&State, &'t ExecutableTask<'p>) -> BoxFuture<'t, Result<bool, Err>>,
             Err: From<TraversalError>,
             'p: 'async_recursion,
         {
@@ -85,14 +88,14 @@ impl<'p> ExecutableTask<'p> {
             }
 
             // Determine if we should even visit this task (and its dependencies in the first place).
-            if !should_visit(&state, &task).await {
+            if !should_visit(&state, &task).await? {
                 return Ok(state);
             }
 
             // Locate the dependencies in the project and add them to the stack
             let mut state = state;
             for dependency in task.task().depends_on() {
-                let dependency = task
+                let task_dependency = task
                     .project()
                     .task_opt(dependency, task.platform)
                     .ok_or_else(|| MissingTaskError {
@@ -104,8 +107,8 @@ impl<'p> ExecutableTask<'p> {
                     state,
                     ExecutableTask {
                         project: task.project,
-                        name: Some(dependency.to_string()),
-                        task: Cow::Borrowed(dependency),
+                        name: Some(dependency.clone()),
+                        task: Cow::Borrowed(task_dependency),
                         additional_args: Vec::new(),
                         platform: task.platform,
                     },

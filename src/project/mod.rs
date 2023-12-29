@@ -220,7 +220,7 @@ impl Project {
         if task.is_some() {
             tasks
                 .into_iter()
-                .filter(|(_, c)| c.depends_on().contains(&name.as_ref().to_string()))
+                .filter(|(_, c)| c.depends_on().iter().any(|d| d == name.as_ref()))
                 .map(|(name, _)| name)
                 .collect()
         } else {

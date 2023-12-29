@@ -5,14 +5,18 @@ use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
+mod error;
 mod executable_task;
-mod hash;
+mod file_hashes;
+mod task_graph;
+mod task_hash;
 mod traverse;
 
 pub use executable_task::{
     ExecutableTask, FailedToParseShellScript, InvalidWorkingDirectory, RunOutput,
     TaskExecutionError,
 };
+pub use file_hashes::{FileHashes, FileHashesError};
 pub use traverse::TraversalError;
 
 /// Represents different types of scripts

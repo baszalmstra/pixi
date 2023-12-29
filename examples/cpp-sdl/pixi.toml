@@ -22,7 +22,7 @@ configure = { cmd = [
 ], inputs = ["CMakeLists.txt"] }
 
 # Build the executable but make sure CMake is configured first.
-build = { cmd = ["ninja", "-C", ".build"], depends_on = ["configure"] }
+build = { cmd = ["ninja", "-C", ".build"], depends_on = ["configure"], inputs = [".build/**/*.ninja", "src/*.cc"] }
 
 # Start the built executable
 start = { cmd = ".build/bin/sdl_example", depends_on = ["build"] }
