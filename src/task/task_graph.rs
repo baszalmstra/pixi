@@ -17,10 +17,10 @@ use thiserror::Error;
 ///
 /// To get a task from a [`TaskGraph`], you can use the [`TaskId`] as an index.
 #[derive(Debug, Clone, Copy, Eq, PartialOrd, PartialEq, Ord, Hash)]
-struct TaskId(usize);
+pub struct TaskId(usize);
 
 /// A node in the [`TaskGraph`].
-struct TaskNode<'p> {
+pub struct TaskNode<'p> {
     /// The name of the task or `None` if the task is a custom task.
     pub name: Option<String>,
 
@@ -54,7 +54,10 @@ impl<'p> TaskNode<'p> {
 
 /// A [`TaskGraph`] is a graph of tasks that defines the relationships between different executable
 /// tasks.
-struct TaskGraph<'p> {
+pub struct TaskGraph<'p> {
+    /// The project that this graph references
+    project: &'p Project,
+
     /// The tasks in the graph
     nodes: Vec<TaskNode<'p>>,
 }
@@ -68,6 +71,10 @@ impl<'p> Index<TaskId> for TaskGraph<'p> {
 }
 
 impl<'p> TaskGraph<'p> {
+    pub fn project(&self) -> &'p Project {
+        self.project
+    }
+
     /// Constructs a new [`TaskGraph`] from a list of command line arguments.
     pub fn from_cmd_args(
         project: &'p Project,
@@ -164,7 +171,7 @@ impl<'p> TaskGraph<'p> {
             next_node_to_visit += 1;
         }
 
-        Ok(Self { nodes })
+        Ok(Self { project, nodes })
     }
 
     /// Returns the topological order of the tasks in the graph.

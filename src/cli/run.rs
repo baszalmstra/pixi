@@ -1,4 +1,3 @@
-use std::future::ready;
 use std::{collections::HashMap, path::PathBuf, string::String};
 
 use clap::Parser;
@@ -6,15 +5,13 @@ use itertools::Itertools;
 use miette::{miette, Context, Diagnostic, IntoDiagnostic};
 use rattler_conda_types::Platform;
 
+use crate::task::TaskGraph;
 use crate::{
     environment::{get_up_to_date_prefix, LockFileUsage},
     prefix::Prefix,
     progress::await_in_progress,
     project::environment::get_metadata_env,
-    task::{
-        ExecutableTask, FailedToParseShellScript, FileHashesError, InvalidWorkingDirectory,
-        TraversalError,
-    },
+    task::{ExecutableTask, FailedToParseShellScript, FileHashesError, InvalidWorkingDirectory},
     Project,
 };
 use rattler_shell::{
@@ -56,53 +53,47 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     };
     tracing::debug!("Task parsed from run command: {:?}", task_args);
 
-    // Get the task to execute
-    let executable_task =
-        ExecutableTask::from_cmd_args(&project, task_args, Some(Platform::current()));
+    // Construct a task graph from the input arguments
+    let task_graph = TaskGraph::from_cmd_args(&project, task_args, Some(Platform::current()))
+        .context("failed to construct task graph from command line arguments")?;
 
-    // Traverse the task and its dependencies. Execute each task in order.
-    let lock_file_usage = LockFileUsage::from(args.lock_file_usage);
-    match executable_task
-        .traverse(
-            None,
-            |command_env, task| {
-                let project = &project;
-                async move {
-                    // Check if we need to run this task at all.
-                    if !should_execute_task(&task).await? {
-                        return Ok(command_env);
-                    }
+    // Traverse the task graph in topological order and execute each individual task.
+    let mut task_env = None;
+    for task_id in task_graph.topological_order() {
+        let executable_task = ExecutableTask::from_task_graph(&task_graph, task_id);
 
-                    // If we don't have a command environment yet, we need to compute it. We
-                    // lazily compute the task environment because we only need the environment
-                    // if a task is actually executed. If the task is cached, we don't need to
-                    // compute the environment either.
-                    let command_env = match command_env {
-                        Some(command_env) => command_env,
-                        None => get_task_env(project, lock_file_usage)
-                            .await
-                            .map_err(|e| TaskExecutionError::FailedToComputeCommandEnv(e.into()))?,
-                    };
-
-                    // Execute the task itself within the command environment.
-                    execute_task(task, &command_env).await?;
-
-                    // Return the command environment for the next task.
-                    Ok(Some(command_env))
-                }
-            },
-            |_, _task| Box::pin(ready(Ok(true))),
-        )
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(TaskExecutionError::NonZeroExitCode(code)) => {
-            // If one of the tasks failed with a non-zero exit code, we exit this parent process
-            // with the same code.
-            std::process::exit(code);
+        // Determine if we should execute this particular task
+        if !should_execute_task(&executable_task).await? {
+            continue;
         }
-        Err(err) => Err(err.into()),
+
+        // If we don't have a command environment yet, we need to compute it. We
+        // lazily compute the task environment because we only need the environment
+        // if a task is actually executed. If the task is cached, we don't need to
+        // compute the environment either.
+        let task_env = match task_env.as_ref() {
+            None => {
+                let env = get_task_env(&project, args.lock_file_usage.into())
+                    .await
+                    .map_err(|e| TaskExecutionError::FailedToComputeCommandEnv(e.into()))?;
+                task_env.insert(env) as &_
+            }
+            Some(command_env) => command_env,
+        };
+
+        // Execute the task itself within the command environment.
+        match execute_task(executable_task, task_env).await {
+            Ok(_) => {}
+            Err(TaskExecutionError::NonZeroExitCode(code)) => {
+                // If one of the tasks failed with a non-zero exit code, we exit this parent process
+                // with the same code.
+                std::process::exit(code);
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
+
+    Ok(())
 }
 
 /// Returns true if the specified task should be executed or not.
@@ -143,16 +134,13 @@ enum TaskExecutionError {
     InvalidWorkingDirectory(#[from] InvalidWorkingDirectory),
 
     #[error(transparent)]
-    TraverseError(#[from] TraversalError),
-
-    #[error(transparent)]
     FileHashesError(#[from] FileHashesError),
 
     #[error("failed to write task hash to cache")]
     FailedToWriteTaskHash(#[source] std::io::Error),
 
     #[error(transparent)]
-    // #[diagnostic(transparent)]
+    #[diagnostic(transparent)]
     FailedToComputeCommandEnv(#[from] Box<dyn Diagnostic + Send + Sync>),
 }
 

@@ -71,7 +71,7 @@ pub enum Command {
     Remove(remove::Args),
 }
 
-#[derive(Parser, Debug, Default)]
+#[derive(Parser, Debug, Default, Copy, Clone)]
 #[group(multiple = false)]
 /// Lock file usage from the CLI
 pub struct LockFileUsageArgs {

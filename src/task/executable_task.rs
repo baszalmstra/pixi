@@ -1,18 +1,17 @@
 use crate::task::file_hashes::{FileHashes, FileHashesError};
 use crate::task::task_hash::TaskHash;
+use crate::task::{TaskGraph, TaskId};
 use crate::{
-    task::{quote_arguments, CmdArgs, Custom, Task},
+    task::{quote_arguments, Task},
     Project,
 };
 use deno_task_shell::{
     execute_with_pipes, parser::SequentialList, pipe, ShellPipeWriter, ShellState,
 };
 use miette::Diagnostic;
-use rattler_conda_types::Platform;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    env,
     fmt::{Display, Formatter},
     path::PathBuf,
 };
@@ -52,14 +51,24 @@ pub enum TaskExecutionError {
 /// the lifetime of the project that contains the tasks.
 #[derive(Clone)]
 pub struct ExecutableTask<'p> {
-    pub(super) project: &'p Project,
-    pub(super) name: Option<String>,
-    pub(super) task: Cow<'p, Task>,
-    pub(super) additional_args: Vec<String>,
-    pub(super) platform: Option<Platform>,
+    pub project: &'p Project,
+    pub name: Option<String>,
+    pub task: Cow<'p, Task>,
+    pub additional_args: Vec<String>,
 }
 
 impl<'p> ExecutableTask<'p> {
+    /// Constructs a new executable task from a task graph node.
+    pub fn from_task_graph(task_graph: &TaskGraph<'p>, task_id: TaskId) -> Self {
+        let node = &task_graph[task_id];
+        Self {
+            project: task_graph.project(),
+            name: node.name.clone(),
+            task: node.task.clone(),
+            additional_args: node.additional_args.clone(),
+        }
+    }
+
     /// Returns the name of the task or `None` if this is an anonymous task.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
@@ -78,44 +87,6 @@ impl<'p> ExecutableTask<'p> {
     /// Returns the project in which this task is defined.
     pub fn project(&self) -> &'p Project {
         self.project
-    }
-
-    /// Parses command line arguments into an [`ExecutableTask`].
-    pub fn from_cmd_args(
-        project: &'p Project,
-        args: Vec<String>,
-        platform: Option<Platform>,
-    ) -> Self {
-        let mut args = args;
-
-        if let Some(name) = args.first() {
-            // Find the task in the project. First searches for platform specific tasks and falls
-            // back to looking for the task in the default tasks.
-            if let Some(task) = project.task_opt(name, platform) {
-                return Self {
-                    project,
-                    name: Some(args.remove(0)),
-                    task: Cow::Borrowed(task),
-                    additional_args: args,
-                    platform,
-                };
-            }
-        }
-
-        // When no task is found, just execute the command verbatim.
-        Self {
-            project,
-            name: None,
-            task: Cow::Owned(
-                Custom {
-                    cmd: CmdArgs::from(args),
-                    cwd: env::current_dir().ok(),
-                }
-                .into(),
-            ),
-            additional_args: vec![],
-            platform,
-        }
     }
 
     /// Returns a [`SequentialList`] which can be executed by deno task shell. Returns `None` if the
@@ -291,153 +262,4 @@ fn get_output_writer_and_handle() -> (ShellPipeWriter, JoinHandle<String>) {
     let (reader, writer) = pipe();
     let handle = reader.pipe_to_string_handle();
     (writer, handle)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[tokio::test]
-    async fn test_ordered_commands() {
-        let file_content = r#"
-        [project]
-        name = "pixi"
-        channels = ["conda-forge"]
-        platforms = ["linux-64"]
-        [tasks]
-        root = "echo root"
-        task1 = {cmd="echo task1", depends_on=["root"]}
-        task2 = {cmd="echo task2", depends_on=["root"]}
-        top = {cmd="echo top", depends_on=["task1","task2"]}
-    "#;
-        let project = Project::from_manifest_str(Path::new(""), file_content.to_string()).unwrap();
-
-        let executable_tasks = ExecutableTask::from_cmd_args(
-            &project,
-            vec!["top".to_string(), "--test".to_string()],
-            Some(Platform::current()),
-        )
-        .get_ordered_dependencies()
-        .await
-        .unwrap();
-
-        let ordered_task_names: Vec<_> = executable_tasks
-            .iter()
-            .map(|task| task.task().as_single_command().unwrap())
-            .collect();
-
-        assert_eq!(
-            ordered_task_names,
-            vec!["echo root", "echo task1", "echo task2", "echo top"]
-        );
-
-        // Also check if the arguments are passed correctly
-        assert_eq!(
-            executable_tasks.last().unwrap().additional_args(),
-            vec!["--test".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_cycle_ordered_commands() {
-        let file_content = r#"
-        [project]
-        name = "pixi"
-        channels = ["conda-forge"]
-        platforms = ["linux-64"]
-        [tasks]
-        root = {cmd="echo root", depends_on=["task1"]}
-        task1 = {cmd="echo task1", depends_on=["root"]}
-        task2 = {cmd="echo task2", depends_on=["root"]}
-        top = {cmd="echo top", depends_on=["task1","task2"]}
-    "#;
-        let project = Project::from_manifest_str(Path::new(""), file_content.to_string()).unwrap();
-
-        let executable_tasks = ExecutableTask::from_cmd_args(
-            &project,
-            vec!["top".to_string()],
-            Some(Platform::current()),
-        )
-        .get_ordered_dependencies()
-        .await
-        .unwrap();
-
-        let ordered_task_names: Vec<_> = executable_tasks
-            .iter()
-            .map(|task| task.task().as_single_command().unwrap())
-            .collect();
-
-        assert_eq!(
-            ordered_task_names,
-            vec!["echo root", "echo task1", "echo task2", "echo top"]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_platform_ordered_commands() {
-        let file_content = r#"
-        [project]
-        name = "pixi"
-        channels = ["conda-forge"]
-        platforms = ["linux-64"]
-        [tasks]
-        root = "echo root"
-        task1 = {cmd="echo task1", depends_on=["root"]}
-        task2 = {cmd="echo task2", depends_on=["root"]}
-        top = {cmd="echo top", depends_on=["task1","task2"]}
-        [target.linux-64.tasks]
-        root = {cmd="echo linux", depends_on=["task1"]}
-    "#;
-        let project = Project::from_manifest_str(Path::new(""), file_content.to_string()).unwrap();
-
-        let executable_tasks = ExecutableTask::from_cmd_args(
-            &project,
-            vec!["top".to_string()],
-            Some(Platform::Linux64),
-        )
-        .get_ordered_dependencies()
-        .await
-        .unwrap();
-
-        let ordered_task_names: Vec<_> = executable_tasks
-            .iter()
-            .map(|task| task.task().as_single_command().unwrap())
-            .collect();
-
-        assert_eq!(
-            ordered_task_names,
-            vec!["echo linux", "echo task1", "echo task2", "echo top",]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_custom_command() {
-        let file_content = r#"
-        [project]
-        name = "pixi"
-        channels = ["conda-forge"]
-        platforms = ["linux-64"]
-    "#;
-        let project = Project::from_manifest_str(Path::new(""), file_content.to_string()).unwrap();
-
-        let executable_tasks = ExecutableTask::from_cmd_args(
-            &project,
-            vec!["echo bla".to_string()],
-            Some(Platform::Linux64),
-        )
-        .get_ordered_dependencies()
-        .await
-        .unwrap();
-
-        assert_eq!(executable_tasks.len(), 1);
-
-        let task = executable_tasks.get(0).unwrap();
-        assert!(task.task().is_custom());
-
-        assert_eq!(
-            task.task().as_single_command().unwrap(),
-            r###""echo bla""###
-        );
-    }
 }
