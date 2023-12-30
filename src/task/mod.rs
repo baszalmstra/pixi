@@ -17,6 +17,7 @@ pub use executable_task::{
 };
 pub use file_hashes::{FileHashes, FileHashesError};
 pub use task_graph::{TaskGraph, TaskGraphError, TaskId, TaskNode};
+pub use task_hash::{ComputationHash, InputHashes, InputHashesError, TaskHash};
 
 /// Represents different types of scripts
 #[derive(Debug, Clone, Deserialize)]

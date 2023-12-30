@@ -11,7 +11,7 @@ use crate::{
     prefix::Prefix,
     progress::await_in_progress,
     project::environment::get_metadata_env,
-    task::{ExecutableTask, FailedToParseShellScript, FileHashesError, InvalidWorkingDirectory},
+    task::{ExecutableTask, FailedToParseShellScript, InvalidWorkingDirectory, TaskHash},
     Project,
 };
 use rattler_shell::{
@@ -62,15 +62,44 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     for task_id in task_graph.topological_order() {
         let executable_task = ExecutableTask::from_task_graph(&task_graph, task_id);
 
-        // Determine if we should execute this particular task
-        if !should_execute_task(&executable_task).await? {
-            continue;
+        // Determine the expected hash of the task. This returns `None` if the task does not define
+        // any cacheable input.
+        let task_hash = TaskHash::from_task(&executable_task).await?;
+
+        // Determine the hash of the previous run of the task. This returns `None` if the task was
+        // not previously executed or the cache has been deleted. We only need to check the cache
+        // hash if the task has a hash in the first place.
+        let previous_hash = if task_hash.is_some() {
+            executable_task
+                .cached_computation_hash()
+                .await
+                .into_diagnostic()
+                .context("failed to determine the cached computation hash")?
+        } else {
+            None
+        };
+
+        // Determine if the task should be executed or not based on the cached computation hash and
+        // the computation hash we computed.
+        if let (Some(task_hash), Some(previous_hash)) = (task_hash.as_ref(), previous_hash.as_ref())
+        {
+            // If the task is up-to-date, we skip it.
+            if &task_hash.computation_hash() == previous_hash {
+                if tracing::enabled!(Level::WARN) && !executable_task.task().is_custom() {
+                    eprintln!(
+                        "{}{}{}",
+                        console::Emoji("🚀 ", ""),
+                        console::style("Skipping (up to date): ").bold(),
+                        executable_task.display_command(),
+                    );
+                }
+                continue;
+            }
         }
 
-        // If we don't have a command environment yet, we need to compute it. We
-        // lazily compute the task environment because we only need the environment
-        // if a task is actually executed. If the task is cached, we don't need to
-        // compute the environment either.
+        // If we don't have a command environment yet, we need to compute it. We lazily compute the
+        // task environment because we only need the environment if a task is actually executed. If
+        // the task is cached, we don't need to compute the environment either.
         let task_env = match task_env.as_ref() {
             None => {
                 let env = get_task_env(&project, args.lock_file_usage.into())
@@ -81,45 +110,50 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             Some(command_env) => command_env,
         };
 
-        // Execute the task itself within the command environment.
-        match execute_task(executable_task, task_env).await {
+        // Execute the task itself within the command environment. If one of the tasks failed with
+        // a non-zero exit code, we exit this parent process with the same code.
+        match execute_task(&executable_task, task_env).await {
             Ok(_) => {}
             Err(TaskExecutionError::NonZeroExitCode(code)) => {
-                // If one of the tasks failed with a non-zero exit code, we exit this parent process
-                // with the same code.
+                if code == 127 {
+                    command_not_found(&project);
+                }
                 std::process::exit(code);
             }
             Err(err) => return Err(err.into()),
+        }
+
+        // If the execution of the task succeeded, write the hash to the cache.
+        if let Some(task_hash) = task_hash {
+            // TODO: Update the task hash with the outputs from the task execution.
+
+            executable_task
+                .update_cached_computation_hash(&task_hash.computation_hash())
+                .await
+                .into_diagnostic()
+                .context("failed to update the cached computation hash")?;
         }
     }
 
     Ok(())
 }
 
-/// Returns true if the specified task should be executed or not.
-#[instrument(skip(task), fields(task=%task.cache_name()))]
-async fn should_execute_task<'p>(task: &ExecutableTask<'p>) -> Result<bool, TaskExecutionError> {
-    // If the task is a custom task, we always execute it.
-    if task.task().is_custom() {
-        return Ok(true);
-    }
+/// Called when a command was not found.
+fn command_not_found(project: &Project) {
+    let available_tasks = project
+        .tasks(Some(Platform::current()))
+        .into_keys()
+        .sorted()
+        .collect_vec();
 
-    // If the task is not a custom task, we check if the task is up-to-date.
-    if task.is_up_to_date().await? {
-        // Display that we are going to skip the task
-        if tracing::enabled!(Level::WARN) && !task.task().is_custom() {
-            eprintln!(
-                "{}{}{}",
-                console::Emoji("🚀 ", ""),
-                console::style("Skipping (up to date): ").bold(),
-                task.display_command(),
-            );
-        }
-        return Ok(false);
+    if !available_tasks.is_empty() {
+        eprintln!(
+            "\nAvailable tasks:\n{}",
+            available_tasks.into_iter().format_with("\n", |name, f| {
+                f(&format_args!("\t{}", console::style(name).bold()))
+            })
+        );
     }
-
-    // If the task is not up-to-date, we execute it.
-    Ok(true)
 }
 
 #[derive(Debug, Error, Diagnostic)]
@@ -134,12 +168,6 @@ enum TaskExecutionError {
     InvalidWorkingDirectory(#[from] InvalidWorkingDirectory),
 
     #[error(transparent)]
-    FileHashesError(#[from] FileHashesError),
-
-    #[error("failed to write task hash to cache")]
-    FailedToWriteTaskHash(#[source] std::io::Error),
-
-    #[error(transparent)]
     #[diagnostic(transparent)]
     FailedToComputeCommandEnv(#[from] Box<dyn Diagnostic + Send + Sync>),
 }
@@ -149,7 +177,7 @@ enum TaskExecutionError {
 /// This function is called from [`execute`].
 #[instrument(skip(task, command_env), fields(task=%task.cache_name()))]
 async fn execute_task<'p>(
-    task: ExecutableTask<'p>,
+    task: &ExecutableTask<'p>,
     command_env: &HashMap<String, String>,
 ) -> Result<(), TaskExecutionError> {
     let Some(script) = task.as_deno_script()? else {
@@ -167,8 +195,8 @@ async fn execute_task<'p>(
     // Showing which command is being run if the level and type allows it.
     if tracing::enabled!(Level::WARN) && !task.task().is_custom() {
         eprintln!(
-            "{}{}{}",
-            console::Emoji("✨ ", ""),
+            "{} {}{}",
+            console::Emoji("✨", "*"),
             console::style("Pixi task: ").bold(),
             task.display_command(),
         );
@@ -181,51 +209,9 @@ async fn execute_task<'p>(
         // This should never exit
         _ = ctrl_c => { unreachable!("Ctrl+C should not be triggered") }
     };
-    if status_code == 127 {
-        let available_tasks = task
-            .project()
-            .tasks(Some(Platform::current()))
-            .into_keys()
-            .sorted()
-            .collect_vec();
-
-        if !available_tasks.is_empty() {
-            eprintln!(
-                "\nAvailable tasks:\n{}",
-                available_tasks.into_iter().format_with("\n", |name, f| {
-                    f(&format_args!("\t{}", console::style(name).bold()))
-                })
-            );
-        }
-    }
 
     if status_code != 0 {
         return Err(TaskExecutionError::NonZeroExitCode(status_code));
-    }
-
-    // Store the task hash if the task provides it.
-    let hash = task.hash().await.unwrap_or_else(|err| {
-        tracing::error!(
-            "failed to compute task hash for '{}': {err}, skipping caching..",
-            task.name().unwrap_or_default()
-        );
-        None
-    });
-
-    if let Some(hash) = hash {
-        let computed_hash = hash.hash();
-        tracing::debug!(
-            name_hash = task.cache_name_hash(),
-            "computed hash '{}'",
-            &computed_hash
-        );
-        let path = task.cache_hash_path();
-        tokio::fs::create_dir_all(&path.parent().expect("path must have parent"))
-            .await
-            .map_err(TaskExecutionError::FailedToWriteTaskHash)?;
-        tokio::fs::write(path, computed_hash)
-            .await
-            .map_err(TaskExecutionError::FailedToWriteTaskHash)?
     }
 
     Ok(())

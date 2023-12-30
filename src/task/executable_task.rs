@@ -1,6 +1,4 @@
-use crate::task::file_hashes::{FileHashes, FileHashesError};
-use crate::task::task_hash::TaskHash;
-use crate::task::{TaskGraph, TaskId};
+use crate::task::{ComputationHash, TaskGraph, TaskId};
 use crate::{
     task::{quote_arguments, Task},
     Project,
@@ -16,6 +14,7 @@ use std::{
     path::PathBuf,
 };
 use thiserror::Error;
+use tokio::fs;
 use tokio::task::JoinHandle;
 
 /// Runs task in project.
@@ -127,6 +126,22 @@ impl<'p> ExecutableTask<'p> {
         })
     }
 
+    /// Returns the full command that should be executed for this task. This includes any
+    /// additional arguments that should be passed to the command.
+    ///
+    /// This function returns `None` if the task does not define a command to execute. This is the
+    /// case for alias only commands.
+    pub fn full_command(&self) -> Option<String> {
+        let mut cmd = self.task.as_single_command()?.to_string();
+
+        if !self.additional_args.is_empty() {
+            cmd.push(' ');
+            cmd.push_str(&self.additional_args.join(" "));
+        }
+
+        Some(cmd)
+    }
+
     /// Returns an object that implements [`Display`] which outputs the command of the wrapped task.
     pub fn display_command(&self) -> impl Display + '_ {
         ExecutableTaskConsoleDisplay { task: self }
@@ -162,35 +177,6 @@ impl<'p> ExecutableTask<'p> {
         })
     }
 
-    /// Determines if the task is up-to-date and doesn't need regeneration.
-    pub async fn is_up_to_date(&self) -> Result<bool, FileHashesError> {
-        // Read the current task hash
-        let cache_hash_path = self.cache_hash_path();
-        let previous_task_hash = match tokio::fs::read_to_string(&cache_hash_path).await {
-            Ok(hash) => hash,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                // The task hash file doesn't exist. Not up to date.
-                return Ok(false);
-            }
-            Err(err) => return Err(FileHashesError::IoError(cache_hash_path, err)),
-        };
-
-        // Compute the task hash
-        let Some(current_task_hash) = self.hash().await? else {
-            // No valid task hash, not up to date.
-            return Ok(false);
-        };
-
-        // Compare the task hash with the existing hash
-        if previous_task_hash == current_task_hash.hash() {
-            // The task is up to date.
-            return Ok(true);
-        }
-
-        // The task is out of date.
-        Ok(false)
-    }
-
     /// Returns the name of the task or `<anonymous>` if the task doesn't have a name. This is used
     /// for caching purposes.
     pub fn cache_name(&self) -> String {
@@ -214,20 +200,30 @@ impl<'p> ExecutableTask<'p> {
             .join(format!("{:x}", task_name_hash))
     }
 
-    /// Compute the task hash
-    pub async fn hash(&self) -> Result<Option<TaskHash>, FileHashesError> {
-        let Some(cache) = self.task.cache() else {
-            return Ok(None);
-        };
+    /// Returns the cached [`ComputationHash`] of the task if it exists.
+    pub async fn cached_computation_hash(&self) -> std::io::Result<Option<ComputationHash>> {
+        match fs::read_to_string(self.cache_hash_path())
+            .await
+            .map(ComputationHash::from)
+        {
+            Ok(hash) => Ok(Some(hash)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
 
-        let Some(inputs) = cache.inputs.as_ref() else {
-            return Ok(None);
-        };
-
-        Ok(Some(TaskHash {
-            inputs: FileHashes::from_files(self.project.root(), inputs).await?,
-            name: self.cache_name().to_string(),
-        }))
+    /// Writes the [`ComputationHash`] to the cache file on disk.
+    pub async fn update_cached_computation_hash(
+        &self,
+        hash: &ComputationHash,
+    ) -> std::io::Result<()> {
+        let cache_hash_path = self.cache_hash_path();
+        let cache_hash_dir = cache_hash_path
+            .parent()
+            .expect("cache hash path has no parent");
+        fs::create_dir_all(cache_hash_dir).await?;
+        fs::write(cache_hash_path, hash.as_str()).await?;
+        Ok(())
     }
 }
 
@@ -239,24 +235,17 @@ struct ExecutableTaskConsoleDisplay<'p, 't> {
 
 impl<'p, 't> Display for ExecutableTaskConsoleDisplay<'p, 't> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let command = self.task.task.as_single_command();
+        let command = self.task.full_command();
         write!(
             f,
             "{}",
             console::style(command.as_deref().unwrap_or("<alias>"))
                 .blue()
                 .bold()
-        )?;
-        if !self.task.additional_args.is_empty() {
-            write!(
-                f,
-                " {}",
-                console::style(self.task.additional_args.join(" ")).blue()
-            )?;
-        }
-        Ok(())
+        )
     }
 }
+
 /// Helper function to create a pipe that we can get the output from.
 fn get_output_writer_and_handle() -> (ShellPipeWriter, JoinHandle<String>) {
     let (reader, writer) = pipe();

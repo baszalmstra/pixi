@@ -8,6 +8,8 @@
 //! [`FileHashes::from_files`] method.
 
 use ignore::{overrides::OverrideBuilder, WalkBuilder};
+use itertools::Itertools;
+use std::hash::Hash;
 use std::{
     collections::HashMap,
     fs::File,
@@ -29,9 +31,23 @@ pub enum FileHashesError {
 }
 
 /// A map of file paths to their hashes.
+///
+/// TODO: When computing the hash of the files, we should normalize the paths to ensure the hash
+///   does not change across platforms.
+/// TODO: When computing the hash of the files, we should use a consistent ordering.
 #[derive(Debug, Default)]
 pub struct FileHashes {
     pub files: HashMap<PathBuf, String>,
+}
+
+impl Hash for FileHashes {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.files
+            .iter()
+            .sorted_by_key(|(path, _)| *path)
+            .collect_vec()
+            .hash(state);
+    }
 }
 
 impl FileHashes {
