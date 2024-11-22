@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use futures::TryFutureExt;
 use jsonrpsee::{
@@ -35,7 +35,9 @@ use crate::{
 #[derive(Debug, Error, Diagnostic)]
 pub enum InitializeError {
     #[error("failed to setup communication with the build backend, an unexpected io error occurred while communicating with the pixi build backend")]
-    #[diagnostic(help("Ensure that the project manifest contains a valid [build] section."))]
+    #[diagnostic(help(
+        "Ensure that the project manifest contains a valid [build-system] section."
+    ))]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -124,11 +126,7 @@ impl Protocol {
                     .stderr(std::process::Stdio::piped()) // TODO: Capture this?
                     .spawn()?;
 
-                let backend_identifier = tool
-                    .executable()
-                    .file_stem()
-                    .and_then(OsStr::to_str)
-                    .map_or_else(|| "<unknown>".to_string(), ToString::to_string);
+                let backend_identifier = tool.executable().clone();
 
                 // Acquire the stdin/stdout handles.
                 let stdin = process
