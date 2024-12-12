@@ -1,0 +1,13 @@
+---
+source: crates/pixi_manifest/src/toml/manifest.rs
+assertion_line: 433
+expression: "expect_parse_failure(r#\"\n        [workspace]\n        name = \"foo\"\n        channels = []\n        platforms = []\n        preview = [\"pixi-build\"]\n\n        [package]\n\n        [build-system]\n        build-backend = { name = \"foobar\", version = \"*\" }\n        \"#,)"
+snapshot_kind: text
+---
+  × missing field `build`
+   ╭─[pixi.toml:8:9]
+ 7 │ 
+ 8 │         [package]
+   ·         ─────────
+ 9 │ 
+   ╰────

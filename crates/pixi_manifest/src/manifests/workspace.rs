@@ -8,7 +8,7 @@ use crate::{
     environments::Environments,
     feature::{Feature, FeatureName},
     solve_group::SolveGroups,
-    toml::ExternalWorkspaceProperties,
+    toml::{ExternalPackageProperties, ExternalWorkspaceProperties},
     workspace::Workspace,
     TomlError,
 };
@@ -35,7 +35,10 @@ impl WorkspaceManifest {
     pub fn from_toml_str(toml_str: &str) -> Result<Self, TomlError> {
         let manifest = crate::toml::TomlManifest::from_toml_str(toml_str)?;
         Ok(manifest
-            .into_manifests(ExternalWorkspaceProperties::default())?
+            .into_manifests(
+                ExternalWorkspaceProperties::default(),
+                ExternalPackageProperties::default(),
+            )?
             .0)
     }
 

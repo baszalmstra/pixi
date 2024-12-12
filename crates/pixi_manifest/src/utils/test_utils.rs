@@ -1,7 +1,7 @@
 use miette::{GraphicalReportHandler, GraphicalTheme, NamedSource, Report};
 
 use crate::{
-    toml::{ExternalWorkspaceProperties, TomlManifest},
+    toml::{ExternalPackageProperties, ExternalWorkspaceProperties, TomlManifest},
     TomlError,
 };
 
@@ -10,13 +10,19 @@ use crate::{
 #[must_use]
 pub(crate) fn expect_parse_failure(pixi_toml: &str) -> String {
     let parse_error = TomlManifest::from_toml_str(pixi_toml)
-        .and_then(|manifest| manifest.into_manifests(ExternalWorkspaceProperties::default()))
+        .and_then(|manifest| {
+            manifest.into_manifests(
+                ExternalWorkspaceProperties::default(),
+                ExternalPackageProperties::default(),
+            )
+        })
         .expect_err("parsing should fail");
 
     format_parse_error(pixi_toml, parse_error)
 }
 
-/// Format a TOML parse error into a string that can be used to generate snapshots.
+/// Format a TOML parse error into a string that can be used to generate
+/// snapshots.
 pub(crate) fn format_parse_error(source: &str, error: TomlError) -> String {
     // Disable colors in tests
     let mut s = String::new();

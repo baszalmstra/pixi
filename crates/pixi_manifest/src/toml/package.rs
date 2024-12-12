@@ -1,13 +1,18 @@
 use std::path::PathBuf;
 
-use rattler_conda_types::Version;
+use indexmap::IndexMap;
+use rattler_conda_types::{InvalidPackageNameError, PackageName, Version};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use thiserror::Error;
 use url::Url;
 
-use crate::package::Package;
-use crate::toml::workspace::ExternalWorkspaceProperties;
+use crate::{
+    package::Package,
+    toml::{workspace::ExternalWorkspaceProperties, TomlBuildSystem, TomlPackageTarget},
+    utils::{package_map::UniquePackageMap, PixiSpanned},
+    TargetSelector,
+};
 
 /// The TOML representation of the `[workspace]` section in a pixi manifest.
 ///
@@ -15,13 +20,13 @@ use crate::toml::workspace::ExternalWorkspaceProperties;
 /// data model (e.g. `name`, `version`). This is allowed because some of the
 /// fields might be derived from other sections of the TOML.
 #[serde_as]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct TomlPackage {
     // In TOML the workspace name can be empty. It is a required field though, but this is enforced
     // when converting the TOML model to the actual manifest. When using a PyProject we want to use
     // the name from the PyProject file.
-    pub name: Option<String>,
+    pub name: Option<PackageName>,
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub version: Option<Version>,
     pub description: Option<String>,
@@ -32,15 +37,29 @@ pub struct TomlPackage {
     pub homepage: Option<Url>,
     pub repository: Option<Url>,
     pub documentation: Option<Url>,
+
+    pub build: TomlBuildSystem,
+
+    #[serde(default)]
+    pub host_dependencies: Option<PixiSpanned<UniquePackageMap>>,
+
+    #[serde(default)]
+    pub build_dependencies: Option<PixiSpanned<UniquePackageMap>>,
+
+    #[serde(default)]
+    pub run_dependencies: Option<PixiSpanned<UniquePackageMap>>,
+
+    #[serde(default)]
+    pub target: IndexMap<PixiSpanned<TargetSelector>, TomlPackageTarget>,
 }
 
 /// Defines some of the properties that might be defined in other parts of the
 /// manifest but we do require to be set in the package section.
 ///
 /// This can be used to inject these properties.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ExternalPackageProperties {
-    pub name: Option<String>,
+    pub name: Option<PackageName>,
     pub version: Option<Version>,
     pub description: Option<String>,
     pub authors: Option<Vec<String>>,
@@ -52,10 +71,15 @@ pub struct ExternalPackageProperties {
     pub documentation: Option<Url>,
 }
 
-impl From<ExternalWorkspaceProperties> for ExternalPackageProperties {
-    fn from(value: ExternalWorkspaceProperties) -> Self {
-        Self {
-            name: value.name,
+impl TryFrom<ExternalWorkspaceProperties> for ExternalPackageProperties {
+    type Error = InvalidPackageNameError;
+
+    fn try_from(value: ExternalWorkspaceProperties) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: value
+                .name
+                .map(|name| PackageName::try_from(name))
+                .transpose()?,
             version: value.version,
             description: value.description,
             authors: value.authors,
@@ -65,7 +89,7 @@ impl From<ExternalWorkspaceProperties> for ExternalPackageProperties {
             homepage: value.homepage,
             repository: value.repository,
             documentation: value.documentation,
-        }
+        })
     }
 }
 

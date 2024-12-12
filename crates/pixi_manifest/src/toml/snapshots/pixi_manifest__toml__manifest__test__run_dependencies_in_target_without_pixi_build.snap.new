@@ -1,0 +1,13 @@
+---
+source: crates/pixi_manifest/src/toml/manifest.rs
+assertion_line: 498
+expression: "expect_parse_failure(r#\"\n        [workspace]\n        channels = []\n        platforms = []\n\n        [target.win.run-dependencies]\n        \"#,)"
+snapshot_kind: text
+---
+  × unknown field `run-dependencies`, expected one of `dependencies`, `host-dependencies`, `build-dependencies`, `pypi-dependencies`, `activation`, `tasks`
+   ╭─[pixi.toml:6:21]
+ 5 │ 
+ 6 │         [target.win.run-dependencies]
+   ·                     ────────────────
+ 7 │         
+   ╰────

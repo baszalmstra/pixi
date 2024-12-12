@@ -28,10 +28,6 @@ pub struct BuildBackend {
 
     /// The spec for the backend
     pub spec: BinarySpec,
-
-    /// Additional arguments to pass to the build backend. In the manifest these are read from the
-    /// `[build-backend]` section.
-    pub additional_args: Option<serde_value::Value>,
 }
 
 impl BuildSystem {
@@ -48,7 +44,7 @@ mod tests {
     #[test]
     fn deserialize_build() {
         let toml = r#"
-            build-backend = { name = "pixi-build-python", version = "12.*" }
+            backend = { name = "pixi-build-python", version = "12.*" }
             "#;
 
         let build = BuildSystem::from_toml_str(toml).unwrap();

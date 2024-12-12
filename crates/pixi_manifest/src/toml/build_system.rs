@@ -12,11 +12,14 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct TomlBuildSystem {
-    pub build_backend: PixiSpanned<TomlBuildBackend>,
+    /// Information about the build backend to use
+    pub backend: PixiSpanned<TomlBuildBackend>,
 
+    /// The channels to use for the build backend dependencies
     #[serde(default)]
     pub channels: Option<PixiSpanned<Vec<NamedChannelOrUrl>>>,
 
+    /// Any additional dependencies that are required for the build backend
     #[serde(default)]
     pub additional_dependencies: UniquePackageMap,
 }
@@ -38,12 +41,12 @@ impl TomlBuildSystem {
     pub fn into_build_system(self) -> Result<BuildSystem, TomlError> {
         // Parse the build backend and ensure it is a binary spec.
         let build_backend_spec = self
-            .build_backend
+            .backend
             .value
             .spec
             .into_binary_spec()
             .map_err(|e| {
-                TomlError::Generic(e.to_string().into(), self.build_backend.span.clone())
+                TomlError::Generic(e.to_string().into(), self.backend.span.clone())
             })?;
 
         // Convert the additional dependencies and make sure that they are binary.
@@ -80,9 +83,8 @@ impl TomlBuildSystem {
 
         Ok(BuildSystem {
             build_backend: BuildBackend {
-                name: self.build_backend.value.name.value,
+                name: self.backend.value.name.value,
                 spec: build_backend_spec,
-                additional_args: None,
             },
             additional_dependencies,
             channels: self.channels.map(|channels| channels.value),
@@ -109,7 +111,7 @@ mod test {
     fn test_disallow_source() {
         assert_snapshot!(expect_parse_failure(
             r#"
-            build-backend = { name = "foobar", git = "https://github.com/org/repo" }
+            backend = { name = "foobar", git = "https://github.com/org/repo" }
         "#
         ));
     }
@@ -118,7 +120,7 @@ mod test {
     fn test_missing_version_specifier() {
         assert_snapshot!(expect_parse_failure(
             r#"
-            build-backend = { name = "foobar" }
+            backend = { name = "foobar" }
         "#
         ));
     }
@@ -132,7 +134,7 @@ mod test {
     fn test_missing_name() {
         assert_snapshot!(expect_parse_failure(
             r#"
-            build-backend = { version = "12.*" }
+            backend = { version = "12.*" }
         "#
         ));
     }
@@ -141,7 +143,7 @@ mod test {
     fn test_empty_channels() {
         assert_snapshot!(expect_parse_failure(
             r#"
-            build-backend = { name = "foobar", version = "*" }
+            backend = { name = "foobar", version = "*" }
             channels = []
         "#
         ));
@@ -151,7 +153,7 @@ mod test {
     fn test_additional_build_backend_keys() {
         assert_snapshot!(expect_parse_failure(
             r#"
-            build-backend = { name = "foobar", version = "*", foo = "bar" }
+            backend = { name = "foobar", version = "*", foo = "bar" }
         "#
         ));
     }
@@ -160,7 +162,7 @@ mod test {
     fn test_additional_keys() {
         assert_snapshot!(expect_parse_failure(
             r#"
-            build-backend = { name = "foobar", version = "*" }
+            backend = { name = "foobar", version = "*" }
             additional = "key"
         "#
         ));

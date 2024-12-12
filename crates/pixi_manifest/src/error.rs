@@ -58,6 +58,8 @@ pub enum TomlError {
     #[error("Could not convert pep508 to pixi pypi requirement")]
     Conversion(#[from] Box<Pep508ToPyPiRequirementError>),
     #[error(transparent)]
+    InvalidPackageName(#[from] InvalidPackageNameError),
+    #[error(transparent)]
     InvalidNonPackageDependencies(#[from] InvalidNonPackageDependencies),
 }
 
@@ -225,7 +227,7 @@ impl miette::Diagnostic for UnknownFeature {
 /// An error that indicates that some package sections are only valid when the
 /// manifest describes a package instead of a workspace.
 #[derive(Debug, Error, Clone)]
-#[error("build-, host- and run-dependency sections are only valid for packages.")]
+#[error("build- and host-dependency sections must be nested under [package]")]
 pub struct InvalidNonPackageDependencies {
     pub invalid_dependency_sections: Vec<Range<usize>>,
 }
@@ -233,7 +235,7 @@ pub struct InvalidNonPackageDependencies {
 impl Diagnostic for InvalidNonPackageDependencies {
     fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         Some(Box::new(
-            "These sections are only valid when the manifest describes a package instead of a workspace.\nAdd a `[package]` section to the manifest to fix this error or remove the offending sections.",
+            "These sections have been moved under the [package] section.\nAdd a `[package]` section to the manifest to fix this error or remove the offending sections.",
         ))
     }
 

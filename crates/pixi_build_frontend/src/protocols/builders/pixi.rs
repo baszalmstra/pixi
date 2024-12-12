@@ -8,7 +8,6 @@ use miette::Diagnostic;
 use pixi_consts::consts;
 use pixi_manifest::{Manifest, PackageManifest, PrioritizedChannel, WorkspaceManifest};
 use rattler_conda_types::{ChannelConfig, MatchSpec};
-use serde::{de::IntoDeserializer, Deserialize};
 use thiserror::Error;
 use which::Error;
 
@@ -18,7 +17,6 @@ use crate::{
     tool::{IsolatedToolSpec, ToolCacheError, ToolSpec},
     BackendOverride, InProcessBackend, ToolContext,
 };
-// use super::{InitializeError, JsonRPCBuildProtocol};
 
 /// A protocol that uses a pixi manifest to invoke a build backend .
 #[derive(Debug)]
@@ -196,20 +194,9 @@ impl ProtocolBuilder {
             .await
             .map_err(FinishError::Tool)?;
 
-        let configuration = self
-            .package_manifest
-            .build_system
-            .build_backend
-            .additional_args
-            .map_or(serde_json::Value::Null, |value| {
-                let deserializer = value.into_deserializer();
-                serde_json::Value::deserialize(deserializer).unwrap_or(serde_json::Value::Null)
-            });
-
         Ok(JsonRPCBuildProtocol::setup(
             self.source_dir,
             self.manifest_path,
-            configuration,
             build_id,
             self.cache_dir,
             tool,
@@ -224,21 +211,10 @@ impl ProtocolBuilder {
         ipc: InProcessBackend,
         build_id: usize,
     ) -> Result<JsonRPCBuildProtocol, FinishError> {
-        let configuration = self
-            .package_manifest
-            .build_system
-            .build_backend
-            .additional_args
-            .map_or(serde_json::Value::Null, |value| {
-                let deserializer = value.into_deserializer();
-                serde_json::Value::deserialize(deserializer).unwrap_or(serde_json::Value::Null)
-            });
-
         Ok(JsonRPCBuildProtocol::setup_with_transport(
             "<IPC>".to_string(),
             self.source_dir,
             self.manifest_path,
-            configuration,
             build_id,
             self.cache_dir,
             Sender::from(ipc.rpc_out),

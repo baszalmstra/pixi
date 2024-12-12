@@ -23,11 +23,14 @@ use crate::{
     pypi::PyPiPackageName,
     pyproject::{PyProjectManifest, PyProjectToManifestError},
     to_options,
-    toml::{ExternalWorkspaceProperties, TomlDocument, TomlManifest},
+    toml::{
+        ExternalPackageProperties, ExternalWorkspaceProperties, TomlDocument,
+    },
     BuildSystem, DependencyOverwriteBehavior, Environment, EnvironmentName, Feature, FeatureName,
     GetFeatureError, PrioritizedChannel, PypiDependencyLocation, SpecType, TargetSelector, Task,
     TaskName, WorkspaceManifest, WorkspaceTarget,
 };
+use crate::toml::TomlManifest;
 
 #[derive(Debug, Clone)]
 pub enum ManifestKind {
@@ -109,7 +112,10 @@ impl Manifest {
         let (parsed, file_name) = match manifest_kind {
             ManifestKind::Pixi => (
                 TomlManifest::from_toml_str(&contents).and_then(|manifest| {
-                    manifest.into_manifests(ExternalWorkspaceProperties::default())
+                    manifest.into_manifests(
+                        ExternalWorkspaceProperties::default(),
+                        ExternalPackageProperties::default(),
+                    )
                 }),
                 "pixi.toml",
             ),

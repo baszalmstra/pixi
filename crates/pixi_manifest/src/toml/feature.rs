@@ -8,7 +8,7 @@ use serde_with::serde_as;
 
 use crate::{
     pypi::{pypi_options::PypiOptions, PyPiPackageName},
-    toml::{TomlPrioritizedChannel, TomlTarget},
+    toml::{TomlPrioritizedChannel, TomlWorkspaceTarget},
     utils::{package_map::UniquePackageMap, PixiSpanned},
     Activation, Feature, FeatureName, Preview, PyPiRequirement, SystemRequirements, TargetSelector,
     Targets, Task, TaskName, TomlError,
@@ -27,7 +27,7 @@ pub struct TomlFeature {
     #[serde(default)]
     pub system_requirements: SystemRequirements,
     #[serde(default)]
-    pub target: IndexMap<PixiSpanned<TargetSelector>, TomlTarget>,
+    pub target: IndexMap<PixiSpanned<TargetSelector>, TomlWorkspaceTarget>,
     #[serde(default)]
     pub dependencies: Option<PixiSpanned<UniquePackageMap>>,
     #[serde(default)]
@@ -52,20 +52,19 @@ pub struct TomlFeature {
 
 impl TomlFeature {
     pub fn into_feature(self, name: FeatureName, preview: &Preview) -> Result<Feature, TomlError> {
-        let default_target = TomlTarget {
+        let default_target = TomlWorkspaceTarget {
             dependencies: self.dependencies,
             host_dependencies: self.host_dependencies,
             build_dependencies: self.build_dependencies,
-            run_dependencies: None,
             pypi_dependencies: self.pypi_dependencies,
             activation: self.activation,
             tasks: self.tasks,
         }
-        .into_feature_target(preview)?;
+            .into_workspace_target(preview)?;
 
         let mut targets = IndexMap::new();
         for (selector, target) in self.target {
-            let target = target.into_feature_target(preview)?;
+            let target = target.into_workspace_target(preview)?;
             targets.insert(selector, target);
         }
 

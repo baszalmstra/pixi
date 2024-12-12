@@ -17,7 +17,7 @@ use super::{
 use crate::{
     error::DependencyError,
     manifests::PackageManifest,
-    toml::{ExternalWorkspaceProperties, TomlManifest},
+    toml::{ExternalPackageProperties, ExternalWorkspaceProperties, TomlManifest},
     FeatureName,
 };
 
@@ -252,23 +252,22 @@ impl PyProjectManifest {
         // different than we expect, so the conversion is not straightforward we
         // could change these types or we can convert. Let's decide when we make it.
         // etc.
-        let (mut workspace_manifest, package_manifest) =
-            pixi.into_manifests(ExternalWorkspaceProperties {
-                name: project.name,
-                version: project
-                    .version
-                    .and_then(|v| v.to_string().parse().ok())
-                    .or(poetry.version.and_then(|v| v.parse().ok())),
-                description: project.description.or(poetry.description),
-                authors: project.authors.map(contacts_to_authors).or(poetry.authors),
-                license: None,
-                license_file: None,
-                readme: None,
-                homepage: None,
-                repository: None,
-                documentation: None,
-                build_variants: None,
-            })?;
+        let external_workspace_props = ExternalWorkspaceProperties {
+            name: project.name,
+            version: project
+                .version
+                .and_then(|v| v.to_string().parse().ok())
+                .or(poetry.version.and_then(|v| v.parse().ok())),
+            description: project.description.or(poetry.description),
+            authors: project.authors.map(contacts_to_authors).or(poetry.authors),
+            ..ExternalWorkspaceProperties::default()
+        };
+
+        let (mut workspace_manifest, package_manifest) = pixi
+            .into_manifests(
+                external_workspace_props.clone(),
+                ExternalPackageProperties::default(),
+            )?;
 
         // Add python as dependency based on the `project.requires_python` property
         let python_spec = project.requires_python;

@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-use rattler_conda_types::Version;
+use rattler_conda_types::{PackageName, Version};
 use url::Url;
 
 /// Defines the contents of the `[package]` section of the project manifest.
 #[derive(Debug, Clone)]
 pub struct Package {
     /// The name of the project
-    pub name: String,
+    pub name: PackageName,
 
     /// The version of the project
     pub version: Version,

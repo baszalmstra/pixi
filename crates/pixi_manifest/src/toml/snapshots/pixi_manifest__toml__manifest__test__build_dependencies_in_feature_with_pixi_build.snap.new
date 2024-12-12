@@ -1,0 +1,13 @@
+---
+source: crates/pixi_manifest/src/toml/manifest.rs
+assertion_line: 540
+expression: "expect_parse_failure(r#\"\n        [workspace]\n        channels = []\n        platforms = []\n        preview = [\"pixi-build\"]\n\n        [package.build]\n        backend = { name = \"foobar\", version = \"*\" }\n\n        [feature.foobar.build-dependencies]\n        \"#,)"
+snapshot_kind: text
+---
+  × invalid type: string "build", expected a borrowed string
+   ╭─[pixi.toml:7:18]
+ 6 │ 
+ 7 │         [package.build]
+   ·                  ─────
+ 8 │         backend = { name = "foobar", version = "*" }
+   ╰────

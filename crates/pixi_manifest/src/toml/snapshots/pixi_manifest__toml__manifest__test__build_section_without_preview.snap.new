@@ -1,0 +1,14 @@
+---
+source: crates/pixi_manifest/src/toml/manifest.rs
+assertion_line: 388
+expression: "expect_parse_failure(r#\"\n        [workspace]\n        name = \"foo\"\n        channels = []\n        platforms = []\n\n        [build-system]\n        build-backend = { name = \"foobar\", version = \"*\" }\n        \"#,)"
+snapshot_kind: text
+---
+  × unknown field `build-system`, expected one of `project`, `workspace`, `package`, `system-requirements`, `target`, `dependencies`, `host-dependencies`, `build-dependencies`, `pypi-dependencies`,
+  │ `activation`, `tasks`, `feature`, `environments`, `pypi-options`, `$schema`, `tool`
+   ╭─[pixi.toml:7:10]
+ 6 │ 
+ 7 │         [build-system]
+   ·          ────────────
+ 8 │         build-backend = { name = "foobar", version = "*" }
+   ╰────
