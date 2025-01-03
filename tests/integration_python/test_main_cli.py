@@ -570,7 +570,7 @@ cli = ["rich==12"]
 test = ["pytest==6"]
 
 [tool.pixi.project]
-channels = ["conda-forge"]
+channels = ["https://prefix.dev/conda-forge"]
 platforms = {ALL_PLATFORMS}
 
 [tool.pixi.pypi-dependencies]
