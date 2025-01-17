@@ -30,6 +30,7 @@ toml-span = { workspace = true, features = ["serde"] }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+parking_lot = { workspace = true }
 
 # Python specific dependencies, may require patches!
 pyproject-toml = { workspace = true }

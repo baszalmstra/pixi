@@ -1,3 +1,10 @@
+use indexmap::{Equivalent, IndexSet};
+use itertools::Itertools;
+use miette::{miette, IntoDiagnostic, NamedSource, Report, WrapErr};
+use parking_lot::RwLock;
+use pixi_spec::PixiSpec;
+use rattler_conda_types::{PackageName, Platform, Version};
+use std::sync::Arc;
 use std::{
     borrow::Borrow,
     collections::HashMap,
@@ -7,12 +14,6 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-
-use indexmap::{Equivalent, IndexSet};
-use itertools::Itertools;
-use miette::{miette, IntoDiagnostic, NamedSource, Report, WrapErr};
-use pixi_spec::PixiSpec;
-use rattler_conda_types::{PackageName, Platform, Version};
 use toml_edit::{DocumentMut, Value};
 
 use crate::{
@@ -29,9 +30,13 @@ use crate::{
     SystemRequirements, TargetSelector, Task, TaskName, WorkspaceManifest, WorkspaceTarget,
 };
 
+/// The type of the manifest.
 #[derive(Debug, Clone)]
 pub enum ManifestKind {
+    /// A `pixi.toml`
     Pixi,
+
+    /// A `pyproject.toml`
     Pyproject,
 }
 
@@ -46,39 +51,50 @@ impl ManifestKind {
     }
 }
 
-/// Handles the project's manifest file.
+/// A manifest with the document from which it was parsed.
+#[derive(Debug, Clone)]
+pub struct WithDocument<T> {
+    /// The parsed value
+    pub value: T,
+
+    /// The document from which the value was parsed.
+    pub document: Arc<RwLock<ManifestDocument>>,
+}
+
+/// Handles the manifest file(s).
 ///
-/// This struct is responsible for reading, parsing, editing, and saving the
-/// manifest. It encapsulates all logic related to the manifest's TOML format
-/// and structure. The manifest data is represented as a [`WorkspaceManifest`]
-/// struct for easy manipulation.
+/// A manifest describes a workspace and an optional package. If the manifest
+/// that is parsed only contains a `[package]` section than a corresponding
+/// workspace manifest is also searched for.
+///
+/// A manifest can be either a `pixi.toml` or a `pyproject.toml` file.
 #[derive(Debug, Clone)]
 pub struct Manifest {
-    /// The path to the manifest file
-    pub path: PathBuf,
+    /// The workspace manifest.
+    pub workspace: WithDocument<WorkspaceManifest>,
+
+    /// Optionally a package manifest. If the current manifest does not include
+    /// a [`pacakge`] section this will be `None`.
+    pub package: Option<WithDocument<PackageManifest>>,
+}
+
+/// A manifest document that can be edited.
+#[derive(Debug, Clone)]
+pub struct ManifestDocument {
+    /// The path to the manifest file.
+    path: PathBuf,
 
     /// The raw contents of the original manifest file. This field, in
     /// conjunction with [`crate::utils::PixiSpanned`] is used to provide better
     /// error messages.
     ///
     /// Note that if the document is edited, this field will not be updated.
-    pub contents: Option<String>,
+    ///
+    /// If the document is edited, this field will be set to `None`.
+    contents: Option<String>,
 
-    /// Reference to the original toml source
-    /// used for modification
-    pub source: ManifestSource,
-
-    /// The parsed workspace manifest
-    pub workspace: WorkspaceManifest,
-
-    /// Optionally a package manifest
-    pub package: Option<PackageManifest>,
-}
-
-impl Borrow<WorkspaceManifest> for Manifest {
-    fn borrow(&self) -> &WorkspaceManifest {
-        &self.workspace
-    }
+    /// Reference to the original toml source. Used for modification.
+    source: ManifestSource,
 }
 
 impl Manifest {
