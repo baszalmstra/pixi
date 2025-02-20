@@ -96,6 +96,7 @@ impl InputFileKind {
             .map(str::to_ascii_lowercase);
         match ext.as_deref() {
             Some("yaml") => Some(Self::EnvironmentYaml),
+            Some("yml") => Some(Self::EnvironmentYaml),
             Some("txt") => Some(Self::ExplicitFile),
             _ => None,
         }
