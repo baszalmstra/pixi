@@ -1,4 +1,5 @@
 pub mod cli;
+mod activate;
 mod create;
 mod environment_name;
 mod registry;
