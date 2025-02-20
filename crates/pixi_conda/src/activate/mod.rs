@@ -7,13 +7,10 @@ use std::{path::PathBuf, process::Stdio};
 
 use crate::{registry::Registry, EnvironmentName};
 
-/// Run an executable in a conda environment.
+/// Activate a conda environment by launching a shell.
 #[derive(Parser, Debug)]
 #[clap(trailing_var_arg = true, disable_help_flag = true)]
 pub struct Args {
-    #[clap(num_args = 1.., allow_hyphen_values = true, required = true)]
-    args: Vec<String>,
-
     /// Print help
     #[clap(long, short, action = clap::ArgAction::Help)]
     help: Option<bool>,
@@ -75,14 +72,18 @@ pub async fn execute(_config: Config, mut args: Args) -> miette::Result<()> {
     .into_diagnostic()?;
 
     // Spawn the process
-    let executable = args.args.remove(0);
+    // TODO: read this from the $SHELL environment variable, make it also
+    // configurable using a command line option --shell
+    let executable = "shell";
     let mut command = std::process::Command::new(&executable);
 
     // Set the environment variables
     command.envs(activation_variables);
 
-    // Add the arguments
-    command.args(args.args);
+    // Set shell arguments
+    let env_name: String = args.name.unwrap().to_string();
+    let PS1: String = String::new() + "PS1=\"(" + env_name.as_str() + ") ${PS1:-}\"";
+    command.args(["-c", &PS1, "--norc", "--interact"]);
 
     // Inherit stdin, stdout, and stderr
     command
