@@ -30,7 +30,7 @@ pub struct Args {
     prefix: Option<PathBuf>,
 }
 
-pub async fn execute(_config: Config, mut args: Args) -> miette::Result<()> {
+pub async fn execute(_config: Config, args: Args) -> miette::Result<()> {
     // Determine the prefix to use
     let prefix = if let Some(name) = &args.name {
         &Registry::from_env().root().join(name.as_ref())
