@@ -4,6 +4,7 @@ use pixi_config::Config;
 use rattler_conda_types::Platform;
 use rattler_shell::shell::ShellEnum;
 use std::{path::PathBuf, process::Stdio};
+use std::str::FromStr;
 
 use crate::{registry::Registry, EnvironmentName};
 
@@ -11,19 +12,12 @@ use crate::{registry::Registry, EnvironmentName};
 #[derive(Parser, Debug)]
 #[clap(trailing_var_arg = true, disable_help_flag = true)]
 pub struct Args {
+    #[clap(num_args = 1, allow_hyphen_values = true, required = true)]
+    args: Vec<String>,
+
     /// Print help
     #[clap(long, short, action = clap::ArgAction::Help)]
     help: Option<bool>,
-
-    /// Name of environment.
-    #[clap(
-        long,
-        short,
-        help_heading = "Target Environment Specification",
-        conflicts_with = "prefix",
-        required = true
-    )]
-    name: Option<EnvironmentName>,
 
     /// Path to environment location (i.e. prefix).
     #[clap(long, short, help_heading = "Target Environment Specification")]
@@ -31,8 +25,11 @@ pub struct Args {
 }
 
 pub async fn execute(_config: Config, args: Args) -> miette::Result<()> {
+    let name: Option<EnvironmentName> = args.args
+        .first()
+        .and_then(|s| EnvironmentName::from_str(s).ok());
     // Determine the prefix to use
-    let prefix = if let Some(name) = &args.name {
+    let prefix = if let Some(name) = &name {
         &Registry::from_env().root().join(name.as_ref())
     } else if let Some(prefix) = &args.prefix {
         prefix
@@ -42,7 +39,7 @@ pub async fn execute(_config: Config, args: Args) -> miette::Result<()> {
 
     // Make sure it exists
     if !prefix.is_dir() || !prefix.join("conda-meta").is_dir() {
-        let prefix_or_name = if let Some(name) = &args.name {
+        let prefix_or_name = if let Some(name) = &name {
             format!("--name {name}")
         } else if let Some(prefix) = &args.prefix {
             format!("--prefix {}", prefix.display())
@@ -81,7 +78,7 @@ pub async fn execute(_config: Config, args: Args) -> miette::Result<()> {
     command.envs(activation_variables);
 
     // Set shell arguments
-    command.args(["-c", &format!("PS1=\"({}) ${{PS1:-}}\"", args.name.unwrap()), "--norc", "--interact"]);
+    command.args(["-c", &format!("PS1=\"({}) ${{PS1:-}}\"", name.unwrap()), "--norc", "--interact"]);
 
     // Inherit stdin, stdout, and stderr
     command
