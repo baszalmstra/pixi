@@ -81,9 +81,7 @@ pub async fn execute(_config: Config, mut args: Args) -> miette::Result<()> {
     command.envs(activation_variables);
 
     // Set shell arguments
-    let env_name: String = args.name.unwrap().to_string();
-    let PS1: String = String::new() + "PS1=\"(" + env_name.as_str() + ") ${PS1:-}\"";
-    command.args(["-c", &PS1, "--norc", "--interact"]);
+    command.args(["-c", &format!("PS1=\"({}) ${{PS1:-}}\"", args.name.unwrap()), "--norc", "--interact"]);
 
     // Inherit stdin, stdout, and stderr
     command
