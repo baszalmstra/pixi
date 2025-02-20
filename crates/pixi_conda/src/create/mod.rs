@@ -42,7 +42,7 @@ pub struct Args {
 
     /// Read package versions from the given file. Repeated file specifications
     /// can be passed (e.g. --file=file1 --file=file2).
-    #[clap(long,  conflicts_with = "package_spec", num_args = 1.., required = true)]
+    #[clap(long, short, conflicts_with = "package_spec", num_args = 1.., required = true)]
     file: Vec<PathBuf>,
 
     /// Name of environment.
