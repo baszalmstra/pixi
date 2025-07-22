@@ -1,22 +1,24 @@
 use clap::Parser;
 use indexmap::IndexMap;
 use miette::IntoDiagnostic;
+use pixi_config::ConfigCli;
 use pixi_manifest::{FeatureName, SpecType};
 use pixi_spec::{GitSpec, SourceSpec};
 use rattler_conda_types::{MatchSpec, PackageName};
 
-use super::has_specs::HasSpecs;
+use super::{cli_config::LockFileUpdateConfig, has_specs::HasSpecs};
 use crate::{
-    cli::cli_config::{DependencyConfig, PrefixUpdateConfig, ProjectConfig},
-    environment::verify_prefix_location_unchanged,
-    project::{DependencyType, Project},
+    WorkspaceLocator,
+    cli::cli_config::{DependencyConfig, PrefixUpdateConfig, WorkspaceConfig},
+    environment::sanity_check_workspace,
+    workspace::DependencyType,
 };
 
-/// Adds dependencies to the project
+/// Adds dependencies to the workspace
 ///
 /// The dependencies should be defined as MatchSpec for conda package, or a PyPI
 /// requirement for the `--pypi` dependencies. If no specific version is
-/// provided, the latest version compatible with your project will be chosen
+/// provided, the latest version compatible with your workspace will be chosen
 /// automatically or a * will be used.
 ///
 /// Example usage:
@@ -28,11 +30,13 @@ use crate::{
 ///   3.11.3.* at the time of writing.
 ///
 /// Adding multiple dependencies at once is also supported:
+///
 /// - `pixi add python pytest`: This will add both `python` and `pytest` to the
-///   project's dependencies.
+///   workspace's dependencies.
 ///
 /// The `--platform` and `--build/--host` flags make the dependency target
 /// specific.
+///
 /// - `pixi add python --platform linux-64 --platform osx-arm64`: Will add the
 ///   latest version of python for linux-64 and osx-arm64 platforms.
 /// - `pixi add python --build`: Will add the latest version of python for as a
@@ -42,16 +46,20 @@ use crate::{
 ///
 /// The `--pypi` option will add the package as a pypi dependency. This cannot
 /// be mixed with the conda dependencies
-/// - `pixi add --pypi boto3`
-/// - `pixi add --pypi "boto3==version"
 ///
-/// If the project manifest is a `pyproject.toml`, adding a pypi dependency will
+/// - `pixi add --pypi boto3`
+/// - `pixi add --pypi "boto3==version"`
+///
+/// If the workspace manifest is a `pyproject.toml`, adding a pypi dependency will
 /// add it to the native pyproject `project.dependencies` array or to the native
 /// `dependency-groups` table if a feature is specified:
+///
 /// - `pixi add --pypi boto3` will add `boto3` to the `project.dependencies`
 ///   array
 /// - `pixi add --pypi boto3 --feature aws` will add `boto3` to the
 ///   `dependency-groups.aws` array
+/// - `pixi add --pypi --editable 'boto3 @ file://absolute/path/to/boto3'` will add
+///   the local editable `boto3` to the `pypi-dependencies` array
 ///
 /// Note that if `--platform` or `--editable` are specified, the pypi dependency
 /// will be added to the `tool.pixi.pypi-dependencies` table instead as native
@@ -60,16 +68,16 @@ use crate::{
 /// These dependencies will then be read by pixi as if they had been added to
 /// the pixi `pypi-dependencies` tables of the default or of a named feature.
 ///
-/// The versions will be automatically added with a pinning strategy based on semver
-/// or the pinning strategy set in the config. There is a list of packages
-/// that are not following the semver versioning scheme but will use
+/// The versions will be automatically added with a pinning strategy based on
+/// semver or the pinning strategy set in the config. There is a list of
+/// packages that are not following the semver versioning scheme but will use
 /// the minor version by default:
 /// Python, Rust, Julia, GCC, GXX, GFortran, NodeJS, Deno, R, R-Base, Perl
 #[derive(Parser, Debug, Default)]
 #[clap(arg_required_else_help = true, verbatim_doc_comment)]
 pub struct Args {
     #[clap(flatten)]
-    pub project_config: ProjectConfig,
+    pub workspace_config: WorkspaceConfig,
 
     #[clap(flatten)]
     pub dependency_config: DependencyConfig,
@@ -77,28 +85,38 @@ pub struct Args {
     #[clap(flatten)]
     pub prefix_update_config: PrefixUpdateConfig,
 
+    #[clap(flatten)]
+    pub lock_file_update_config: LockFileUpdateConfig,
+
+    #[clap(flatten)]
+    pub config: ConfigCli,
+
     /// Whether the pypi requirement should be editable
     #[arg(long, requires = "pypi")]
     pub editable: bool,
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let (dependency_config, prefix_update_config, project_config) = (
-        &args.dependency_config,
-        &args.prefix_update_config,
-        &args.project_config,
+    let (dependency_config, prefix_update_config, lock_file_update_config, workspace_config) = (
+        args.dependency_config,
+        args.prefix_update_config,
+        args.lock_file_update_config,
+        args.workspace_config,
     );
 
-    let mut project = Project::load_or_else_discover(project_config.manifest_path.as_deref())?
-        .with_cli_config(prefix_update_config.config.clone());
+    let workspace = WorkspaceLocator::for_cli()
+        .with_search_start(workspace_config.workspace_locator_start())
+        .locate()?
+        .with_cli_config(args.config.clone());
 
-    // Sanity check of prefix location
-    verify_prefix_location_unchanged(project.default_environment().dir().as_path()).await?;
+    sanity_check_workspace(&workspace).await?;
+
+    let mut workspace = workspace.modify()?;
 
     // Add the platform if it is not already present
-    project
-        .manifest
-        .add_platforms(dependency_config.platforms.iter(), &FeatureName::Default)?;
+    workspace
+        .manifest()
+        .add_platforms(dependency_config.platforms.iter(), &FeatureName::DEFAULT)?;
 
     let (match_specs, source_specs, pypi_deps) = match dependency_config.dependency_type() {
         DependencyType::CondaDependency(spec_type) => {
@@ -134,17 +152,17 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             let match_specs = IndexMap::default();
             let source_specs = IndexMap::default();
             let pypi_deps = match dependency_config
-                .vcs_pep508_requirements(&project)
+                .vcs_pep508_requirements(workspace.workspace())
                 .transpose()?
             {
                 Some(vcs_reqs) => vcs_reqs
                     .into_iter()
-                    .map(|(name, req)| (name, (req, None)))
+                    .map(|(name, req)| (name, (req, None, None)))
                     .collect(),
                 None => dependency_config
-                    .pypi_deps(&project)?
+                    .pypi_deps(workspace.workspace())?
                     .into_iter()
-                    .map(|(name, req)| (name, (req, None)))
+                    .map(|(name, req)| (name, (req, None, None)))
                     .collect(),
             };
 
@@ -154,31 +172,26 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     // TODO: add dry_run logic to add
     let dry_run = false;
 
-    // Save original manifest
-    let original_manifest_content =
-        fs_err::read_to_string(project.manifest_path()).into_diagnostic()?;
-
-    let update_deps = match project
-        .update_dependencies(
-            match_specs,
-            pypi_deps,
-            source_specs,
-            prefix_update_config,
-            &args.dependency_config.feature,
-            &args.dependency_config.platforms,
-            args.editable,
-            dry_run,
-        )
-        .await
+    let update_deps = match Box::pin(workspace.update_dependencies(
+        match_specs,
+        pypi_deps,
+        source_specs,
+        &prefix_update_config,
+        &lock_file_update_config,
+        &dependency_config.feature,
+        &dependency_config.platforms,
+        args.editable,
+        dry_run,
+    ))
+    .await
     {
         Ok(update_deps) => {
             // Write the updated manifest
-            project.save()?;
+            workspace.save().await.into_diagnostic()?;
             update_deps
         }
         Err(e) => {
-            // Restore original manifest
-            fs_err::write(project.manifest_path(), original_manifest_content).into_diagnostic()?;
+            workspace.revert().await.into_diagnostic()?;
             return Err(e);
         }
     };
@@ -188,6 +201,5 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         dependency_config.display_success("Added", update_deps.implicit_constraints);
     }
 
-    Project::warn_on_discovered_from_env(project_config.manifest_path.as_deref());
     Ok(())
 }

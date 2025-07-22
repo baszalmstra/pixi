@@ -1,5 +1,5 @@
-use crate::{project::Environment, Project};
-use crate::{project::HasProjectRef, task::EnvironmentHash};
+use crate::{Workspace, workspace::Environment};
+use crate::{task::EnvironmentHash, workspace::HasWorkspaceRef};
 use fs_err::tokio as tokio_fs;
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -40,7 +40,7 @@ struct ActivationCache {
     environment_variables: HashMap<String, String>,
 }
 
-impl Project {
+impl Workspace {
     /// Returns environment variables and their values that should be injected when running a command.
     pub(crate) fn get_metadata_env(&self) -> HashMap<String, String> {
         let mut map = HashMap::from_iter([
@@ -48,14 +48,24 @@ impl Project {
                 format!("{PROJECT_PREFIX}ROOT"),
                 self.root().to_string_lossy().into_owned(),
             ),
-            (format!("{PROJECT_PREFIX}NAME"), self.name().to_string()),
+            (
+                format!("{PROJECT_PREFIX}NAME"),
+                self.display_name().to_string(),
+            ),
             (
                 format!("{PROJECT_PREFIX}MANIFEST"),
-                self.manifest_path().to_string_lossy().into_owned(),
+                self.workspace
+                    .provenance
+                    .path
+                    .to_string_lossy()
+                    .into_owned(),
             ),
             (
                 format!("{PROJECT_PREFIX}VERSION"),
-                self.version()
+                self.workspace
+                    .value
+                    .workspace
+                    .version
                     .as_ref()
                     .map_or("NO_VERSION_SPECIFIED".to_string(), |version| {
                         version.to_string()
@@ -82,9 +92,9 @@ impl Environment<'_> {
     pub(crate) fn get_metadata_env(&self) -> IndexMap<String, String> {
         let prompt = match self.name() {
             EnvironmentName::Named(name) => {
-                format!("{}:{}", self.project().name(), name)
+                format!("{}:{}", self.workspace().display_name(), name)
             }
-            EnvironmentName::Default => self.project().name().to_string(),
+            EnvironmentName::Default => self.workspace().display_name().to_string(),
         };
         let mut map = IndexMap::from_iter([
             (format!("{ENV_PREFIX}NAME"), self.name().to_string()),
@@ -116,7 +126,7 @@ pub(crate) fn get_activator<'p>(
     let (additional_activation_scripts, missing_scripts): (Vec<_>, _) =
         additional_activation_scripts
             .into_iter()
-            .map(|script| environment.project().root().join(script))
+            .map(|script| environment.workspace().root().join(script))
             .partition(|full_path| full_path.is_file());
 
     if !missing_scripts.is_empty() {
@@ -130,9 +140,17 @@ pub(crate) fn get_activator<'p>(
     for script in additional_activation_scripts.iter() {
         let extension = script.extension().unwrap_or_default();
         if platform.is_windows() && extension != "bat" {
-            tracing::warn!("The activation script '{}' does not have the correct extension for the platform '{}'. The extension should be '.bat'.", script.display(), platform);
+            tracing::warn!(
+                "The activation script '{}' does not have the correct extension for the platform '{}'. The extension should be '.bat'.",
+                script.display(),
+                platform
+            );
         } else if !platform.is_windows() && extension != "sh" && extension != "bash" {
-            tracing::warn!("The activation script '{}' does not have the correct extension for the platform '{}'. The extension should be '.sh' or '.bash'.", script.display(), platform);
+            tracing::warn!(
+                "The activation script '{}' does not have the correct extension for the platform '{}'. The extension should be '.sh' or '.bash'.",
+                script.display(),
+                platform
+            );
         }
     }
 
@@ -229,7 +247,7 @@ pub async fn run_activation(
     // If the user requested to use the cache and the lockfile is provided, we can try to use the cache.
     if !force_activate && experimental {
         let cache_file = environment
-            .project()
+            .workspace()
             .activation_env_cache_folder()
             .join(environment.activation_cache_name());
         if let Some(lock_file) = lock_file {
@@ -264,6 +282,9 @@ pub async fn run_activation(
     };
 
     let activator_result = match tokio::task::spawn_blocking(move || {
+        // Current environment variables
+        let current_env = std::env::vars().collect::<HashMap<_, _>>();
+
         // Run and cache the activation script
         activator.run_activation(
             ActivationVariables {
@@ -275,6 +296,9 @@ pub async fn run_activation(
 
                 // Prepending environment paths so they get found first.
                 path_modification_behavior,
+
+                // The current environment variables from the shell
+                current_env,
             },
             None,
         )
@@ -292,13 +316,13 @@ pub async fn run_activation(
                     status,
                 } => {
                     return Err(miette::miette!(format!(
-                            "Failed to run activation script for {:?}. Status: {}. Stdout: {}. Stderr: {}. Script: {}",
-                            environment.name(), // Make sure `environment` is accessible here
-                            status,
-                            stdout,
-                            stderr,
-                            script,
-                        )));
+                        "Failed to run activation script for {:?}. Status: {}. Stdout: {}. Stderr: {}. Script: {}",
+                        environment.name(), // Make sure `environment` is accessible here
+                        status,
+                        stdout,
+                        stderr,
+                        script,
+                    )));
                 }
                 _ => {
                     // Handle other activation errors
@@ -330,7 +354,7 @@ pub async fn run_activation(
             };
             let cache = serde_json::to_string(&cache).into_diagnostic()?;
 
-            tokio_fs::create_dir_all(environment.project().activation_env_cache_folder())
+            tokio_fs::create_dir_all(environment.workspace().activation_env_cache_folder())
                 .await
                 .into_diagnostic()?;
             tokio_fs::write(&cache_file, cache)
@@ -353,12 +377,14 @@ pub(crate) fn get_static_environment_variables<'p>(
     environment: &'p Environment<'p>,
 ) -> IndexMap<String, String> {
     // Get environment variables from the pixi project meta data
-    let project_env = environment.project().get_metadata_env();
+    let project_env = environment.workspace().get_metadata_env();
 
     // Add the conda default env variable so that the existing tools know about the env.
     let env_name = match environment.name() {
-        EnvironmentName::Named(name) => format!("{}:{}", environment.project().name(), name),
-        EnvironmentName::Default => environment.project().name().to_string(),
+        EnvironmentName::Named(name) => {
+            format!("{}:{}", environment.workspace().display_name(), name)
+        }
+        EnvironmentName::Default => environment.workspace().display_name().to_string(),
     };
     let mut shell_env = HashMap::new();
     shell_env.insert("CONDA_DEFAULT_ENV".to_string(), env_name);
@@ -480,7 +506,7 @@ mod tests {
         [environments]
         test = ["test"]
         "#;
-        let project = Project::from_str(Path::new("pixi.toml"), multi_env_project).unwrap();
+        let project = Workspace::from_str(Path::new("pixi.toml"), multi_env_project).unwrap();
 
         let default_env = project.default_environment();
         let env = default_env.get_metadata_env();
@@ -507,21 +533,31 @@ mod tests {
         channels = ["conda-forge"]
         platforms = ["linux-64", "osx-64", "win-64"]
         "#;
-        let project = Project::from_str(Path::new("pixi.toml"), project).unwrap();
+        let project = Workspace::from_str(Path::new("pixi.toml"), project).unwrap();
         let env = project.get_metadata_env();
 
-        assert_eq!(env.get("PIXI_PROJECT_NAME").unwrap(), project.name());
+        assert_eq!(
+            env.get("PIXI_PROJECT_NAME").unwrap(),
+            project.display_name()
+        );
         assert_eq!(
             env.get("PIXI_PROJECT_ROOT").unwrap(),
             project.root().to_str().unwrap()
         );
         assert_eq!(
             env.get("PIXI_PROJECT_MANIFEST").unwrap(),
-            project.manifest_path().to_str().unwrap()
+            project.workspace.provenance.path.to_str().unwrap()
         );
         assert_eq!(
             env.get("PIXI_PROJECT_VERSION").unwrap(),
-            &project.version().as_ref().unwrap().to_string()
+            &project
+                .workspace
+                .value
+                .workspace
+                .version
+                .as_ref()
+                .unwrap()
+                .to_string()
         );
     }
 
@@ -538,7 +574,7 @@ mod tests {
         ZZZ = "123test123"
         ZAB = "123test123"
         "#;
-        let project = Project::from_str(Path::new("pixi.toml"), project).unwrap();
+        let project = Workspace::from_str(Path::new("pixi.toml"), project).unwrap();
         let env = get_static_environment_variables(&project.default_environment());
 
         // Make sure the user defined environment variables are at the end.
@@ -586,7 +622,7 @@ mod tests {
         TEST = "ACTIVATION123"
         "#;
         let project =
-            Project::from_str(temp_dir.path().join("pixi.toml").as_path(), project).unwrap();
+            Workspace::from_str(temp_dir.path().join("pixi.toml").as_path(), project).unwrap();
         let default_env = project.default_environment();
 
         // Don't create cache, by not giving it a lockfile
@@ -614,10 +650,12 @@ mod tests {
         .await
         .unwrap();
         assert!(project.activation_env_cache_folder().exists());
-        assert!(project
-            .activation_env_cache_folder()
-            .join(project.default_environment().activation_cache_name())
-            .exists());
+        assert!(
+            project
+                .activation_env_cache_folder()
+                .join(project.default_environment().activation_cache_name())
+                .exists()
+        );
 
         // Verify that the cache is used, by overwriting the cache and checking if that persisted
         let cache_file = project.default_environment().activation_cache_file_path();
@@ -700,7 +738,7 @@ packages:
         TEST = "ACTIVATION123"
         "#;
         let project =
-            Project::from_str(temp_dir.path().join("pixi.toml").as_path(), project).unwrap();
+            Workspace::from_str(temp_dir.path().join("pixi.toml").as_path(), project).unwrap();
         let default_env = project.default_environment();
         let env = run_activation(
             &default_env,
@@ -731,7 +769,7 @@ packages:
         TEST2 = "ACTIVATION1234"
         "#;
         let project =
-            Project::from_str(temp_dir.path().join("pixi.toml").as_path(), project).unwrap();
+            Workspace::from_str(temp_dir.path().join("pixi.toml").as_path(), project).unwrap();
         let default_env = project.default_environment();
         let env = run_activation(
             &default_env,

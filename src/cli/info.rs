@@ -1,6 +1,6 @@
 use std::{fmt::Display, path::PathBuf};
 
-use crate::cli::cli_config::ProjectConfig;
+use crate::cli::cli_config::WorkspaceConfig;
 use chrono::{DateTime, Local};
 use clap::Parser;
 use itertools::Itertools;
@@ -14,22 +14,20 @@ use rattler_conda_types::{GenericVirtualPackage, Platform};
 use rattler_networking::authentication_storage;
 use rattler_virtual_packages::{VirtualPackage, VirtualPackageOverrides};
 use serde::Serialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use tokio::task::spawn_blocking;
 use toml_edit::ser::to_string;
 
 use crate::{
-    global,
+    WorkspaceLocator, global,
     global::{BinDir, EnvRoot},
     task::TaskName,
-    Project,
 };
 use fancy_display::FancyDisplay;
 
 static WIDTH: usize = 19;
 
-/// Information about the system, project and environments for the current
-/// machine.
+/// Information about the system, workspace and environments for the current machine.
 #[derive(Parser, Debug)]
 pub struct Args {
     /// Show cache and environment size
@@ -41,11 +39,11 @@ pub struct Args {
     json: bool,
 
     #[clap(flatten)]
-    pub project_config: ProjectConfig,
+    pub project_config: WorkspaceConfig,
 }
 
 #[derive(Serialize)]
-pub struct ProjectInfo {
+pub struct WorkspaceInfo {
     name: String,
     manifest_path: PathBuf,
     last_updated: Option<String>,
@@ -91,10 +89,9 @@ impl Display for EnvironmentInfo {
                 f,
                 "{:>WIDTH$}: {}",
                 bold.apply_to("Solve group"),
-                solve_group
+                consts::SOLVE_GROUP_STYLE.apply_to(solve_group)
             )?;
         }
-        // TODO: add environment size when PR 674 is merged
         if let Some(size) = &self.environment_size {
             writeln!(f, "{:>WIDTH$}: {}", bold.apply_to("Environment size"), size)?;
         }
@@ -146,6 +143,13 @@ impl Display for EnvironmentInfo {
                 platform_list
             )?;
         }
+
+        writeln!(
+            f,
+            "{:>WIDTH$}: {}",
+            bold.apply_to("Prefix location"),
+            self.prefix.display()
+        )?;
 
         if !self.system_requirements.is_empty() {
             let serialized = to_string(&self.system_requirements)
@@ -229,7 +233,7 @@ pub struct Info {
     cache_size: Option<String>,
     auth_dir: PathBuf,
     global_info: Option<GlobalInfo>,
-    project_info: Option<ProjectInfo>,
+    project_info: Option<WorkspaceInfo>,
     environments_info: Vec<EnvironmentInfo>,
     config_locations: Vec<PathBuf>,
 }
@@ -298,9 +302,9 @@ impl Display for Info {
             write!(f, "{}", gi)?;
         }
 
-        // Project information
+        // Workspace information
         if let Some(pi) = self.project_info.as_ref() {
-            writeln!(f, "\n{}", bold.apply_to("Project\n------------").cyan())?;
+            writeln!(f, "\n{}", bold.apply_to("Workspace\n------------").cyan())?;
             writeln!(f, "{:>WIDTH$}: {}", bold.apply_to("Name"), pi.name)?;
             if let Some(version) = pi.version.clone() {
                 writeln!(f, "{:>WIDTH$}: {}", bold.apply_to("Version"), version)?;
@@ -370,10 +374,13 @@ fn last_updated(path: impl Into<PathBuf>) -> miette::Result<String> {
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref()).ok();
+    let workspace = WorkspaceLocator::for_cli()
+        .with_search_start(args.project_config.workspace_locator_start())
+        .locate()
+        .ok();
 
     let (pixi_folder_size, cache_size) = if args.extended {
-        let env_dir = project.as_ref().map(|p| p.pixi_dir());
+        let env_dir = workspace.as_ref().map(|p| p.pixi_dir());
         let cache_dir = pixi_config::get_cache_dir()?;
         await_in_progress("fetching directory sizes", |_| {
             spawn_blocking(move || {
@@ -388,25 +395,34 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         (None, None)
     };
 
-    let project_info = project.clone().map(|p| ProjectInfo {
-        name: p.name().to_string(),
-        manifest_path: p.manifest_path(),
+    let project_info = workspace.clone().map(|p| WorkspaceInfo {
+        name: p.display_name().to_string(),
+        manifest_path: p.workspace.provenance.path.clone(),
         last_updated: last_updated(p.lock_file_path()).ok(),
         pixi_folder_size,
-        version: p.version().clone().map(|v| v.to_string()),
+        version: p
+            .workspace
+            .value
+            .workspace
+            .version
+            .clone()
+            .map(|v| v.to_string()),
     });
 
-    let environments_info: Vec<EnvironmentInfo> = project
+    let environments_info: Vec<EnvironmentInfo> = workspace
         .as_ref()
-        .map(|p| {
-            p.environments()
+        .map(|ws| {
+            ws.environments()
                 .iter()
                 .map(|env| {
                     let tasks = env
-                        .tasks(None)
+                        .tasks(Some(env.best_platform()))
                         .ok()
                         .map(|t| t.into_keys().cloned().collect())
                         .unwrap_or_default();
+
+                    let environment_size =
+                        args.extended.then(|| dir_size(env.dir()).ok()).flatten();
 
                     EnvironmentInfo {
                         name: env.name().clone(),
@@ -414,7 +430,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                         solve_group: env
                             .solve_group()
                             .map(|solve_group| solve_group.name().to_string()),
-                        environment_size: None,
+                        environment_size,
                         dependencies: env
                             .combined_dependencies(Some(env.best_platform()))
                             .names()
@@ -449,7 +465,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         .map(GenericVirtualPackage::from)
         .collect::<Vec<_>>();
 
-    let config = project
+    let config = workspace
         .map(|p| p.config().clone())
         .unwrap_or_else(pixi_config::Config::load_global);
 
@@ -478,13 +494,9 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&info).into_diagnostic()?);
-
-        Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
-        Ok(())
     } else {
         println!("{}", info);
-
-        Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
-        Ok(())
     }
+
+    Ok(())
 }

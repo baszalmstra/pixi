@@ -1,30 +1,38 @@
-use crate::cli::cli_config::ProjectConfig;
-use crate::project::virtual_packages::verify_current_platform_has_required_virtual_packages;
-use crate::project::Environment;
-use crate::Project;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    error::Error,
+    io::Write,
+    path::PathBuf,
+    str::FromStr,
+};
+
 use clap::Parser;
 use fancy_display::FancyDisplay;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use pixi_manifest::task::{quote, Alias, CmdArgs, Execute, Task, TaskName};
-use pixi_manifest::EnvironmentName;
-use pixi_manifest::FeatureName;
+use miette::IntoDiagnostic;
+use pixi_manifest::{
+    EnvironmentName, FeatureName,
+    task::{Alias, CmdArgs, Dependency, Execute, Task, TaskArg, TaskName, quote},
+};
 use rattler_conda_types::Platform;
 use serde::Serialize;
 use serde_with::serde_as;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::error::Error;
-use std::io;
-use std::path::PathBuf;
-use std::str::FromStr;
+
+use crate::workspace::virtual_packages::verify_current_platform_can_run_environment;
+use crate::{
+    Workspace, WorkspaceLocator,
+    cli::cli_config::WorkspaceConfig,
+    workspace::{Environment, WorkspaceMut},
+};
 
 #[derive(Parser, Debug)]
 pub enum Operation {
-    /// Add a command to the project
+    /// Add a command to the workspace
     #[clap(visible_alias = "a")]
     Add(AddArgs),
 
-    /// Remove a command from the project
+    /// Remove a command from the workspace
     #[clap(visible_alias = "rm")]
     Remove(RemoveArgs),
 
@@ -32,7 +40,7 @@ pub enum Operation {
     #[clap(alias = "@")]
     Alias(AliasArgs),
 
-    /// List all tasks in the project
+    /// List all tasks in the workspace
     #[clap(visible_alias = "ls", alias = "l")]
     List(ListArgs),
 }
@@ -40,14 +48,15 @@ pub enum Operation {
 #[derive(Parser, Debug)]
 #[clap(arg_required_else_help = true)]
 pub struct RemoveArgs {
-    /// Task names to remove
+    /// Task name to remove.
+    #[arg(value_name = "TASK_NAME")]
     pub names: Vec<TaskName>,
 
-    /// The platform for which the task should be removed
+    /// The platform for which the task should be removed.
     #[arg(long, short)]
     pub platform: Option<Platform>,
 
-    /// The feature for which the task should be removed
+    /// The feature for which the task should be removed.
     #[arg(long, short)]
     pub feature: Option<String>,
 }
@@ -55,31 +64,32 @@ pub struct RemoveArgs {
 #[derive(Parser, Debug, Clone)]
 #[clap(arg_required_else_help = true)]
 pub struct AddArgs {
-    /// Task name
+    /// Task name.
     pub name: TaskName,
 
-    /// One or more commands to actually execute
-    #[clap(required = true, num_args = 1..)]
+    /// One or more commands to actually execute.
+    #[clap(required = true, num_args = 1.., id = "COMMAND")]
     pub commands: Vec<String>,
 
-    /// Depends on these other commands
+    /// Depends on these other commands.
     #[clap(long)]
     #[clap(num_args = 1..)]
-    pub depends_on: Option<Vec<TaskName>>,
+    pub depends_on: Option<Vec<Dependency>>,
 
-    /// The platform for which the task should be added
+    /// The platform for which the task should be added.
     #[arg(long, short)]
     pub platform: Option<Platform>,
 
-    /// The feature for which the task should be added
+    /// The feature for which the task should be added.
     #[arg(long, short)]
     pub feature: Option<String>,
 
-    /// The working directory relative to the root of the project
+    /// The working directory relative to the root of the workspace.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 
-    /// The environment variable to set, use --env key=value multiple times for more than one variable
+    /// The environment variable to set, use --env key=value multiple times for
+    /// more than one variable.
     #[arg(long, value_parser = parse_key_val)]
     pub env: Vec<(String, String)>,
 
@@ -87,9 +97,14 @@ pub struct AddArgs {
     #[arg(long)]
     pub description: Option<String>,
 
-    /// Isolate the task from the shell environment, and only use the pixi environment to run the task
+    /// Isolate the task from the shell environment, and only use the pixi
+    /// environment to run the task.
     #[arg(long)]
     pub clean_env: bool,
+
+    /// The arguments to pass to the task
+    #[arg(long = "arg", action = clap::ArgAction::Append)]
+    pub args: Option<Vec<TaskArg>>,
 }
 
 /// Parse a single key-value pair
@@ -110,7 +125,7 @@ pub struct AliasArgs {
 
     /// Depends on these tasks to execute
     #[clap(required = true, num_args = 1..)]
-    pub depends_on: Vec<TaskName>,
+    pub depends_on: Vec<Dependency>,
 
     /// The platform for which the alias should be added
     #[arg(long, short)]
@@ -151,34 +166,35 @@ impl From<AddArgs> for Task {
         let description = value.description;
 
         // Convert the arguments into a single string representation
-        let cmd_args = if value.commands.len() == 1 {
-            value
-                .commands
-                .into_iter()
-                .next()
-                .expect("we just checked that the length is 1")
-        } else {
-            // Simply concatenate all arguments
-            value
-                .commands
-                .into_iter()
-                .map(|arg| quote(&arg).into_owned())
-                .join(" ")
-        };
+        let cmd_args = value
+            .commands
+            .iter()
+            .exactly_one()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|_| {
+                // Simply concatenate all arguments
+                value
+                    .commands
+                    .iter()
+                    .map(|arg| quote(arg).into_owned())
+                    .join(" ")
+            });
 
-        // Depending on whether the task has a command, and depends_on or not we create a plain or
-        // complex, or alias command.
+        // Depending on whether the task has a command, and depends_on or not we create
+        // a plain or complex, or alias command.
         if cmd_args.trim().is_empty() && !depends_on.is_empty() {
             Self::Alias(Alias {
                 depends_on,
                 description,
+                args: value.args,
             })
         } else if depends_on.is_empty()
             && value.cwd.is_none()
             && value.env.is_empty()
             && description.is_none()
+            && value.args.is_none()
         {
-            Self::Plain(cmd_args)
+            Self::Plain(cmd_args.into())
         } else {
             let clean_env = value.clean_env;
             let cwd = value.cwd;
@@ -191,9 +207,10 @@ impl From<AddArgs> for Task {
                 }
                 Some(env)
             };
+            let args = value.args;
 
-            Self::Execute(Execute {
-                cmd: CmdArgs::Single(cmd_args),
+            Self::Execute(Box::new(Execute {
+                cmd: CmdArgs::Single(cmd_args.into()),
                 depends_on,
                 inputs: None,
                 outputs: None,
@@ -201,7 +218,8 @@ impl From<AddArgs> for Task {
                 env,
                 description,
                 clean_env,
-            })
+                args,
+            }))
         }
     }
 }
@@ -211,11 +229,12 @@ impl From<AliasArgs> for Task {
         Self::Alias(Alias {
             depends_on: value.depends_on,
             description: value.description,
+            args: None,
         })
     }
 }
 
-/// Interact with tasks in the project
+/// Interact with tasks in the workspace
 #[derive(Parser, Debug)]
 #[clap(trailing_var_arg = true, arg_required_else_help = true)]
 pub struct Args {
@@ -224,7 +243,7 @@ pub struct Args {
     pub operation: Operation,
 
     #[clap(flatten)]
-    pub project_config: ProjectConfig,
+    pub workspace_config: WorkspaceConfig,
 }
 
 fn print_heading(value: &str) {
@@ -232,10 +251,12 @@ fn print_heading(value: &str) {
     eprintln!("{}\n{:-<2$}", bold.apply_to(value), "", value.len(),);
 }
 
-fn list_tasks(
-    task_map: HashMap<Environment, HashMap<TaskName, Task>>,
+/// Create a human-readable representation of a list of tasks.
+/// Using a tabwriter for described tasks.
+fn print_tasks(
+    task_map: HashMap<Environment, HashMap<TaskName, &Task>>,
     summary: bool,
-) -> io::Result<()> {
+) -> Result<(), std::io::Error> {
     if summary {
         print_heading("Tasks per environment:");
         for (env, tasks) in task_map {
@@ -258,11 +279,7 @@ fn list_tasks(
             if let Some(description) = task.description() {
                 formatted_descriptions.insert(
                     taskname.clone(),
-                    format!(
-                        " - {:<15} {}",
-                        taskname.fancy_display(),
-                        console::style(description).italic()
-                    ),
+                    format!("{}", console::style(description).italic()),
                 );
             }
         });
@@ -272,191 +289,210 @@ fn list_tasks(
     let formatted_tasks: String = all_tasks.iter().map(|name| name.fancy_display()).join(", ");
     eprintln!("{}", formatted_tasks);
 
-    let formatted_descriptions: String = formatted_descriptions.values().join("\n");
-    eprintln!("\n{}", formatted_descriptions);
+    let mut writer = tabwriter::TabWriter::new(std::io::stdout());
+    let header_style = console::Style::new().bold().cyan();
+    let header = format!(
+        "{}\t{}",
+        header_style.apply_to("Task"),
+        header_style.apply_to("Description"),
+    );
+    writeln!(writer, "{}", &header)?;
+    for (taskname, row) in formatted_descriptions {
+        writeln!(writer, "{}\t{}", taskname.fancy_display(), row)?;
+    }
 
-    Ok(())
+    writer.flush()
 }
 
-pub fn execute(args: Args) -> miette::Result<()> {
-    let mut project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())?;
+pub async fn execute(args: Args) -> miette::Result<()> {
+    let workspace = WorkspaceLocator::for_cli()
+        .with_search_start(args.workspace_config.workspace_locator_start())
+        .locate()?;
     match args.operation {
-        Operation::Add(args) => {
-            let name = &args.name;
-            let task: Task = args.clone().into();
-            let feature = args
-                .feature
-                .map_or(FeatureName::Default, FeatureName::Named);
-            project
-                .manifest
-                .add_task(name.clone(), task.clone(), args.platform, &feature)?;
-            project.save()?;
-            eprintln!(
-                "{}Added task `{}`: {}",
-                console::style(console::Emoji("✔ ", "+")).green(),
-                name.fancy_display().bold(),
-                task,
-            );
-        }
-        Operation::Remove(args) => {
-            let mut to_remove = Vec::new();
-            let feature = args
-                .feature
-                .map_or(FeatureName::Default, FeatureName::Named);
-            for name in args.names.iter() {
-                if let Some(platform) = args.platform {
-                    if !project
-                        .manifest
-                        .tasks(Some(platform), &feature)?
-                        .contains_key(name)
-                    {
-                        eprintln!(
-                            "{}Task '{}' does not exist on {}",
-                            console::style(console::Emoji("❌ ", "X")).red(),
-                            name.fancy_display().bold(),
-                            console::style(platform.as_str()).bold(),
-                        );
-                        continue;
+        Operation::Add(args) => add_task(workspace.modify()?, args).await,
+        Operation::Remove(args) => remove_tasks(workspace.modify()?, args).await,
+        Operation::Alias(args) => alias_task(workspace.modify()?, args).await,
+        Operation::List(args) => list_tasks(workspace, args).await,
+    }
+}
+
+async fn list_tasks(workspace: Workspace, args: ListArgs) -> miette::Result<()> {
+    if args.json {
+        print_tasks_json(&workspace);
+        return Ok(());
+    }
+
+    let explicit_environment = args
+        .environment
+        .map(|n| EnvironmentName::from_str(n.as_str()))
+        .transpose()?
+        .map(|n| {
+            workspace
+                .environment(&n)
+                .ok_or_else(|| miette::miette!("unknown environment '{n}'"))
+        })
+        .transpose()?;
+
+    let lockfile = workspace.load_lock_file().await.ok();
+
+    let env_task_map: HashMap<Environment, HashSet<TaskName>> =
+        if let Some(explicit_environment) = explicit_environment {
+            HashMap::from([(
+                explicit_environment.clone(),
+                explicit_environment.get_filtered_tasks(),
+            )])
+        } else {
+            workspace
+                .environments()
+                .iter()
+                .filter_map(|env| {
+                    if verify_current_platform_can_run_environment(env, lockfile.as_ref()).is_ok() {
+                        Some((env.clone(), env.get_filtered_tasks()))
+                    } else {
+                        None
                     }
-                } else if !project.manifest.tasks(None, &feature)?.contains_key(name) {
-                    eprintln!(
-                        "{}Task `{}` does not exist for the `{}` feature",
-                        console::style(console::Emoji("❌ ", "X")).red(),
-                        name.fancy_display().bold(),
-                        console::style(&feature).bold(),
-                    );
-                    continue;
-                }
-
-                // Check if task has dependencies
-                // TODO: Make this properly work by inspecting which actual tasks depend on the task
-                //  we just removed taking into account environments and features.
-                // let depends_on = project.task_names_depending_on(name);
-                // if !depends_on.is_empty() && !args.names.contains(name) {
-                //     eprintln!(
-                //         "{}: {}",
-                //         console::style("Warning, the following task/s depend on this task")
-                //             .yellow(),
-                //         console::style(depends_on.iter().to_owned().join(", ")).bold()
-                //     );
-                //     eprintln!(
-                //         "{}",
-                //         console::style("Be sure to modify these after the removal\n").yellow()
-                //     );
-                // }
-
-                // Safe to remove
-                to_remove.push((name, args.platform));
-            }
-
-            for (name, platform) in to_remove {
-                project
-                    .manifest
-                    .remove_task(name.clone(), platform, &feature)?;
-                project.save()?;
-                eprintln!(
-                    "{}Removed task `{}` ",
-                    console::style(console::Emoji("✔ ", "+")).green(),
-                    name.fancy_display().bold(),
-                );
-            }
-        }
-        Operation::Alias(args) => {
-            let name = &args.alias;
-            let task: Task = args.clone().into();
-            project.manifest.add_task(
-                name.clone(),
-                task.clone(),
-                args.platform,
-                &FeatureName::Default,
-            )?;
-            project.save()?;
-            eprintln!(
-                "{} Added alias `{}`: {}",
-                console::style("@").blue(),
-                name.fancy_display().bold(),
-                task,
-            );
-        }
-        Operation::List(args) => {
-            if args.json {
-                print_tasks_json(&project);
-                return Ok(());
-            }
-
-            let explicit_environment = args
-                .environment
-                .map(|n| EnvironmentName::from_str(n.as_str()))
-                .transpose()?
-                .map(|n| {
-                    project
-                        .environment(&n)
-                        .ok_or_else(|| miette::miette!("unknown environment '{n}'"))
                 })
-                .transpose()?;
+                .collect()
+        };
 
-            let env_task_map: HashMap<Environment, HashSet<TaskName>> =
-                if let Some(explicit_environment) = explicit_environment {
-                    HashMap::from([(
-                        explicit_environment.clone(),
-                        explicit_environment.get_filtered_tasks(),
-                    )])
-                } else {
-                    project
-                        .environments()
-                        .iter()
-                        .filter_map(|env| {
-                            if verify_current_platform_has_required_virtual_packages(env).is_ok() {
-                                Some((env.clone(), env.get_filtered_tasks()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
+    let available_tasks: HashSet<TaskName> = env_task_map.values().flatten().cloned().collect();
 
-            let available_tasks: HashSet<TaskName> =
-                env_task_map.values().flatten().cloned().collect();
+    if available_tasks.is_empty() {
+        eprintln!("No tasks found",);
+        return Ok(());
+    }
 
-            if available_tasks.is_empty() {
-                eprintln!("No tasks found",);
-                return Ok(());
-            }
+    if args.machine_readable {
+        let unformatted: String = available_tasks
+            .iter()
+            .sorted()
+            .map(|name| name.as_str())
+            .join(" ");
+        println!("{}", unformatted);
+        return Ok(());
+    }
 
-            if args.machine_readable {
-                let unformatted: String = available_tasks
-                    .iter()
-                    .sorted()
-                    .map(|name| name.as_str())
-                    .join(" ");
-                println!("{}", unformatted);
-                return Ok(());
-            }
-
-            let tasks_per_env = env_task_map
+    let tasks_per_env = env_task_map
+        .into_iter()
+        .map(|(env, task_names)| {
+            let task_map = task_names
                 .into_iter()
-                .map(|(env, task_names)| {
-                    let tasks: HashMap<TaskName, Task> = task_names
-                        .into_iter()
-                        .filter_map(|task_name| {
-                            env.task(&task_name, Some(env.best_platform()))
-                                .ok()
-                                .map(|task| (task_name, task.clone()))
-                        })
-                        .collect();
-                    (env, tasks)
+                .flat_map(|task_name| {
+                    env.task(&task_name, Some(env.best_platform()))
+                        .ok()
+                        .map(|task| (task_name, task))
                 })
                 .collect();
+            (env, task_map)
+        })
+        .collect();
 
-            list_tasks(tasks_per_env, args.summary).expect("io error when printing tasks");
-        }
-    };
-
-    Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
+    print_tasks(tasks_per_env, args.summary).into_diagnostic()?;
     Ok(())
 }
 
-fn print_tasks_json(project: &Project) {
+async fn alias_task(mut workspace: WorkspaceMut, args: AliasArgs) -> miette::Result<()> {
+    let name = &args.alias;
+    let task: Task = args.clone().into();
+    workspace.manifest().add_task(
+        name.clone(),
+        task.clone(),
+        args.platform,
+        &FeatureName::DEFAULT,
+    )?;
+    workspace.save().await.into_diagnostic()?;
+    eprintln!(
+        "{} Added alias `{}`: {}",
+        console::style("@").blue(),
+        name.fancy_display().bold(),
+        task,
+    );
+    Ok(())
+}
+
+async fn remove_tasks(mut workspace: WorkspaceMut, args: RemoveArgs) -> miette::Result<()> {
+    let mut to_remove = Vec::new();
+    let feature = args
+        .feature
+        .map_or_else(FeatureName::default, FeatureName::from);
+    for name in args.names.iter() {
+        if let Some(platform) = args.platform {
+            if !workspace
+                .workspace()
+                .workspace
+                .value
+                .tasks(Some(platform), &feature)?
+                .contains_key(name)
+            {
+                eprintln!(
+                    "{}Task '{}' does not exist on {}",
+                    console::style(console::Emoji("❌ ", "X")).red(),
+                    name.fancy_display().bold(),
+                    console::style(platform.as_str()).bold(),
+                );
+                continue;
+            }
+        } else if !workspace
+            .workspace()
+            .workspace
+            .value
+            .tasks(None, &feature)?
+            .contains_key(name)
+        {
+            eprintln!(
+                "{}Task `{}` does not exist for the `{}` feature",
+                console::style(console::Emoji("❌ ", "X")).red(),
+                name.fancy_display().bold(),
+                console::style(&feature).bold(),
+            );
+            continue;
+        }
+
+        // Safe to remove
+        to_remove.push((name, args.platform));
+    }
+
+    let mut removed = Vec::with_capacity(to_remove.len());
+    for (name, platform) in to_remove {
+        workspace
+            .manifest()
+            .remove_task(name.clone(), platform, &feature)?;
+        removed.push(name);
+    }
+
+    workspace.save().await.into_diagnostic()?;
+
+    for name in removed {
+        eprintln!(
+            "{}Removed task `{}` ",
+            console::style(console::Emoji("✔ ", "+")).green(),
+            name.fancy_display().bold(),
+        );
+    }
+
+    Ok(())
+}
+
+async fn add_task(mut workspace: WorkspaceMut, args: AddArgs) -> miette::Result<()> {
+    let name = &args.name;
+    let task: Task = args.clone().into();
+    let feature = args
+        .feature
+        .map_or_else(FeatureName::default, FeatureName::from);
+    workspace
+        .manifest()
+        .add_task(name.clone(), task.clone(), args.platform, &feature)?;
+    workspace.save().await.into_diagnostic()?;
+    eprintln!(
+        "{}Added task `{}`: {}",
+        console::style(console::Emoji("✔ ", "+")).green(),
+        name.fancy_display().bold(),
+        task,
+    );
+    Ok(())
+}
+
+fn print_tasks_json(project: &Workspace) {
     let env_feature_task_map: Vec<EnvTasks> = build_env_feature_task_map(project);
 
     let json_string =
@@ -464,17 +500,12 @@ fn print_tasks_json(project: &Project) {
     println!("{}", json_string);
 }
 
-fn build_env_feature_task_map(project: &Project) -> Vec<EnvTasks> {
+fn build_env_feature_task_map(project: &Workspace) -> Vec<EnvTasks> {
     project
         .environments()
         .iter()
         .sorted_by_key(|env| env.name().to_string())
-        .filter_map(|env: &Environment<'_>| {
-            if verify_current_platform_has_required_virtual_packages(env).is_err() {
-                return None;
-            }
-            Some(EnvTasks::from(env))
-        })
+        .map(EnvTasks::from)
         .collect()
 }
 
@@ -533,7 +564,8 @@ impl From<(&FeatureName, &HashMap<&TaskName, &Task>)> for SerializableFeature {
 pub struct TaskInfo {
     cmd: Option<String>,
     description: Option<String>,
-    depends_on: Vec<TaskName>,
+    depends_on: Vec<Dependency>,
+    args: Option<Vec<TaskArg>>,
     cwd: Option<PathBuf>,
     env: Option<IndexMap<String, String>>,
     clean_env: bool,
@@ -544,18 +576,28 @@ pub struct TaskInfo {
 impl From<&Task> for TaskInfo {
     fn from(task: &Task) -> Self {
         TaskInfo {
-            cmd: task.as_single_command().map(|cmd| cmd.to_string()),
+            cmd: task
+                .as_single_command_no_render()
+                .ok()
+                .and_then(|cmd| cmd.map(|c| c.to_string())),
             description: task.description().map(|desc| desc.to_string()),
             depends_on: task.depends_on().to_vec(),
+            args: task.args().map(|args| args.to_vec()),
             cwd: task.working_directory().map(PathBuf::from),
             env: task.env().cloned(),
             clean_env: task.clean_env(),
-            inputs: task
-                .inputs()
-                .map(|inputs| inputs.iter().map(String::from).collect()),
-            outputs: task
-                .outputs()
-                .map(|outputs| outputs.iter().map(String::from).collect()),
+            inputs: task.inputs().map(|inputs| {
+                inputs
+                    .iter()
+                    .map(|input| input.source().to_string())
+                    .collect()
+            }),
+            outputs: task.outputs().map(|outputs| {
+                outputs
+                    .iter()
+                    .map(|output| output.source().to_string())
+                    .collect()
+            }),
         }
     }
 }

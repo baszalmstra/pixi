@@ -3,23 +3,23 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use pixi_spec::PixiSpec;
 use pixi_toml::{TomlHashMap, TomlIndexMap};
-use toml_span::{de_helpers::TableHelper, DeserError, Value};
+use toml_span::{DeserError, Value, de_helpers::TableHelper};
 
 use crate::{
+    Activation, KnownPreviewFeature, SpecType, TargetSelector, Task, TaskName, TomlError, Warning,
+    WithWarnings, WorkspaceTarget,
     error::GenericError,
-    pypi::PyPiPackageName,
-    toml::{preview::TomlPreview, task::TomlTask, warning::WithWarnings, Warning},
-    utils::{package_map::UniquePackageMap, PixiSpanned},
-    Activation, KnownPreviewFeature, PyPiRequirement, SpecType, TargetSelector, Task, TaskName,
-    TomlError, WorkspaceTarget,
+    toml::{preview::TomlPreview, task::TomlTask},
+    utils::{PixiSpanned, package_map::UniquePackageMap},
 };
+use pixi_pypi_spec::{PixiPypiSpec, PypiPackageName};
 
 #[derive(Debug, Default)]
 pub struct TomlTarget {
     pub dependencies: Option<PixiSpanned<UniquePackageMap>>,
     pub host_dependencies: Option<PixiSpanned<UniquePackageMap>>,
     pub build_dependencies: Option<PixiSpanned<UniquePackageMap>>,
-    pub pypi_dependencies: Option<IndexMap<PyPiPackageName, PyPiRequirement>>,
+    pub pypi_dependencies: Option<IndexMap<PypiPackageName, PixiPypiSpec>>,
 
     /// Additional information to activate an environment.
     pub activation: Option<Activation>,
@@ -69,11 +69,14 @@ impl TomlTarget {
 
         Ok(WithWarnings {
             value: WorkspaceTarget {
-                dependencies: combine_target_dependencies([
-                    (SpecType::Run, self.dependencies),
-                    (SpecType::Host, self.host_dependencies),
-                    (SpecType::Build, self.build_dependencies),
-                ]),
+                dependencies: combine_target_dependencies(
+                    [
+                        (SpecType::Run, self.dependencies),
+                        (SpecType::Host, self.host_dependencies),
+                        (SpecType::Build, self.build_dependencies),
+                    ],
+                    pixi_build_enabled,
+                )?,
                 pypi_dependencies: self.pypi_dependencies,
                 activation: self.activation,
                 tasks: self.tasks,
@@ -86,9 +89,16 @@ impl TomlTarget {
 /// Combines different target dependencies into a single map.
 pub(super) fn combine_target_dependencies(
     iter: impl IntoIterator<Item = (SpecType, Option<PixiSpanned<UniquePackageMap>>)>,
-) -> HashMap<SpecType, IndexMap<rattler_conda_types::PackageName, PixiSpec>> {
+    is_pixi_build_enabled: bool,
+) -> Result<HashMap<SpecType, IndexMap<rattler_conda_types::PackageName, PixiSpec>>, TomlError> {
     iter.into_iter()
-        .filter_map(|(ty, deps)| deps.map(|deps| (ty, deps.value.into())))
+        .filter_map(|(ty, deps)| {
+            deps.map(|deps| {
+                deps.value
+                    .into_inner(is_pixi_build_enabled)
+                    .map(|deps| (ty, deps))
+            })
+        })
         .collect()
 }
 

@@ -1,19 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
+use super::{verify_environment_satisfiability, verify_platform_satisfiability};
+use crate::{
+    Workspace,
+    lock_file::satisfiability::{EnvironmentUnsat, verify_solve_group_satisfiability},
+    workspace::{Environment, SolveGroup},
+};
 use fancy_display::FancyDisplay;
 use itertools::Itertools;
 use pixi_consts::consts;
+use pixi_glob::GlobHashCache;
 use pixi_manifest::FeaturesExt;
 use rattler_conda_types::Platform;
 use rattler_lock::{LockFile, LockedPackageRef};
-
-use super::{verify_environment_satisfiability, verify_platform_satisfiability};
-use crate::{
-    build::GlobHashCache,
-    lock_file::satisfiability::EnvironmentUnsat,
-    project::{Environment, SolveGroup},
-    Project,
-};
 
 /// A struct that contains information about specific outdated environments.
 ///
@@ -61,8 +60,8 @@ impl<'p> DisregardLockedContent<'p> {
 impl<'p> OutdatedEnvironments<'p> {
     /// Constructs a new instance of this struct by examining the project and
     /// lock-file and finding any mismatches.
-    pub(crate) async fn from_project_and_lock_file(
-        project: &'p Project,
+    pub(crate) async fn from_workspace_and_lock_file(
+        workspace: &'p Workspace,
         lock_file: &LockFile,
         glob_hash_cache: GlobHashCache,
     ) -> Self {
@@ -71,7 +70,7 @@ impl<'p> OutdatedEnvironments<'p> {
             mut outdated_conda,
             mut outdated_pypi,
             disregard_locked_content,
-        } = find_unsatisfiable_targets(project, lock_file, glob_hash_cache).await;
+        } = find_unsatisfiable_targets(workspace, lock_file, glob_hash_cache).await;
 
         // Extend the outdated targets to include the solve groups
         let (mut conda_solve_groups_out_of_date, mut pypi_solve_groups_out_of_date) =
@@ -80,7 +79,7 @@ impl<'p> OutdatedEnvironments<'p> {
         // Find all the solve groups that have inconsistent dependencies between
         // environments.
         find_inconsistent_solve_groups(
-            project,
+            workspace,
             lock_file,
             &outdated_conda,
             &mut conda_solve_groups_out_of_date,
@@ -139,10 +138,11 @@ struct UnsatisfiableTargets<'p> {
 /// Find all targets (combination of environment and platform) who's
 /// requirements in the `project` are not satisfied by the `lock_file`.
 async fn find_unsatisfiable_targets<'p>(
-    project: &'p Project,
+    project: &'p Workspace,
     lock_file: &LockFile,
     glob_hash_cache: GlobHashCache,
 ) -> UnsatisfiableTargets<'p> {
+    let mut verified_environments = HashMap::new();
     let mut unsatisfiable_targets = UnsatisfiableTargets::default();
     for environment in project.environments() {
         let platforms = environment.platforms();
@@ -178,7 +178,8 @@ async fn find_unsatisfiable_targets<'p>(
 
             match unsat {
                 EnvironmentUnsat::AdditionalPlatformsInLockFile(platforms) => {
-                    // If the there are additional platforms in the lock file, then we have to remove them
+                    // If there are additional platforms in the lock file, then we have to
+                    // remove them
                     for platform in platforms {
                         unsatisfiable_targets
                             .outdated_conda
@@ -187,8 +188,12 @@ async fn find_unsatisfiable_targets<'p>(
                             .insert(platform);
                     }
                 }
-                EnvironmentUnsat::ChannelsMismatch | EnvironmentUnsat::InvalidChannel(_) => {
-                    // If the channels mismatched we cannot trust any of the locked content.
+                EnvironmentUnsat::ChannelsMismatch
+                | EnvironmentUnsat::InvalidChannel(_)
+                | EnvironmentUnsat::ChannelPriorityMismatch { .. }
+                | EnvironmentUnsat::SolveStrategyMismatch { .. }
+                | EnvironmentUnsat::ExcludeNewerMismatch(..) => {
+                    // We cannot trust any of the locked content.
                     unsatisfiable_targets
                         .disregard_locked_content
                         .conda
@@ -230,7 +235,9 @@ async fn find_unsatisfiable_targets<'p>(
             )
             .await
             {
-                Ok(_) => {}
+                Ok(verified_env) => {
+                    verified_environments.insert((environment.clone(), platform), verified_env);
+                }
                 Err(unsat) if unsat.is_pypi_only() => {
                     tracing::info!(
                         "the pypi dependencies of environment '{0}' for platform {platform} are out of date because {unsat}",
@@ -258,6 +265,57 @@ async fn find_unsatisfiable_targets<'p>(
             }
         }
     }
+
+    // Verify grouped environments
+    for solve_group in project.solve_groups() {
+        'platform: for platform in solve_group.platforms() {
+            let mut envs = Vec::with_capacity(solve_group.environments().len());
+            for env in solve_group.environments() {
+                if let Some(verified_env) = verified_environments.remove(&(env, platform)) {
+                    envs.push(verified_env);
+                } else {
+                    // If the environment is not verified, the solve group will already be outdated.
+                    continue 'platform;
+                }
+            }
+
+            let Err(unsat) = verify_solve_group_satisfiability(envs) else {
+                continue;
+            };
+
+            tracing::info!(
+                "the dependencies of solve group '{0}' for platform {platform} are out of date because {unsat}",
+                solve_group.name(),
+            );
+
+            for env in solve_group.environments() {
+                unsatisfiable_targets
+                    .outdated_conda
+                    .entry(env.clone())
+                    .or_default()
+                    .insert(platform);
+            }
+        }
+    }
+
+    // Verify individual environments as if they are solve-groups
+    for ((individual_env, platform), verified_env) in verified_environments {
+        let Err(unsat) = verify_solve_group_satisfiability([verified_env]) else {
+            continue;
+        };
+
+        tracing::info!(
+            "the dependencies of environment '{0}' for platform {platform} are out of date because {unsat}",
+            individual_env.name().fancy_display(),
+        );
+
+        unsatisfiable_targets
+            .outdated_conda
+            .entry(individual_env.clone())
+            .or_default()
+            .insert(platform);
+    }
+
     unsatisfiable_targets
 }
 
@@ -313,7 +371,7 @@ fn map_outdated_targets_to_solve_groups<'p>(
 /// its environments are the same. For each package name, only one candidate is
 /// allowed.
 fn find_inconsistent_solve_groups<'p>(
-    project: &'p Project,
+    project: &'p Workspace,
     lock_file: &LockFile,
     outdated_conda: &HashMap<Environment<'p>, HashSet<Platform>>,
     conda_solve_groups_out_of_date: &mut HashMap<SolveGroup<'p>, HashSet<Platform>>,
@@ -398,9 +456,11 @@ fn find_inconsistent_solve_groups<'p>(
 
         // If there is a mismatch there is a mismatch for the entire group
         if conda_package_mismatch {
-            tracing::info!("the locked conda packages in solve group {} are not consistent for all environments for platform {}",
-                        consts::SOLVE_GROUP_STYLE.apply_to(solve_group.name()),
-                        consts::PLATFORM_STYLE.apply_to(platform));
+            tracing::info!(
+                "the locked conda packages in solve group {} are not consistent for all environments for platform {}",
+                consts::SOLVE_GROUP_STYLE.apply_to(solve_group.name()),
+                consts::PLATFORM_STYLE.apply_to(platform)
+            );
             conda_solve_groups_out_of_date
                 .entry(solve_group.clone())
                 .or_default()
@@ -408,9 +468,11 @@ fn find_inconsistent_solve_groups<'p>(
         }
 
         if pypi_package_mismatch && !conda_package_mismatch {
-            tracing::info!("the locked pypi packages in solve group {} are not consistent for all environments for platform {}",
-                        consts::SOLVE_GROUP_STYLE.apply_to(solve_group.name()),
-                        consts::PLATFORM_STYLE.apply_to(platform));
+            tracing::info!(
+                "the locked pypi packages in solve group {} are not consistent for all environments for platform {}",
+                consts::SOLVE_GROUP_STYLE.apply_to(solve_group.name()),
+                consts::PLATFORM_STYLE.apply_to(platform)
+            );
             pypi_solve_groups_out_of_date
                 .entry(solve_group.clone())
                 .or_default()

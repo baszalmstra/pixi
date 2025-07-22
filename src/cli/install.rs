@@ -1,20 +1,41 @@
-use crate::cli::cli_config::ProjectConfig;
-use crate::environment::get_update_lock_file_and_prefix;
-use crate::lock_file::UpdateMode;
-use crate::{Project, UpdateLockFileOptions};
 use clap::Parser;
 use fancy_display::FancyDisplay;
 use itertools::Itertools;
 use pixi_config::ConfigCli;
 
-/// Install all dependencies
+use crate::{
+    UpdateLockFileOptions, WorkspaceLocator,
+    cli::cli_config::WorkspaceConfig,
+    environment::get_update_lock_file_and_prefixes,
+    lock_file::{ReinstallPackages, UpdateMode},
+};
+
+/// Install an environment, both updating the lockfile and installing the
+/// environment.
+///
+/// This command installs an environment, if the lockfile is not up-to-date it
+/// will be updated.
+///
+/// `pixi install` only installs one environment at a time,
+/// if you have multiple environments you can select the right one with the
+/// `--environment` flag. If you don't provide an environment, the `default`
+/// environment will be installed.
+///
+/// If you want to install all environments, you can use the `--all` flag.
+///
+/// Running `pixi install` is not required before running other commands like
+/// `pixi run` or `pixi shell`. These commands will automatically install the
+/// environment if it is not already installed.
+///
+/// You can use `pixi reinstall` to reinstall all environments, one environment
+/// or just some packages of an environment.
 #[derive(Parser, Debug)]
 pub struct Args {
     #[clap(flatten)]
-    pub project_config: ProjectConfig,
+    pub project_config: WorkspaceConfig,
 
     #[clap(flatten)]
-    pub lock_file_usage: super::LockFileUsageArgs,
+    pub lock_file_usage: super::LockFileUsageConfig,
 
     /// The environment to install
     #[arg(long, short)]
@@ -23,12 +44,15 @@ pub struct Args {
     #[clap(flatten)]
     pub config: ConfigCli,
 
+    /// Install all environments
     #[arg(long, short, conflicts_with = "environment")]
     pub all: bool,
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())?
+    let workspace = WorkspaceLocator::for_cli()
+        .with_search_start(args.project_config.workspace_locator_start())
+        .locate()?
         .with_cli_config(args.config);
 
     // Install either:
@@ -39,37 +63,42 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let envs = if let Some(envs) = args.environment {
         envs
     } else if args.all {
-        project
+        workspace
             .environments()
             .iter()
             .map(|env| env.name().to_string())
             .collect()
     } else {
-        vec![project.default_environment().name().to_string()]
+        vec![workspace.default_environment().name().to_string()]
     };
 
-    let mut installed_envs = Vec::with_capacity(envs.len());
-    for env in envs {
-        let environment = project.environment_from_name_or_env_var(Some(env))?;
+    // Get the environments by name
+    let environments = envs
+        .into_iter()
+        .map(|env| workspace.environment_from_name_or_env_var(Some(env)))
+        .collect::<Result<Vec<_>, _>>()?;
 
-        // Update the prefix by installing all packages
-        get_update_lock_file_and_prefix(
-            &environment,
-            UpdateMode::Revalidate,
-            UpdateLockFileOptions {
-                lock_file_usage: args.lock_file_usage.into(),
-                no_install: false,
-                max_concurrent_solves: project.config().max_concurrent_solves(),
-            },
-        )
-        .await?;
+    // Update the prefixes by installing all packages
+    get_update_lock_file_and_prefixes(
+        &environments,
+        UpdateMode::Revalidate,
+        UpdateLockFileOptions {
+            lock_file_usage: args.lock_file_usage.try_into()?,
+            no_install: false,
+            max_concurrent_solves: workspace.config().max_concurrent_solves(),
+        },
+        ReinstallPackages::default(),
+    )
+    .await?;
 
-        installed_envs.push(environment.name().clone());
-    }
+    let installed_envs = environments
+        .into_iter()
+        .map(|env| env.name())
+        .collect::<Vec<_>>();
 
     // Message what's installed
     let detached_envs_message =
-        if let Ok(Some(path)) = project.config().detached_environments().path() {
+        if let Ok(Some(path)) = workspace.config().detached_environments().path() {
             format!(" in '{}'", console::style(path.display()).bold())
         } else {
             "".to_string()
@@ -91,6 +120,5 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         );
     }
 
-    Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
     Ok(())
 }

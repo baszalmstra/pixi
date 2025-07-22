@@ -1,5 +1,6 @@
 use std::{
     cmp::PartialEq,
+    collections::HashMap,
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -8,11 +9,11 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use miette::{Context, IntoDiagnostic};
-use minijinja::{context, Environment};
-use pixi_config::{get_default_author, Config};
+use minijinja::{Environment, context};
+use pixi_config::{Config, get_default_author};
 use pixi_consts::consts;
 use pixi_manifest::{
-    pyproject::PyProjectManifest, DependencyOverwriteBehavior, FeatureName, SpecType,
+    DependencyOverwriteBehavior, FeatureName, SpecType, pyproject::PyProjectManifest,
 };
 use pixi_spec::PixiSpec;
 use pixi_utils::conda_environment_file::CondaEnvFile;
@@ -21,43 +22,56 @@ use tokio::fs::OpenOptions;
 use url::Url;
 use uv_normalize::PackageName;
 
-use crate::Project;
+use crate::workspace::WorkspaceMut;
 
 #[derive(Parser, Debug, Clone, PartialEq, ValueEnum)]
 pub enum ManifestFormat {
     Pixi,
     Pyproject,
+    Mojoproject,
 }
 
-/// Creates a new project
+/// Creates a new workspace
+///
+/// This command is used to create a new workspace.
+/// It prepares a manifest and some helpers for the user to start working.
+///
+/// As pixi can both work with `pixi.toml` and `pyproject.toml` files, the user can choose which one to use with `--format`.
+///
+/// You can import an existing conda environment file with the `--import` flag.
 #[derive(Parser, Debug)]
 pub struct Args {
-    /// Where to place the project (defaults to current path)
+    /// Where to place the workspace (defaults to current path)
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
-    /// Channels to use in the project.
-    #[arg(short, long = "channel", id = "channel", conflicts_with = "env_file")]
+    /// Channel to use in the workspace.
+    #[arg(
+        short,
+        long = "channel",
+        value_name = "CHANNEL",
+        conflicts_with = "ENVIRONMENT_FILE"
+    )]
     pub channels: Option<Vec<NamedChannelOrUrl>>,
 
-    /// Platforms that the project supports.
-    #[arg(short, long = "platform", id = "platform")]
+    /// Platforms that the workspace supports.
+    #[arg(short, long = "platform", id = "PLATFORM")]
     pub platforms: Vec<String>,
 
-    /// Environment.yml file to bootstrap the project.
-    #[arg(short = 'i', long = "import")]
+    /// Environment.yml file to bootstrap the workspace.
+    #[arg(short = 'i', long = "import", id = "ENVIRONMENT_FILE")]
     pub env_file: Option<PathBuf>,
 
     /// The manifest format to create.
-    #[arg(long, conflicts_with_all = ["env_file", "pyproject_toml"], ignore_case = true)]
+    #[arg(long, conflicts_with_all = ["ENVIRONMENT_FILE", "pyproject_toml"], ignore_case = true)]
     pub format: Option<ManifestFormat>,
 
     /// Create a pyproject.toml manifest instead of a pixi.toml manifest
     // BREAK (0.27.0): Remove this option from the cli in favor of the `format` option.
-    #[arg(long, conflicts_with_all = ["env_file", "format"], alias = "pyproject", hide = true)]
+    #[arg(long, conflicts_with_all = ["ENVIRONMENT_FILE", "format"], alias = "pyproject", hide = true)]
     pub pyproject_toml: bool,
 
-    /// Source Control Management used for this project
+    /// Source Control Management used for this workspace
     #[arg(short = 's', long = "scm", ignore_case = true)]
     pub scm: Option<GitAttributes>,
 }
@@ -65,7 +79,7 @@ pub struct Args {
 /// The pixi.toml template
 ///
 /// This uses a template just to simplify the flexibility of emitting it.
-const PROJECT_TEMPLATE: &str = r#"[project]
+const WORKSPACE_TEMPLATE: &str = r#"[workspace]
 {%- if author %}
 authors = ["{{ author[0] }} <{{ author[1] }}>"]
 {%- endif %}
@@ -74,16 +88,41 @@ name = "{{ name }}"
 platforms = {{ platforms }}
 version = "{{ version }}"
 
-{%- if index_url or extra_indexes %}
+{%- if index_url or extra_index_urls %}
 
 [pypi-options]
 {% if index_url %}index-url = "{{ index_url }}"{% endif %}
 {% if extra_index_urls %}extra-index-urls = {{ extra_index_urls }}{% endif %}
 {%- endif %}
 
+{%- if s3 %}
+{%- for key in s3 %}
+
+[workspace.s3-options.{{ key }}]
+{%- if s3[key]["endpoint-url"] %}
+endpoint-url = "{{ s3[key]["endpoint-url"] }}"
+{%- endif %}
+{%- if s3[key].region %}
+{%- endif %}
+{%- if s3[key].region %}
+region = "{{ s3[key].region }}"
+{%- endif %}
+{%- if s3[key]["force-path-style"] is not none %}
+force-path-style = {{ s3[key]["force-path-style"] }}
+{%- endif %}
+
+{%- endfor %}
+{%- endif %}
+
 [tasks]
 
 [dependencies]
+
+{%- if env_vars %}
+
+[activation]
+env = { {{ env_vars }} }
+{%- endif %}
 
 "#;
 
@@ -91,7 +130,7 @@ version = "{{ version }}"
 ///
 /// This is injected into an existing pyproject.toml
 const PYROJECT_TEMPLATE_EXISTING: &str = r#"
-[tool.pixi.project]
+[tool.pixi.workspace]
 {%- if pixi_name %}
 name = "{{ name }}"
 {%- endif %}
@@ -108,6 +147,25 @@ default = { solve-group = "default" }
 {%- endif %}
 {{env}} = { features = {{ features }}, solve-group = "default" }
 {%- endfor %}
+
+{%- if s3 %}
+{%- for key in s3 %}
+
+[tool.pixi.workspace.s3-options.{{ key }}]
+{%- if s3[key]["endpoint-url"] %}
+endpoint-url = "{{ s3[key]["endpoint-url"] }}"
+{%- endif %}
+{%- if s3[key].region %}
+{%- endif %}
+{%- if s3[key].region %}
+region = "{{ s3[key].region }}"
+{%- endif %}
+{%- if s3[key]["force-path-style"] is not none %}
+force-path-style = {{ s3[key]["force-path-style"] }}
+{%- endif %}
+
+{%- endfor %}
+{%- endif %}
 
 [tool.pixi.tasks]
 
@@ -129,16 +187,35 @@ version = "{{ version }}"
 build-backend = "hatchling.build"
 requires = ["hatchling"]
 
-[tool.pixi.project]
+[tool.pixi.workspace]
 channels = {{ channels }}
 platforms = {{ platforms }}
 
 
-{%- if index_url or extra_indexes %}
+{%- if index_url or extra_index_urls %}
 
 [tool.pixi.pypi-options]
 {% if index_url %}index-url = "{{ index_url }}"{% endif %}
 {% if extra_index_urls %}extra-index-urls = {{ extra_index_urls }}{% endif %}
+{%- endif %}
+
+{%- if s3 %}
+{%- for key in s3 %}
+
+[tool.pixi.workspace.s3-options.{{ key }}]
+{%- if s3[key]["endpoint-url"] %}
+endpoint-url = "{{ s3[key]["endpoint-url"] }}"
+{%- endif %}
+{%- if s3[key].region %}
+{%- endif %}
+{%- if s3[key].region %}
+region = "{{ s3[key].region }}"
+{%- endif %}
+{%- if s3[key]["force-path-style"] is not none %}
+force-path-style = {{ s3[key]["force-path-style"] }}
+{%- endif %}
+
+{%- endfor %}
 {%- endif %}
 
 [tool.pixi.pypi-dependencies]
@@ -150,8 +227,8 @@ platforms = {{ platforms }}
 
 const GITIGNORE_TEMPLATE: &str = r#"
 # pixi environments
-.pixi
-*.egg-info
+.pixi/*
+!.pixi/config.toml
 "#;
 
 #[derive(Parser, Debug, Clone, PartialEq, ValueEnum)]
@@ -183,8 +260,9 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     // Fail silently if the directory already exists or cannot be created.
     fs_err::create_dir_all(&args.path).ok();
     let dir = args.path.canonicalize().into_diagnostic()?;
-    let pixi_manifest_path = dir.join(consts::PROJECT_MANIFEST);
+    let pixi_manifest_path = dir.join(consts::WORKSPACE_MANIFEST);
     let pyproject_manifest_path = dir.join(consts::PYPROJECT_MANIFEST);
+    let mojoproject_manifest_path = dir.join(consts::MOJOPROJECT_MANIFEST);
     let gitignore_path = dir.join(".gitignore");
     let gitattributes_path = dir.join(".gitattributes");
     let config = Config::load_global();
@@ -199,7 +277,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         );
     }
 
-    let default_name = get_name_from_dir(&dir).unwrap_or_else(|_| String::from("new_project"));
+    let default_name = get_name_from_dir(&dir).unwrap_or_else(|_| String::from("new_workspace"));
     let version = "0.1.0";
     let author = get_default_author();
     let platforms = if args.platforms.is_empty() {
@@ -214,7 +292,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         // Check if the 'pixi.toml' file doesn't already exist. We don't want to
         // overwrite it.
         if pixi_manifest_path.is_file() {
-            miette::bail!("{} already exists", consts::PROJECT_MANIFEST);
+            miette::bail!("{} already exists", consts::WORKSPACE_MANIFEST);
         }
 
         let env_file = CondaEnvFile::from_path(&env_file_path)?;
@@ -223,10 +301,11 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             .unwrap_or(default_name.clone().as_str())
             .to_string();
 
+        let env_vars = env_file.variables();
         // TODO: Improve this:
         //  - Use .condarc as channel config
         let (conda_deps, pypi_deps, channels) = env_file.to_manifest(&config)?;
-        let rv = render_project(
+        let rendered_workspace_template = render_workspace(
             &env,
             name,
             version,
@@ -235,9 +314,12 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             &platforms,
             None,
             &vec![],
+            config.s3_options,
+            Some(&env_vars),
         );
-        let mut project = Project::from_str(&pixi_manifest_path, &rv)?;
-        let channel_config = project.channel_config();
+        let mut workspace =
+            WorkspaceMut::from_template(pixi_manifest_path, rendered_workspace_template)?;
+        let channel_config = workspace.workspace().channel_config();
         for spec in conda_deps {
             // Determine the name of the package to add
             let (Some(name), spec) = spec.clone().into_nameless() else {
@@ -247,7 +329,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 );
             };
             let spec = PixiSpec::from_nameless_matchspec(spec, &channel_config);
-            project.manifest.add_dependency(
+            workspace.manifest().add_dependency(
                 &name,
                 &spec,
                 SpecType::Run,
@@ -258,24 +340,24 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             )?;
         }
         for requirement in pypi_deps {
-            project.manifest.add_pep508_dependency(
-                &requirement,
+            workspace.manifest().add_pep508_dependency(
+                (&requirement, None),
                 // No platforms required as you can't define them in the yaml
                 &[],
                 &FeatureName::default(),
                 None,
                 DependencyOverwriteBehavior::Overwrite,
-                &None,
+                None,
             )?;
         }
-        project.save()?;
+        let workspace = workspace.save().await.into_diagnostic()?;
 
         eprintln!(
             "{}Created {}",
             console::style(console::Emoji("✔ ", "")).green(),
             // Canonicalize the path to make it more readable, but if it fails just use the path as
             // is.
-            project.manifest_path().display()
+            workspace.workspace.provenance.path.display()
         );
     } else {
         let channels = if let Some(channels) = args.channels {
@@ -294,8 +376,16 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             && !args.pyproject_toml
             && pyproject_manifest_path.is_file()
         {
+            eprintln!(
+                "\nA '{}' file already exists.\n",
+                console::style(consts::PYPROJECT_MANIFEST).bold()
+            );
+
             dialoguer::Confirm::new()
-                .with_prompt(format!("\nA '{}' file already exists.\nDo you want to extend it with the '{}' configuration?", console::style(consts::PYPROJECT_MANIFEST).bold(), console::style("[tool.pixi]").bold().green()))
+                .with_prompt(format!(
+                    "Do you want to extend it with the '{}' configuration?",
+                    console::style("[tool.pixi]").bold().green()
+                ))
                 .default(false)
                 .show_default(true)
                 .interact()
@@ -304,15 +394,15 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             args.format == Some(ManifestFormat::Pyproject) || args.pyproject_toml
         };
 
-        // Inject a tool.pixi.project section into an existing pyproject.toml file if
-        // there is one without '[tool.pixi.project]'
+        // Inject a tool.pixi.workspace section into an existing pyproject.toml file if
+        // there is one without '[tool.pixi.workspace]'
         if pyproject && pyproject_manifest_path.is_file() {
             let pyproject = PyProjectManifest::from_path(&pyproject_manifest_path)?;
 
-            // Early exit if 'pyproject.toml' already contains a '[tool.pixi.project]' table
+            // Early exit if 'pyproject.toml' already contains a '[tool.pixi.workspace]' table
             if pyproject.has_pixi_table() {
                 eprintln!(
-                    "{}Nothing to do here: 'pyproject.toml' already contains a '[tool.pixi.project]' section.",
+                    "{}Nothing to do here: 'pyproject.toml' already contains a '[tool.pixi.workspace]' section.",
                     console::style(console::Emoji("🤔 ", "")).blue(),
                 );
                 return Ok(());
@@ -333,6 +423,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                         channels,
                         platforms,
                         environments,
+                        s3 => relevant_s3_options(config.s3_options, channels),
                     },
                 )
                 .expect("should be able to render the template");
@@ -349,7 +440,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 );
             } else {
                 // Inform about the addition of the package itself as an editable dependency of
-                // the project
+                // the workspace
                 eprintln!(
                     "{}Added package '{}' as an editable dependency.",
                     console::style(console::Emoji("✔ ", "")).green(),
@@ -388,6 +479,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                         platforms,
                         index_url => index_url.as_ref(),
                         extra_index_urls => &extra_index_urls,
+                        s3 => relevant_s3_options(config.s3_options, channels),
                     },
                 )
                 .expect("should be able to render the template");
@@ -419,12 +511,19 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
         // Create a 'pixi.toml' manifest
         } else {
-            // Check if the 'pixi.toml' file doesn't already exist. We don't want to
+            let path = if args.format == Some(ManifestFormat::Mojoproject) {
+                mojoproject_manifest_path
+            } else {
+                pixi_manifest_path
+            };
+
+            // Check if the manifest file doesn't already exist. We don't want to
             // overwrite it.
-            if pixi_manifest_path.is_file() {
-                miette::bail!("{} already exists", consts::PROJECT_MANIFEST);
+            if path.is_file() {
+                miette::bail!("{} already exists", consts::WORKSPACE_MANIFEST);
             }
-            let rv = render_project(
+
+            let rv = render_workspace(
                 &env,
                 default_name,
                 version,
@@ -433,13 +532,15 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 &platforms,
                 index_url.as_ref(),
                 &extra_index_urls,
+                config.s3_options,
+                None,
             );
-            save_manifest_file(&pixi_manifest_path, rv)?;
+            save_manifest_file(&path, rv)?;
         };
     }
 
     // create a .gitignore if one is missing
-    if let Err(e) = create_or_append_file(&gitignore_path, GITIGNORE_TEMPLATE) {
+    if let Err(e) = create_or_append_file(&gitignore_path, GITIGNORE_TEMPLATE.trim_start()) {
         tracing::warn!(
             "Warning, couldn't update '{}' because of: {}",
             gitignore_path.to_string_lossy(),
@@ -462,7 +563,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_project(
+fn render_workspace(
     env: &Environment<'_>,
     name: String,
     version: &str,
@@ -471,21 +572,51 @@ fn render_project(
     platforms: &Vec<String>,
     index_url: Option<&Url>,
     extra_index_urls: &Vec<Url>,
+    s3_options: HashMap<String, pixi_config::S3Options>,
+    env_vars: Option<&HashMap<String, String>>,
 ) -> String {
-    env.render_named_str(
-        consts::PROJECT_MANIFEST,
-        PROJECT_TEMPLATE,
-        context! {
-            name,
-            version,
-            author,
-            channels,
-            platforms,
-            index_url,
-            extra_index_urls,
-        },
-    )
-    .expect("should be able to render the template")
+    let ctx = context! {
+        name,
+        version,
+        author,
+        channels,
+        platforms,
+        index_url,
+        extra_index_urls,
+        s3 => relevant_s3_options(s3_options, channels),
+        env_vars => {if let Some(env_vars) = env_vars {
+            env_vars.iter().map(|(k, v)| format!("{} = \"{}\"", k, v)).collect::<Vec<String>>().join(", ")
+        } else {String::new()}},
+    };
+
+    env.render_named_str(consts::WORKSPACE_MANIFEST, WORKSPACE_TEMPLATE, ctx)
+        .expect("should be able to render the template")
+}
+
+fn relevant_s3_options(
+    s3_options: HashMap<String, pixi_config::S3Options>,
+    channels: Vec<NamedChannelOrUrl>,
+) -> HashMap<String, pixi_config::S3Options> {
+    // only take s3 options in manifest if they are used in the default channels
+    let s3_buckets = channels
+        .iter()
+        .filter_map(|channel| match channel {
+            NamedChannelOrUrl::Name(_) => None,
+            NamedChannelOrUrl::Path(_) => None,
+            NamedChannelOrUrl::Url(url) => {
+                if url.scheme() == "s3" {
+                    url.host().map(|host| host.to_string())
+                } else {
+                    None
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    s3_options
+        .into_iter()
+        .filter(|(key, _)| s3_buckets.contains(key))
+        .collect()
 }
 
 /// Save the rendered template to a file, and print a message to the user.

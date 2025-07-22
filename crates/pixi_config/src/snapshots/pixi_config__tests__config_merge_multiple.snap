@@ -1,7 +1,6 @@
 ---
 source: crates/pixi_config/src/lib.rs
 expression: debug
-snapshot_kind: text
 ---
 Config {
     default_channels: [
@@ -15,9 +14,6 @@ Config {
             "defaults",
         ),
     ],
-    change_ps1: Some(
-        true,
-    ),
     authentication_override_file: None,
     tls_no_verify: Some(
         false,
@@ -97,12 +93,39 @@ Config {
         keyring_provider: None,
         allow_insecure_host: [],
     },
+    s3_options: {
+        "bucket1": S3Options {
+            endpoint_url: Url {
+                scheme: "https",
+                cannot_be_a_base: false,
+                username: "",
+                password: None,
+                host: Some(
+                    Domain(
+                        "my-s3-host",
+                    ),
+                ),
+                port: None,
+                path: "/",
+                query: None,
+                fragment: None,
+            },
+            region: "us-east-1",
+            force_path_style: false,
+        },
+    },
     detached_environments: Some(
         Boolean(
             true,
         ),
     ),
-    force_activate: None,
+    shell: ShellConfig {
+        force_activate: None,
+        source_completion_scripts: None,
+        change_ps1: Some(
+            true,
+        ),
+    },
     experimental: ExperimentalConfig {
         use_environment_activation_cache: None,
     },
@@ -110,4 +133,21 @@ Config {
         solves: 1,
         downloads: 50,
     },
+    run_post_link_scripts: None,
+    proxy_config: ProxyConfig {
+        https: None,
+        http: None,
+        non_proxy_hosts: [],
+    },
+    build: BuildConfig {
+        package_format: Some(
+            PackageFormatAndCompression {
+                archive_type: Conda,
+                compression_level: Highest,
+            },
+        ),
+    },
+    tool_platform: None,
+    change_ps1: None,
+    force_activate: None,
 }

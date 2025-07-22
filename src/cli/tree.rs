@@ -15,16 +15,17 @@ use rattler_lock::LockedPackageRef;
 use regex::Regex;
 
 use crate::{
-    cli::cli_config::{PrefixUpdateConfig, ProjectConfig},
-    lock_file::UpdateLockFileOptions,
-    project::{Environment, Project},
+    WorkspaceLocator, cli::cli_config::WorkspaceConfig, lock_file::UpdateLockFileOptions,
+    workspace::Environment,
 };
 
-/// Show a tree of project dependencies
+use super::cli_config::LockFileUpdateConfig;
+
+/// Show a tree of workspace dependencies
 #[derive(Debug, Parser)]
 #[clap(arg_required_else_help = false, long_about = format!(
     "\
-    Show a tree of project dependencies\n\
+    Show a tree of workspace dependencies\n\
     \n\
     Dependency names highlighted in {} are directly specified in the manifest. \
     {} version numbers are conda packages, PyPI version numbers are {}.
@@ -43,7 +44,7 @@ pub struct Args {
     pub platform: Option<Platform>,
 
     #[clap(flatten)]
-    pub project_config: ProjectConfig,
+    pub workspace_config: WorkspaceConfig,
 
     /// The environment to list packages for. Defaults to the default
     /// environment.
@@ -51,7 +52,7 @@ pub struct Args {
     pub environment: Option<String>,
 
     #[clap(flatten)]
-    pub prefix_update_config: PrefixUpdateConfig,
+    pub lock_file_update_config: LockFileUpdateConfig,
 
     /// Invert tree and show what depends on given package in the regex argument
     #[arg(short, long, requires = "regex")]
@@ -73,25 +74,26 @@ static UTF8_SYMBOLS: Symbols = Symbols {
 };
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())
-        .wrap_err("Failed to load project")?;
+    let workspace = WorkspaceLocator::for_cli()
+        .with_search_start(args.workspace_config.workspace_locator_start())
+        .locate()?;
 
-    let environment = project
+    let environment = workspace
         .environment_from_name_or_env_var(args.environment)
         .wrap_err("Environment not found")?;
 
-    let lock_file = project
+    let lock_file = workspace
         .update_lock_file(UpdateLockFileOptions {
-            lock_file_usage: args.prefix_update_config.lock_file_usage(),
-            no_install: args.prefix_update_config.no_install,
-            max_concurrent_solves: project.config().max_concurrent_solves(),
+            lock_file_usage: args.lock_file_update_config.lock_file_usage()?,
+            no_install: args.lock_file_update_config.no_lockfile_update,
+            max_concurrent_solves: workspace.config().max_concurrent_solves(),
         })
         .await
-        .wrap_err("Failed to update lock file")?;
+        .wrap_err("Failed to update lock file")?
+        .into_lock_file();
 
     let platform = args.platform.unwrap_or_else(|| environment.best_platform());
     let locked_deps = lock_file
-        .lock_file
         .environment(environment.name().as_str())
         .and_then(|env| env.packages(platform).map(Vec::from_iter))
         .unwrap_or_default();
@@ -118,7 +120,6 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         print_dependency_tree(&mut handle, &dep_map, &direct_deps, &args.regex)
             .wrap_err("Couldn't print the dependency tree")?;
     }
-    Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
     Ok(())
 }
 
@@ -275,7 +276,9 @@ fn print_dependency_tree(
                 ));
             }
 
-            tracing::info!("No top-level dependencies matched the regular expression, showing matching transitive dependencies");
+            tracing::info!(
+                "No top-level dependencies matched the regular expression, showing matching transitive dependencies"
+            );
 
             return print_transitive_dependency_tree(handle, dep_map, direct_deps, filtered_keys);
         }

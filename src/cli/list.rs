@@ -1,27 +1,33 @@
-use std::borrow::Cow;
-use std::io;
-use std::io::{stdout, Write};
+use std::{
+    borrow::Cow,
+    io,
+    io::{Write, stdout},
+};
 
 use clap::Parser;
 use console::Color;
+use fancy_display::FancyDisplay;
 use human_bytes::human_bytes;
 use itertools::Itertools;
 use miette::IntoDiagnostic;
-
-use crate::cli::cli_config::{PrefixUpdateConfig, ProjectConfig};
-use crate::lock_file::{UpdateLockFileOptions, UvResolutionContext};
-use crate::Project;
-use fancy_display::FancyDisplay;
 use pixi_consts::consts;
 use pixi_manifest::FeaturesExt;
 use pixi_uv_conversions::{
-    pypi_options_to_index_locations, to_uv_normalize, to_uv_version, ConversionError,
+    ConversionError, pypi_options_to_index_locations, to_uv_normalize, to_uv_version,
 };
 use pypi_modifiers::pypi_tags::{get_pypi_tags, is_python_record};
 use rattler_conda_types::Platform;
 use rattler_lock::{CondaPackageData, LockedPackageRef, PypiPackageData, UrlOrPath};
 use serde::Serialize;
+use uv_configuration::ConfigSettings;
 use uv_distribution::RegistryWheelIndex;
+
+use super::cli_config::LockFileUpdateConfig;
+use crate::{
+    WorkspaceLocator,
+    cli::cli_config::WorkspaceConfig,
+    lock_file::{UpdateLockFileOptions, UvResolutionContext},
+};
 
 // an enum to sort by size or name
 #[derive(clap::ValueEnum, Clone, Debug, Serialize)]
@@ -31,7 +37,7 @@ pub enum SortBy {
     Kind,
 }
 
-/// List project's packages.
+/// List workspace's packages.
 ///
 /// Highlighted packages are explicit dependencies.
 #[derive(Debug, Parser)]
@@ -58,16 +64,17 @@ pub struct Args {
     pub sort_by: SortBy,
 
     #[clap(flatten)]
-    pub project_config: ProjectConfig,
+    pub workspace_config: WorkspaceConfig,
 
-    /// The environment to list packages for. Defaults to the default environment.
+    /// The environment to list packages for. Defaults to the default
+    /// environment.
     #[arg(short, long)]
     pub environment: Option<String>,
 
     #[clap(flatten)]
-    pub prefix_update_config: PrefixUpdateConfig,
+    pub lock_file_update_config: LockFileUpdateConfig,
 
-    /// Only list packages that are explicitly defined in the project.
+    /// Only list packages that are explicitly defined in the workspace.
     #[arg(short = 'x', long)]
     pub explicit: bool,
 }
@@ -76,13 +83,38 @@ fn serde_skip_is_editable(editable: &bool) -> bool {
     !(*editable)
 }
 
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+enum KindPackage {
+    Conda,
+    Pypi,
+}
+
+impl From<&PackageExt> for KindPackage {
+    fn from(package: &PackageExt) -> Self {
+        match package {
+            PackageExt::Conda(_) => KindPackage::Conda,
+            PackageExt::PyPI(_, _) => KindPackage::Pypi,
+        }
+    }
+}
+
+impl FancyDisplay for KindPackage {
+    fn fancy_display(&self) -> console::StyledObject<&str> {
+        match self {
+            KindPackage::Conda => consts::CONDA_PACKAGE_STYLE.apply_to("conda"),
+            KindPackage::Pypi => consts::PYPI_PACKAGE_STYLE.apply_to("pypi"),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct PackageToOutput {
     name: String,
     version: String,
     build: Option<String>,
     size_bytes: Option<u64>,
-    kind: String,
+    kind: KindPackage,
     source: Option<String>,
     is_explicit: bool,
     #[serde(skip_serializing_if = "serde_skip_is_editable")]
@@ -144,23 +176,26 @@ impl PackageExt {
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())?;
-    let environment = project.environment_from_name_or_env_var(args.environment)?;
+    let workspace = WorkspaceLocator::for_cli()
+        .with_search_start(args.workspace_config.workspace_locator_start())
+        .locate()?;
 
-    let lock_file = project
+    let environment = workspace.environment_from_name_or_env_var(args.environment)?;
+
+    let lock_file = workspace
         .update_lock_file(UpdateLockFileOptions {
-            lock_file_usage: args.prefix_update_config.lock_file_usage(),
-            no_install: args.prefix_update_config.no_install,
-            max_concurrent_solves: project.config().max_concurrent_solves(),
+            lock_file_usage: args.lock_file_update_config.lock_file_usage()?,
+            no_install: false,
+            max_concurrent_solves: workspace.config().max_concurrent_solves(),
         })
-        .await?;
+        .await?
+        .into_lock_file();
 
     // Load the platform
     let platform = args.platform.unwrap_or_else(|| environment.best_platform());
 
     // Get all the packages in the environment.
     let locked_deps = lock_file
-        .lock_file
         .environment(environment.name().as_str())
         .and_then(|env| env.packages(platform).map(Vec::from_iter))
         .unwrap_or_default();
@@ -185,11 +220,12 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let tags;
     let uv_context;
     let index_locations;
+    let config_settings = ConfigSettings::default();
     let mut registry_index = if let Some(python_record) = python_record {
         if environment.has_pypi_dependencies() {
-            uv_context = UvResolutionContext::from_project(&project)?;
+            uv_context = UvResolutionContext::from_workspace(&workspace)?;
             index_locations =
-                pypi_options_to_index_locations(&environment.pypi_options(), project.root())
+                pypi_options_to_index_locations(&environment.pypi_options(), workspace.root())
                     .into_diagnostic()?;
             tags = get_pypi_tags(
                 platform,
@@ -201,6 +237,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 &tags,
                 &index_locations,
                 &uv_types::HashStrategy::None,
+                &config_settings,
             ))
         } else {
             None
@@ -259,15 +296,11 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     }
 
     if packages_to_output.is_empty() {
-        eprintln!(
-            "{}No packages found in '{}' environment for '{}' platform.",
-            console::style(console::Emoji("✘ ", "")).red(),
+        miette::bail!(
+            "No packages found in '{}' environment for '{}' platform.",
             environment.name().fancy_display(),
             consts::ENVIRONMENT_STYLE.apply_to(platform),
         );
-
-        Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
-        return Ok(());
     }
 
     // Print as table string or JSON
@@ -283,7 +316,6 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         print_packages_as_table(&packages_to_output).expect("an io error occurred");
     }
 
-    Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
     Ok(())
 }
 
@@ -307,7 +339,11 @@ fn print_packages_as_table(packages: &Vec<PackageToOutput>) -> io::Result<()> {
             write!(
                 writer,
                 "{}",
-                console::style(&package.name).fg(Color::Green).bold()
+                match package.kind {
+                    KindPackage::Conda =>
+                        consts::CONDA_PACKAGE_STYLE.apply_to(&package.name).bold(),
+                    KindPackage::Pypi => consts::PYPI_PACKAGE_STYLE.apply_to(&package.name).bold(),
+                }
             )?
         } else {
             write!(writer, "{}", &package.name)?;
@@ -325,7 +361,7 @@ fn print_packages_as_table(packages: &Vec<PackageToOutput>) -> io::Result<()> {
             &package.version,
             package.build.as_deref().unwrap_or(""),
             size_human,
-            &package.kind,
+            &package.kind.fancy_display(),
             package.source.as_deref().unwrap_or(""),
             if package.is_editable {
                 format!(" {}", console::style("(editable)").fg(Color::Yellow))
@@ -367,11 +403,8 @@ fn create_package_to_output<'a, 'b>(
 ) -> miette::Result<PackageToOutput> {
     let name = package.name().to_string();
     let version = package.version().into_owned();
+    let kind = KindPackage::from(package);
 
-    let kind = match package {
-        PackageExt::Conda(_) => "conda".to_string(),
-        PackageExt::PyPI(_, _) => "pypi".to_string(),
-    };
     let build = match package {
         PackageExt::Conda(pkg) => Some(pkg.record().build.clone()),
         PackageExt::PyPI(_, _) => None,
@@ -380,10 +413,14 @@ fn create_package_to_output<'a, 'b>(
     let (size_bytes, source) = match package {
         PackageExt::Conda(pkg) => (
             pkg.record().size,
-            Some(pkg.record().name.as_source().to_owned()),
+            match pkg {
+                CondaPackageData::Source(source) => Some(source.location.to_string()),
+                CondaPackageData::Binary(binary) => binary.channel.as_ref().map(|c| c.to_string()),
+            },
         ),
         PackageExt::PyPI(p, name) => {
-            // Check the hash to avoid non index packages to be handled by the registry index as wheels
+            // Check the hash to avoid non index packages to be handled by the registry
+            // index as wheels
             if p.hash.is_some() {
                 if let Some(registry_index) = registry_index {
                     // Handle case where the registry index is present

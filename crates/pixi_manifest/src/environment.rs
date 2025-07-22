@@ -13,7 +13,9 @@ use thiserror::Error;
 use crate::{consts::DEFAULT_ENVIRONMENT_NAME, solve_group::SolveGroupIdx};
 
 #[derive(Debug, Clone, Error, Diagnostic, PartialEq)]
-#[error("Failed to parse environment name '{attempted_parse}', please use only lowercase letters, numbers and dashes")]
+#[error(
+    "Failed to parse environment name '{attempted_parse}', please use only lowercase letters, numbers and dashes"
+)]
 pub struct ParseEnvironmentNameError {
     /// The string that was attempted to be parsed.
     pub attempted_parse: String,
@@ -140,10 +142,6 @@ pub struct Environment {
     /// Note that the default feature is always added to the set of features
     /// that make up the environment.
     pub features: Vec<String>,
-
-    /// The optional location of where the features of the environment are
-    /// defined in the manifest toml.
-    pub features_source_loc: Option<std::ops::Range<usize>>,
 
     /// An optional solver-group. Multiple environments can share the same
     /// solve-group. All the dependencies of the environment that share the

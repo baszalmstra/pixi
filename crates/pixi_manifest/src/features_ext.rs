@@ -1,19 +1,21 @@
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use indexmap::IndexSet;
+use miette::Diagnostic;
 use rattler_conda_types::{
     ChannelConfig, ChannelUrl, NamedChannelOrUrl, ParseChannelError, Platform,
 };
 
-use crate::workspace::ChannelPriority;
 use crate::{
-    has_features_iter::HasFeaturesIter, pypi::pypi_options::PypiOptions, CondaDependencies,
-    HasManifestRef, PrioritizedChannel, PyPiDependencies, SpecType, SystemRequirements,
+    CondaDependencies, PrioritizedChannel, PyPiDependencies, SpecType, SystemRequirements,
+    has_features_iter::HasFeaturesIter, has_manifest_ref::HasWorkspaceManifest,
+    pypi::pypi_options::PypiOptions, workspace::ChannelPriority,
 };
 
 /// ChannelPriorityCombination error, thrown when multiple channel priorities
 /// are set
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Diagnostic)]
 #[error("Multiple channel priorities are not allowed in a single environment")]
 pub struct ChannelPriorityCombinationError;
 
@@ -27,8 +29,8 @@ pub struct ChannelPriorityCombinationError;
 /// project.
 ///
 /// There is blanket implementation available for all types that implement
-/// [`HasManifestRef`] and [`HasFeaturesIter`]
-pub trait FeaturesExt<'source>: HasManifestRef<'source> + HasFeaturesIter<'source> {
+/// [`HasWorkspaceManifest`] and [`HasFeaturesIter`]
+pub trait FeaturesExt<'source>: HasWorkspaceManifest<'source> + HasFeaturesIter<'source> {
     /// Returns the channels associated with this collection.
     ///
     /// Users can specify custom channels on a per-feature basis. This method
@@ -42,7 +44,7 @@ pub trait FeaturesExt<'source>: HasManifestRef<'source> + HasFeaturesIter<'sourc
         // deduplicate them and sort them on feature index, default feature comes last.
         let channels = self.features().flat_map(|feature| match &feature.channels {
             Some(channels) => channels,
-            None => &self.manifest().workspace.workspace.channels,
+            None => &self.workspace_manifest().workspace.channels,
         });
 
         PrioritizedChannel::sort_channels_by_priority(channels).collect()
@@ -81,6 +83,19 @@ pub trait FeaturesExt<'source>: HasManifestRef<'source> + HasFeaturesIter<'sourc
         Ok(channel_priority)
     }
 
+    /// Returns whether packages should be excluded newer than a certain date.
+    fn exclude_newer(&self) -> Option<DateTime<Utc>> {
+        self.workspace_manifest()
+            .workspace
+            .exclude_newer
+            .map(Into::into)
+    }
+
+    /// Returns the strategy for solving packages.
+    fn solve_strategy(&self) -> rattler_solve::SolveStrategy {
+        rattler_solve::SolveStrategy::default()
+    }
+
     /// Returns the platforms that this collection is compatible with.
     ///
     /// Which platforms a collection support depends on which platforms the
@@ -95,8 +110,8 @@ pub trait FeaturesExt<'source>: HasManifestRef<'source> + HasFeaturesIter<'sourc
         self.features()
             .map(|feature| {
                 match &feature.platforms {
-                    Some(platforms) => &platforms.value,
-                    None => &self.manifest().workspace.workspace.platforms.value,
+                    Some(platforms) => platforms,
+                    None => &self.workspace_manifest().workspace.platforms,
                 }
                 .iter()
                 .copied()
@@ -187,7 +202,7 @@ pub trait FeaturesExt<'source>: HasManifestRef<'source> + HasFeaturesIter<'sourc
             .features()
             .filter_map(|feature| {
                 if feature.pypi_options().is_none() {
-                    self.manifest().workspace.workspace.pypi_options.as_ref()
+                    self.workspace_manifest().workspace.pypi_options.as_ref()
                 } else {
                     feature.pypi_options()
                 }
@@ -205,6 +220,6 @@ pub trait FeaturesExt<'source>: HasManifestRef<'source> + HasFeaturesIter<'sourc
 }
 
 impl<'source, FeatureCollection> FeaturesExt<'source> for FeatureCollection where
-    FeatureCollection: HasManifestRef<'source> + HasFeaturesIter<'source>
+    FeatureCollection: HasWorkspaceManifest<'source> + HasFeaturesIter<'source>
 {
 }

@@ -1,33 +1,40 @@
 use std::cmp::Ordering;
 
-use crate::cli::cli_config::ProjectConfig;
-use crate::project::{MatchSpecs, PypiDeps};
-use crate::Project;
+use super::cli_config::{LockFileUpdateConfig, PrefixUpdateConfig};
+use crate::{
+    WorkspaceLocator,
+    cli::cli_config::WorkspaceConfig,
+    diff::LockFileJsonDiff,
+    workspace::{MatchSpecs, PypiDeps, WorkspaceMut},
+};
 use clap::Parser;
 use fancy_display::FancyDisplay;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use miette::MietteDiagnostic;
-use miette::{Context, IntoDiagnostic};
-
-use super::cli_config::PrefixUpdateConfig;
-use crate::diff::LockFileJsonDiff;
-use pep508_rs::MarkerTree;
-use pep508_rs::Requirement;
-use pixi_manifest::FeatureName;
-use pixi_manifest::PyPiRequirement;
-use pixi_manifest::SpecType;
+use miette::{Context, IntoDiagnostic, MietteDiagnostic};
+use pep508_rs::{MarkerTree, Requirement};
+use pixi_config::ConfigCli;
+use pixi_manifest::{FeatureName, SpecType};
+use pixi_pypi_spec::PixiPypiSpec;
 use pixi_spec::PixiSpec;
 use rattler_conda_types::{MatchSpec, StringMatcher};
 
-/// Update the version of packages to the latest possible version, disregarding the manifest version constraints
+/// Checks if there are newer versions of the dependencies and upgrades them in the lockfile and manifest file.
+///
+/// `pixi upgrade` loosens the requirements for the given packages, updates the lock file and the adapts the manifest accordingly.
 #[derive(Parser, Debug, Default)]
 pub struct Args {
     #[clap(flatten)]
-    pub project_config: ProjectConfig,
+    pub workspace_config: WorkspaceConfig,
 
     #[clap(flatten)]
     pub prefix_update_config: PrefixUpdateConfig,
+
+    #[clap(flatten)]
+    pub lock_file_update_config: LockFileUpdateConfig,
+
+    #[clap(flatten)]
+    config: ConfigCli,
 
     #[clap(flatten)]
     pub specs: UpgradeSpecsArgs,
@@ -36,7 +43,8 @@ pub struct Args {
     #[clap(long)]
     pub json: bool,
 
-    /// Only show the changes that would be made, without actually updating the manifest, lock file, or environment.
+    /// Only show the changes that would be made, without actually updating the
+    /// manifest, lock file, or environment.
     #[clap(short = 'n', long)]
     pub dry_run: bool,
 }
@@ -56,29 +64,35 @@ pub struct UpgradeSpecsArgs {
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
-    let mut project = Project::load_or_else_discover(args.project_config.manifest_path.as_deref())?
-        .with_cli_config(args.prefix_update_config.config.clone());
+    let workspace = WorkspaceLocator::for_cli()
+        .with_search_start(args.workspace_config.workspace_locator_start())
+        .locate()?
+        .with_cli_config(args.config.clone());
+
+    let mut workspace = workspace.modify()?;
 
     // Ensure that the given feature exists
-    let Some(feature) = project.manifest.feature(&args.specs.feature) else {
+    let Some(feature) = workspace
+        .workspace()
+        .workspace
+        .value
+        .feature(&args.specs.feature)
+    else {
         miette::bail!(
             "could not find a feature named {}",
             args.specs.feature.fancy_display()
         )
     };
 
-    let (match_specs, pypi_deps) = parse_specs(feature, &args, &project)?;
+    let (match_specs, pypi_deps) = parse_specs(feature, &args, &workspace)?;
 
-    // Save original manifest
-    let original_manifest_content =
-        fs_err::read_to_string(project.manifest_path()).into_diagnostic()?;
-
-    let update_deps = match project
+    let (update_deps, workspace) = match workspace
         .update_dependencies(
             match_specs,
             pypi_deps,
             IndexMap::default(),
             &args.prefix_update_config,
+            &args.lock_file_update_config,
             &args.specs.feature,
             &[],
             false,
@@ -86,19 +100,15 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         )
         .await
     {
-        Ok(update_deps) => {
+        Ok(update_deps) => (
+            update_deps,
             if args.dry_run {
-                // Make sure we restore original manifest content
-                fs_err::write(project.manifest_path(), original_manifest_content)
-                    .into_diagnostic()?;
+                workspace.revert().await.into_diagnostic()?
             } else {
-                project.save()?;
-            }
-            update_deps
-        }
+                workspace.save().await.into_diagnostic()?
+            },
+        ),
         Err(e) => {
-            // Restore original manifest
-            fs_err::write(project.manifest_path(), original_manifest_content).into_diagnostic()?;
             return Err(e);
         }
     };
@@ -108,7 +118,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         let diff = update_deps.lock_file_diff;
         // Format as json?
         if args.json {
-            let json_diff = LockFileJsonDiff::new(Some(&project), diff);
+            let json_diff = LockFileJsonDiff::new(Some(&workspace), diff);
             let json = serde_json::to_string_pretty(&json_diff).expect("failed to convert to json");
             println!("{}", json);
         } else {
@@ -123,19 +133,19 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         );
     }
 
-    Project::warn_on_discovered_from_env(args.project_config.manifest_path.as_deref());
     Ok(())
 }
 
-/// Parses the specifications for dependencies from the given feature, arguments, and project.
+/// Parses the specifications for dependencies from the given feature,
+/// arguments, and workspace.
 ///
-/// This function processes the dependencies and PyPi dependencies specified in the feature,
-/// filters them based on the provided arguments, and returns the resulting match specifications
-/// and PyPi dependencies.
-fn parse_specs(
+/// This function processes the dependencies and PyPi dependencies specified in
+/// the feature, filters them based on the provided arguments, and returns the
+/// resulting match specifications and PyPi dependencies.
+pub fn parse_specs(
     feature: &pixi_manifest::Feature,
     args: &Args,
-    project: &Project,
+    workspace: &WorkspaceMut,
 ) -> miette::Result<(MatchSpecs, PypiDeps)> {
     let spec_type = SpecType::Run;
     let match_spec_iter = feature
@@ -178,7 +188,7 @@ fn parse_specs(
         .filter_map(|(name, req)| match req {
             PixiSpec::DetailedVersion(version_spec) => {
                 let mut nameless_match_spec = version_spec
-                    .try_into_nameless_match_spec(&project.channel_config())
+                    .try_into_nameless_match_spec(&workspace.workspace().channel_config())
                     .ok()?;
                 // If it is a detailed spec, always unset version
                 nameless_match_spec.version = None;
@@ -196,7 +206,8 @@ fn parse_specs(
                         nameless_match_spec.build_number = None;
                         nameless_match_spec.md5 = None;
                         nameless_match_spec.sha256 = None;
-                        // These are still to sensitive to be unset, so skipping these for now
+                        // These are still to sensitive to be unset, so skipping
+                        // these for now
                         // nameless_match_spec.url = None;
                         // nameless_match_spec.file_name = None;
                         // nameless_match_spec.channel = None;
@@ -218,11 +229,12 @@ fn parse_specs(
                 None
             }
         })
-        // Only upgrade in pyproject.toml if it is explicitly mentioned in `tool.pixi.dependencies.python`
+        // Only upgrade in pyproject.toml if it is explicitly mentioned in
+        // `tool.pixi.dependencies.python`
         .filter(|(name, _)| {
             if name.as_normalized() == "python" {
-                if let pixi_manifest::ManifestSource::PyProjectToml(document) =
-                    project.manifest.source.clone()
+                if let pixi_manifest::ManifestDocument::PyProjectToml(document) =
+                    workspace.document()
                 {
                     if document
                         .get_nested_table("[tool.pixi.dependencies.python]")
@@ -249,19 +261,20 @@ fn parse_specs(
             _ => false,
         })
         // Only upgrade version specs
-        .filter_map(|(name, req)| match req {
-            PyPiRequirement::Version { extras, .. } => Some((
+        .filter_map(|(name, req)| match &req {
+            PixiPypiSpec::Version { extras, .. } => Some((
                 name.clone(),
                 Requirement {
                     name: name.as_normalized().clone(),
-                    extras,
+                    extras: extras.clone(),
                     // TODO: Add marker support here to avoid overwriting existing markers
                     marker: MarkerTree::default(),
                     origin: None,
                     version_or_url: None,
                 },
+                req,
             )),
-            PyPiRequirement::RawVersion(_) => Some((
+            PixiPypiSpec::RawVersion(_) => Some((
                 name.clone(),
                 Requirement {
                     name: name.as_normalized().clone(),
@@ -270,16 +283,17 @@ fn parse_specs(
                     origin: None,
                     version_or_url: None,
                 },
+                req,
             )),
             _ => None,
         })
-        .map(|(name, req)| {
-            let location = project.manifest.source.pypi_dependency_location(
+        .map(|(name, req, pixi_req)| {
+            let location = workspace.document().pypi_dependency_location(
                 &name,
                 None, // TODO: add support for platforms
                 &args.specs.feature,
             );
-            (name, (req, location))
+            (name, (req, Some(pixi_req), location))
         })
         .collect();
 
