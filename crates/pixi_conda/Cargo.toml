@@ -44,9 +44,14 @@ indicatif = { workspace = true }
 itertools = { workspace = true }
 miette = { workspace = true }
 parking_lot = { workspace = true }
+pixi_build_frontend = { workspace = true }
+pixi_command_dispatcher = { workspace = true }
 pixi_config = { workspace = true }
 pixi_consts = { workspace = true }
 pixi_progress = { workspace = true }
+pixi_reporters = { workspace = true }
+pixi_spec = { workspace = true }
+pixi_spec_containers = { workspace = true }
 pixi_utils = { workspace = true }
 rattler = { workspace = true }
 rattler_conda_types = { workspace = true }

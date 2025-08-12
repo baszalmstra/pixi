@@ -9,29 +9,26 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{Parser, ValueEnum};
-use futures::future::TryFutureExt;
+use clap::Parser;
 use indicatif::MultiProgress;
+use indicatif::ProgressBar;
 use input::EnvironmentInput;
 use itertools::Itertools;
-use miette::{Context, IntoDiagnostic, Report};
-use pixi_config::{get_cache_dir, Config};
-use pixi_consts::consts;
-use pixi_progress::{await_in_progress, global_multi_progress, wrap_in_progress};
-use pixi_utils::reqwest::build_reqwest_clients;
-use rattler::{
-    install::{Installer, Transaction},
-    package_cache::PackageCache,
-};
+use miette::{Context, IntoDiagnostic};
+use pixi_config::Config;
+use pixi_progress::global_multi_progress;
+use rattler::install::{Installer, Transaction};
 use rattler_conda_types::{
     ChannelConfig, EnvironmentYaml, MatchSpec, MatchSpecOrSubSection, NamedChannelOrUrl,
     PackageName, ParseChannelError, Platform, PrefixRecord, RepoDataRecord,
 };
-use rattler_solve::{SolverImpl, SolverTask};
-use rattler_virtual_packages::{VirtualPackageOverrides, VirtualPackages};
 use tabwriter::TabWriter;
 
-use crate::{registry::Registry, EnvironmentName};
+use crate::{EnvironmentName, command_dispatcher_builder, registry::Registry};
+use pixi_command_dispatcher::{BuildEnvironment, PixiEnvironmentSpec};
+use pixi_spec;
+use pixi_spec::PixiSpec;
+use pixi_spec_containers::DependencyMap;
 
 /// Create a new conda environment from a list of specified packages.
 #[derive(Parser, Debug)]
@@ -67,23 +64,8 @@ pub struct Args {
     #[clap(long, short, help_heading = "Output, Prompt, and Flow Control Options")]
     dry_run: bool,
 
-    /// Choose which solver backend to use.
-    #[clap(
-        long,
-        help_heading = "Solver Mode Modifiers",
-        default_value = "resolvo"
-    )]
-    solver: SolverBackend,
-
     #[clap(flatten)]
     channel_customization: ChannelCustomization,
-}
-
-#[derive(Default, ValueEnum, Debug, Copy, Clone)]
-enum SolverBackend {
-    #[default]
-    Resolvo,
-    Libsolv,
 }
 
 #[derive(Parser, Debug)]
@@ -110,6 +92,16 @@ struct ChannelCustomization {
 }
 
 pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
+    // Create the CommandDispatcher to handle solving and installation with progress reporting
+    let multi_progress = global_multi_progress();
+    let anchor_pb = multi_progress.add(ProgressBar::hidden());
+    let command_dispatcher = command_dispatcher_builder(&config)
+        .map_err(|e| miette::miette!("Failed to create command dispatcher: {}", e))?
+        .with_reporter(pixi_reporters::TopLevelProgress::new(
+            global_multi_progress(),
+            anchor_pb,
+        ))
+        .finish();
     // Convert the input into a canonical form.
     let (mut input, input_path) =
         match EnvironmentInput::from_files_or_specs(args.file, args.package_spec)? {
@@ -118,7 +110,7 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
                 EnvironmentYaml {
                     dependencies: specs
                         .into_iter()
-                        .map(MatchSpecOrSubSection::MatchSpec)
+                        .map(|spec| MatchSpecOrSubSection::MatchSpec(Box::new(spec)))
                         .collect(),
                     ..EnvironmentYaml::default()
                 },
@@ -132,16 +124,24 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
     // Determine the path to the environment.
     let prefix = if let Some(prefix) = &args.prefix {
         if input.prefix.is_some() {
-            tracing::warn!("--prefix is specified, but the input file also contains a prefix, the input file will be ignored");
+            tracing::warn!(
+                "--prefix is specified, but the input file also contains a prefix, the input file will be ignored"
+            );
         } else if input.name.is_some() {
-            tracing::warn!("--prefix is specified, but the input file also contains a name, the input file will be ignored");
+            tracing::warn!(
+                "--prefix is specified, but the input file also contains a name, the input file will be ignored"
+            );
         }
         prefix
     } else if let Some(name) = args.name {
         if input.prefix.is_some() {
-            tracing::warn!("--name is specified, but the input file also contains a prefix, the input file will be ignored");
+            tracing::warn!(
+                "--name is specified, but the input file also contains a prefix, the input file will be ignored"
+            );
         } else if input.name.is_some() {
-            tracing::warn!("--name is specified, but the input file also contains a name, the input file will be ignored");
+            tracing::warn!(
+                "--name is specified, but the input file also contains a name, the input file will be ignored"
+            );
         }
         let registry = Registry::from_env();
         &registry.root().join(name.as_ref())
@@ -171,7 +171,9 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
 
     // Remove the prefix if it already exists
     if prefix.is_dir() && args.dry_run {
-        miette::bail!("The prefix already exists, and --dry-run is specified, so the operation will not be performed");
+        miette::bail!(
+            "The prefix already exists, and --dry-run is specified, so the operation will not be performed"
+        );
     } else if prefix.is_dir() {
         let allow_remove = args.yes
             || dialoguer::Confirm::new()
@@ -210,7 +212,9 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
     };
     if args.channel_customization.override_channels {
         if !input.channels.is_empty() {
-            tracing::warn!("--override-channels is specified, but the input also contains channels, these will be ignored");
+            tracing::warn!(
+                "--override-channels is specified, but the input also contains channels, these will be ignored"
+            );
         }
     } else {
         channels.append(&mut input.channels);
@@ -218,7 +222,7 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
 
     let channels = channels
         .into_iter()
-        .map(|channel| channel.into_channel(&channel_config))
+        .map(|channel| channel.into_base_url(&channel_config))
         .collect::<Result<Vec<_>, ParseChannelError>>()
         .into_diagnostic()?;
 
@@ -228,74 +232,57 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
         .platform
         .unwrap_or_else(Platform::current);
 
-    // Load the repodata for specs.
-    // TODO: Add progress reporting
-    let (_client, client_with_middleware) = build_reqwest_clients(Some(&config));
-    let gateway = config.gateway(client_with_middleware.clone());
-    let repo_data_duration = Instant::now();
-    let available_packages = await_in_progress("fetching repodata", |_| {
-        gateway
-            .query(
-                channels.into_iter().unique(),
-                [platform, Platform::NoArch],
-                input.match_specs().cloned(),
-            )
-            .recursive(true)
-            .execute()
-            .map_err(Report::from_err)
-    })
-    .await?;
-    let repo_data_record_count = available_packages
-        .iter()
-        .map(|records| records.len())
-        .sum::<usize>();
-    let repo_data_duration = repo_data_duration.elapsed();
-    eprintln!(
-        "{}Fetched {repo_data_record_count} records {}",
-        console::style(console::Emoji("✔ ", "")).green(),
-        console::style(format!(
-            "in {}",
-            humantime::format_duration(repo_data_duration)
-        ))
-        .dim()
-    );
+    // Create pixi dependencies from match specs
+    let mut dependencies = DependencyMap::default();
+    for spec in input.match_specs().cloned() {
+        if let (Some(name), spec) = spec.into_nameless() {
+            let spec = PixiSpec::from_nameless_matchspec(spec, &channel_config);
+            dependencies.insert(name, spec);
+        } else {
+            return Err(miette::miette!(
+                "Pixi cannot deal with nameless match specs yet. Please specify the package name in the match spec."
+            ));
+        }
+    }
 
-    // Determine the virtual packages
-    let virtual_packages =
-        VirtualPackages::detect(&VirtualPackageOverrides::from_env()).into_diagnostic()?;
-
-    // Solve the environment
-    let solver_task = SolverTask {
-        virtual_packages: virtual_packages.into_generic_virtual_packages().collect(),
-        specs: input.match_specs().cloned().collect(),
-        ..SolverTask::from_iter(&available_packages)
+    // Create the build environment for the target platform
+    let build_environment = if platform == Platform::current() {
+        BuildEnvironment::default()
+    } else {
+        BuildEnvironment::simple_cross(platform)
+            .into_diagnostic()
+            .context("failed to create cross-platform build environment")?
     };
 
-    let solver_duration = Instant::now();
-    let solver_result = wrap_in_progress("solving", move || match args.solver {
-        SolverBackend::Resolvo => rattler_solve::resolvo::Solver.solve(solver_task),
-        SolverBackend::Libsolv => rattler_solve::libsolv_c::Solver.solve(solver_task),
-    })
-    .into_diagnostic()?;
-    let solver_duration = solver_duration.elapsed();
-    eprintln!(
-        "{}Solved environment {}",
-        console::style(console::Emoji("✔ ", "")).green(),
-        console::style(format!(
-            "in {}",
-            humantime::format_duration(solver_duration)
-        ))
-        .dim()
-    );
+    // Create the pixi environment solve spec
+    let solve_spec = PixiEnvironmentSpec {
+        name: input.name,
+        dependencies,
+        build_environment,
+        channels,
+        channel_config: channel_config.clone(),
+        ..Default::default()
+    };
+
+    // Solve the pixi environment using CommandDispatcher
+    let solver_records = command_dispatcher
+        .solve_pixi_environment(solve_spec)
+        .await
+        .map_err(|e| miette::miette!("Failed to solve pixi environment: {}", e))?;
+
+    // Clear the reporter.
+    command_dispatcher.clear_reporter().await;
+
+    // Extract the binary records from solver results
+    let records = solver_records
+        .into_iter()
+        .filter_map(|record| record.into_binary())
+        .collect::<Vec<_>>();
 
     // Print the result
     eprintln!("\nThe following packages will be installed:\n");
-    print_transaction(
-        &solver_result.records,
-        &solver_result.features,
-        &channel_config,
-    )
-    .into_diagnostic()?;
+    print_transaction(&records, &std::collections::HashMap::new(), &channel_config)
+        .into_diagnostic()?;
 
     if args.dry_run {
         // This is the point where we would normally ask the user for confirmation for
@@ -322,24 +309,18 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
     }
 
     // Install the environment
-    let cache_dir =
-        get_cache_dir().expect("cache dir is already available because it was used by the gateway");
-    let package_count = solver_result.records.len();
+    let package_count = records.len();
     let installation_duration = Instant::now();
-    await_in_progress("installing", |_| {
-        Installer::new()
-            .with_package_cache(PackageCache::new(
-                cache_dir.join(consts::CONDA_PACKAGE_CACHE_DIR),
-            ))
-            .with_download_client(client_with_middleware)
-            .with_execute_link_scripts(true)
-            .with_installed_packages(vec![])
-            .with_target_platform(platform)
-            .with_reporter(Reporter::new(global_multi_progress()))
-            .install(prefix, solver_result.records)
-    })
-    .await
-    .into_diagnostic()?;
+    Installer::new()
+        .with_package_cache(command_dispatcher.package_cache().clone())
+        .with_download_client(command_dispatcher.download_client().clone())
+        .with_execute_link_scripts(true)
+        .with_installed_packages(vec![])
+        .with_target_platform(platform)
+        .with_reporter(Reporter::new(global_multi_progress()))
+        .install(prefix, records)
+        .await
+        .into_diagnostic()?;
     let installation_duration = installation_duration.elapsed();
 
     eprintln!(

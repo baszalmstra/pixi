@@ -5,7 +5,7 @@ use rattler_conda_types::Platform;
 use rattler_shell::shell::ShellEnum;
 use std::{path::PathBuf, process::Stdio};
 
-use crate::{registry::Registry, EnvironmentName};
+use crate::{EnvironmentName, registry::Registry};
 
 /// Run an executable in a conda environment.
 #[derive(Parser, Debug)]
