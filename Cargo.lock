@@ -4976,6 +4976,7 @@ dependencies = [
  "pixi_config",
  "pixi_consts",
  "pixi_progress",
+ "pixi_record",
  "pixi_reporters",
  "pixi_spec",
  "pixi_spec_containers",

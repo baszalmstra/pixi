@@ -1,34 +1,28 @@
 pub mod input;
 
-use std::{
-    collections::HashMap,
-    io,
-    io::Write,
-    path::PathBuf,
-    str::FromStr,
-    time::{Duration, Instant},
-};
-
 use clap::Parser;
-use indicatif::MultiProgress;
 use indicatif::ProgressBar;
 use input::EnvironmentInput;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pixi_config::Config;
 use pixi_progress::global_multi_progress;
-use rattler::install::{Installer, Transaction};
 use rattler_conda_types::{
     ChannelConfig, EnvironmentYaml, MatchSpec, MatchSpecOrSubSection, NamedChannelOrUrl,
-    PackageName, ParseChannelError, Platform, PrefixRecord, RepoDataRecord,
+    PackageName, ParseChannelError, Platform,
 };
+use std::borrow::Cow;
+use std::ffi::OsStr;
+use std::{collections::HashMap, io, io::Write, path::PathBuf, str::FromStr, time::Instant};
 use tabwriter::TabWriter;
 
 use crate::{EnvironmentName, command_dispatcher_builder, registry::Registry};
-use pixi_command_dispatcher::{BuildEnvironment, PixiEnvironmentSpec};
+use pixi_command_dispatcher::{BuildEnvironment, InstallPixiEnvironmentSpec, PixiEnvironmentSpec};
+use pixi_record::PixiRecord;
 use pixi_spec;
 use pixi_spec::PixiSpec;
 use pixi_spec_containers::DependencyMap;
+use rattler_conda_types::prefix::Prefix;
 
 /// Create a new conda environment from a list of specified packages.
 #[derive(Parser, Debug)]
@@ -254,18 +248,30 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
             .context("failed to create cross-platform build environment")?
     };
 
+    // Determine the environment name
+    let environment_name = input
+        .name
+        .clone()
+        .or_else(|| {
+            prefix
+                .file_name()
+                .map(OsStr::to_string_lossy)
+                .map(Cow::into_owned)
+        })
+        .unwrap_or_else(|| String::from("env"));
+
     // Create the pixi environment solve spec
     let solve_spec = PixiEnvironmentSpec {
-        name: input.name,
+        name: Some(environment_name.clone()),
         dependencies,
-        build_environment,
-        channels,
+        build_environment: build_environment.clone(),
+        channels: channels.clone(),
         channel_config: channel_config.clone(),
         ..Default::default()
     };
 
     // Solve the pixi environment using CommandDispatcher
-    let solver_records = command_dispatcher
+    let solved_records = command_dispatcher
         .solve_pixi_environment(solve_spec)
         .await
         .map_err(|e| miette::miette!("Failed to solve pixi environment: {}", e))?;
@@ -273,16 +279,14 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
     // Clear the reporter.
     command_dispatcher.clear_reporter().await;
 
-    // Extract the binary records from solver results
-    let records = solver_records
-        .into_iter()
-        .filter_map(|record| record.into_binary())
-        .collect::<Vec<_>>();
-
     // Print the result
     eprintln!("\nThe following packages will be installed:\n");
-    print_transaction(&records, &std::collections::HashMap::new(), &channel_config)
-        .into_diagnostic()?;
+    print_transaction(
+        &solved_records,
+        &std::collections::HashMap::new(),
+        &channel_config,
+    )
+    .into_diagnostic()?;
 
     if args.dry_run {
         // This is the point where we would normally ask the user for confirmation for
@@ -308,20 +312,31 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
         return Ok(());
     }
 
-    // Install the environment
-    let package_count = records.len();
+    // Create installation spec
+    let package_count = solved_records.len();
+    let install_spec = InstallPixiEnvironmentSpec {
+        name: environment_name,
+        records: solved_records,
+        prefix: Prefix::create(prefix.to_path_buf()).into_diagnostic()?,
+        installed: None,
+        build_environment,
+        force_reinstall: std::collections::HashSet::new(),
+        channels,
+        channel_config: channel_config.clone(),
+        variants: None,
+        enabled_protocols: Default::default(),
+    };
+
+    // Install the environment using CommandDispatcher
     let installation_duration = Instant::now();
-    Installer::new()
-        .with_package_cache(command_dispatcher.package_cache().clone())
-        .with_download_client(command_dispatcher.download_client().clone())
-        .with_execute_link_scripts(true)
-        .with_installed_packages(vec![])
-        .with_target_platform(platform)
-        .with_reporter(Reporter::new(global_multi_progress()))
-        .install(prefix, records)
+    command_dispatcher
+        .install_pixi_environment(install_spec)
         .await
-        .into_diagnostic()?;
+        .map_err(|e| miette::miette!("Failed to install pixi environment: {}", e))?;
     let installation_duration = installation_duration.elapsed();
+
+    // Clear the reporter
+    command_dispatcher.clear_reporter().await;
 
     eprintln!(
         "{}Installed {package_count} packages into {} {}",
@@ -338,7 +353,7 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
 }
 
 fn print_transaction(
-    records: &[RepoDataRecord],
+    records: &[PixiRecord],
     features: &HashMap<PackageName, Vec<String>>,
     channel_config: &ChannelConfig,
 ) -> io::Result<()> {
@@ -362,190 +377,52 @@ fn print_transaction(
         separator_style.apply_to("  -------\t-------\t-----\t-------\t----")
     )?;
 
-    let format_record = |writer: &mut TabWriter<_>, r: &RepoDataRecord| -> io::Result<()> {
-        let channel = r
-            .channel
-            .as_deref()
-            .and_then(|c| NamedChannelOrUrl::from_str(c).ok())
-            .and_then(|c| c.into_base_url(channel_config).ok())
-            .map(|c| channel_config.canonical_name(c.as_ref()))
-            .map(|name| {
-                name.split_once("://")
-                    .map(|(_, name)| name.to_string())
-                    .unwrap_or(name)
-            })
-            .map(|name| name.trim_end_matches('/').to_string());
+    let format_record = |writer: &mut TabWriter<_>, r: &PixiRecord| -> io::Result<()> {
+        let location = match r {
+            PixiRecord::Binary(r) => r
+                .channel
+                .as_deref()
+                .and_then(|c| NamedChannelOrUrl::from_str(c).ok())
+                .and_then(|c| c.into_base_url(channel_config).ok())
+                .map(|c| channel_config.canonical_name(c.as_ref()))
+                .map(|name| {
+                    name.split_once("://")
+                        .map(|(_, name)| name.to_string())
+                        .unwrap_or(name)
+                })
+                .map(|name| name.trim_end_matches('/').to_string()),
+            PixiRecord::Source(source) => Some(source.source.to_string()),
+        };
 
         write!(writer, "{} ", console::style("+").green())?;
 
-        if let Some(features) = features.get(&r.package_record.name) {
+        if let Some(features) = features.get(&r.package_record().name) {
             write!(
                 writer,
                 "{}[{}]\t",
-                r.package_record.name.as_normalized(),
+                r.package_record().name.as_normalized(),
                 features.join(", "),
             )?
         } else {
-            write!(writer, "{}\t", r.package_record.name.as_normalized(),)?;
+            write!(writer, "{}\t", r.package_record().name.as_normalized(),)?;
         }
 
         writeln!(
             writer,
             "{}\t{}\t{}\t{}",
-            &r.package_record.version,
-            &r.package_record.build,
-            channel.as_deref().unwrap_or_default(),
-            r.package_record
+            &r.package_record().version,
+            &r.package_record().build,
+            location.as_deref().unwrap_or_default(),
+            r.package_record()
                 .size
                 .map(|bytes| human_bytes::human_bytes(bytes as f64))
                 .unwrap_or_default()
         )
     };
 
-    for package in records.iter().sorted_by_key(|r| &r.package_record.name) {
+    for package in records.iter().sorted_by_key(|r| &r.package_record().name) {
         format_record(&mut writer, package)?;
     }
 
     writer.flush()
-}
-
-struct Reporter {
-    mp: MultiProgress,
-    inner: parking_lot::Mutex<ReporterInner>,
-}
-
-impl Reporter {
-    pub fn new(mp: MultiProgress) -> Self {
-        Self {
-            mp,
-            inner: parking_lot::Mutex::new(ReporterInner::default()),
-        }
-    }
-}
-
-#[derive(Default)]
-struct ReporterInner {
-    records: Vec<CacheEntry>,
-    operations: Vec<Operation>,
-    longest_package_name: usize,
-}
-
-struct CacheEntry {
-    repo_data_record: RepoDataRecord,
-    download_started: Option<Instant>,
-}
-
-struct Operation {
-    repo_data_record: RepoDataRecord,
-}
-
-impl rattler::install::Reporter for Reporter {
-    fn on_transaction_start(&self, transaction: &Transaction<PrefixRecord, RepoDataRecord>) {
-        let mut inner = self.inner.lock();
-        inner.longest_package_name = transaction
-            .operations
-            .iter()
-            .flat_map(|op| {
-                [
-                    op.record_to_install(),
-                    op.record_to_remove().map(|r| &r.repodata_record),
-                ]
-            })
-            .flatten()
-            .map(|record| record.package_record.name.as_normalized().len())
-            .max()
-            .unwrap_or_default();
-    }
-
-    fn on_transaction_operation_start(&self, _operation: usize) {}
-
-    fn on_populate_cache_start(&self, _operation: usize, record: &RepoDataRecord) -> usize {
-        let mut inner = self.inner.lock();
-        let id = inner.records.len();
-        inner.records.push(CacheEntry {
-            repo_data_record: record.clone(),
-            download_started: None,
-        });
-        id
-    }
-
-    fn on_validate_start(&self, cache_entry: usize) -> usize {
-        cache_entry
-    }
-
-    fn on_validate_complete(&self, _validate_idx: usize) {}
-
-    fn on_download_start(&self, cache_entry: usize) -> usize {
-        let mut inner = self.inner.lock();
-        inner.records[cache_entry].download_started = Some(Instant::now());
-        cache_entry
-    }
-
-    fn on_download_progress(&self, _download_idx: usize, _progress: u64, _total: Option<u64>) {}
-
-    fn on_download_completed(&self, download_idx: usize) {
-        let inner = self.inner.lock();
-        let record = &inner.records[download_idx];
-        let duration = record
-            .download_started
-            .map(|started| started.elapsed())
-            .expect("a download must have started for it to complete");
-
-        // Round to milliseconds.
-        let duration = Duration::from_millis(duration.as_millis() as u64);
-        let human_duration = humantime::format_duration(duration);
-        let human_summary = if let Some(size) = record.repo_data_record.package_record.size {
-            let human_size = human_bytes::human_bytes(size as f64);
-            let human_speed = human_bytes::human_bytes(size as f64 / duration.as_secs_f64());
-
-            format!("{human_size:>9} @ {human_speed:>9}/s {human_duration}")
-        } else {
-            format!("{human_duration:<20}")
-        };
-
-        self.mp
-            .println(format!(
-                "{} Downloaded {:<width$} {}",
-                console::style("↓").yellow(),
-                record.repo_data_record.package_record.name.as_normalized(),
-                console::style(human_summary).dim(),
-                width = inner.longest_package_name
-            ))
-            .expect("failed to write to progress bar?");
-    }
-
-    fn on_populate_cache_complete(&self, _cache_entry: usize) {}
-
-    fn on_unlink_start(&self, operation: usize, _record: &PrefixRecord) -> usize {
-        operation
-    }
-
-    fn on_unlink_complete(&self, _index: usize) {}
-
-    fn on_link_start(&self, _operation: usize, record: &RepoDataRecord) -> usize {
-        let mut inner = self.inner.lock();
-        let id = inner.operations.len();
-        inner.operations.push(Operation {
-            repo_data_record: record.clone(),
-        });
-        id
-    }
-
-    fn on_link_complete(&self, index: usize) {
-        let inner = self.inner.lock();
-        let record = &inner.operations[index];
-
-        self.mp
-            .println(format!(
-                "{}  Installed {:<width$}",
-                console::style("+").green(),
-                record.repo_data_record.package_record.name.as_normalized(),
-                width = inner.longest_package_name
-            ))
-            .expect("failed to write to progress bar?");
-    }
-
-    fn on_transaction_operation_complete(&self, _operation: usize) {}
-
-    fn on_transaction_complete(&self) {}
 }

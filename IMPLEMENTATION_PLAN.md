@@ -51,23 +51,25 @@ The `CommandDispatcher` provides:
 3. Replace `rattler_solve` calls with `command_dispatcher.solve_conda_environment()`
 4. Update error handling to use `CommandDispatcherError`
 
-### Stage 3: 🔄 IN PROGRESS - Upgrade to solve_pixi_environment
+### Stage 3: ✅ COMPLETE - Upgrade to solve_pixi_environment
 **Goal**: Replace solve_conda_environment with solve_pixi_environment for enhanced flexibility
 **Success Criteria**:
 - PixiEnvironmentSpec constructed correctly from input requirements
 - solve_pixi_environment used instead of solve_conda_environment
 - Supports both binary and source packages (future-proofing)
+- Environment name reused between solve and install specs
 **Tests**: Environment solving works with PixiEnvironmentSpec
-**Status**: In Progress
+**Status**: Complete
 
-### Stage 4: ⏳ PENDING - Replace Installation with install_pixi_environment
+### Stage 4: ✅ COMPLETE - Replace Installation with install_pixi_environment
 **Goal**: Replace direct Installer usage with CommandDispatcher's install_pixi_environment
 **Success Criteria**:
 - InstallPixiEnvironmentSpec properly constructed
 - Installation uses CommandDispatcher's install_pixi_environment method
 - Progress reporting continues to work correctly
+- Removed old Reporter and unused imports
 **Tests**: Installation completes successfully through CommandDispatcher
-**Status**: Pending
+**Status**: Complete
 
 **Tasks**:
 1. Convert solved records to `InstallPixiEnvironmentSpec`
