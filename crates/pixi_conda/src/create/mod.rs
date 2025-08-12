@@ -273,8 +273,7 @@ pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
     // Solve the pixi environment using CommandDispatcher
     let solved_records = command_dispatcher
         .solve_pixi_environment(solve_spec)
-        .await
-        .map_err(|e| miette::miette!("Failed to solve pixi environment: {}", e))?;
+        .await?;
 
     // Clear the reporter.
     command_dispatcher.clear_reporter().await;
