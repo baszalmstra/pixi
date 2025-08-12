@@ -50,3 +50,4 @@ rattler_virtual_packages = { workspace = true }
 tabwriter = { workspace = true, features = ["ansi_formatting"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }

@@ -7,9 +7,10 @@ use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pixi_config::Config;
 use pixi_progress::global_multi_progress;
+use rattler_conda_types::package::ArchiveIdentifier;
 use rattler_conda_types::{
-    ChannelConfig, EnvironmentYaml, MatchSpec, MatchSpecOrSubSection, NamedChannelOrUrl,
-    PackageName, ParseChannelError, Platform,
+    ChannelConfig, MatchSpec, NamedChannelOrUrl, PackageArchiveHash, PackageName,
+    ParseChannelError, Platform,
 };
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -22,7 +23,7 @@ use pixi_command_dispatcher::{
 };
 use pixi_record::PixiRecord;
 use pixi_spec;
-use pixi_spec::PixiSpec;
+use pixi_spec::{PixiSpec, UrlSpec};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::prefix::Prefix;
 
@@ -39,7 +40,7 @@ use rattler_conda_types::prefix::Prefix;
 struct EnvironmentCreator {
     prefix: PathBuf,
     environment_name: String,
-    input: EnvironmentYaml,
+    input: EnvironmentInput,
     channel_config: ChannelConfig,
     channels: Vec<rattler_conda_types::ChannelUrl>,
     build_environment: BuildEnvironment,
@@ -192,25 +193,14 @@ impl EnvironmentCreator {
     /// and installation phases. The result is a self-contained object that knows
     /// exactly what environment to create and how to create it.
     async fn resolve(config: &Config, args: &Args) -> miette::Result<Self> {
-        // Convert the input into a canonical form
-        let (mut input, input_path) = match EnvironmentInput::from_files_or_specs(
-            args.file.clone(),
-            args.package_spec.clone(),
-        )? {
-            EnvironmentInput::EnvironmentYaml(environment, path) => (environment, Some(path)),
-            EnvironmentInput::Specs(specs) => (
-                EnvironmentYaml {
-                    dependencies: specs
-                        .into_iter()
-                        .map(|spec| MatchSpecOrSubSection::MatchSpec(Box::new(spec)))
-                        .collect(),
-                    ..EnvironmentYaml::default()
-                },
-                None,
-            ),
-            EnvironmentInput::Files(_) => {
-                unimplemented!("explicit environment files are not yet supported")
-            }
+        // Parse the input but keep it in its original form
+        let input =
+            EnvironmentInput::from_files_or_specs(args.file.clone(), args.package_spec.clone())?;
+
+        // Extract input path if it's an environment yaml
+        let input_path = match &input {
+            EnvironmentInput::EnvironmentYaml(_, path) => Some(path.clone()),
+            _ => None,
         };
 
         // Determine the path to the environment
@@ -229,7 +219,7 @@ impl EnvironmentCreator {
         }
 
         // Resolve channels
-        let channels = Self::resolve_channels(config, args, &mut input, &channel_config)?;
+        let channels = Self::resolve_channels(config, args, &input, &channel_config)?;
 
         // Determine platform
         let platform = args
@@ -247,16 +237,17 @@ impl EnvironmentCreator {
         };
 
         // Determine environment name
-        let environment_name = input
-            .name
-            .clone()
-            .or_else(|| {
-                prefix
-                    .file_name()
-                    .map(OsStr::to_string_lossy)
-                    .map(Cow::into_owned)
-            })
-            .unwrap_or_else(|| String::from("env"));
+        let environment_name = match &input {
+            EnvironmentInput::EnvironmentYaml(env_yaml, _) => env_yaml.name.clone(),
+            _ => None,
+        }
+        .or_else(|| {
+            prefix
+                .file_name()
+                .map(OsStr::to_string_lossy)
+                .map(Cow::into_owned)
+        })
+        .unwrap_or_else(|| String::from("env"));
 
         Ok(EnvironmentCreator {
             prefix,
@@ -274,38 +265,46 @@ impl EnvironmentCreator {
     /// users can specify where to create the environment. It prioritizes explicit
     /// paths over names, warns about conflicting specifications, and ensures the
     /// final path is absolute and normalized for consistent behavior across platforms.
-    fn resolve_prefix(args: &Args, input: &EnvironmentYaml) -> miette::Result<PathBuf> {
+    fn resolve_prefix(args: &Args, input: &EnvironmentInput) -> miette::Result<PathBuf> {
+        // Extract prefix and name from input if it's an EnvironmentYaml
+        let (input_prefix, input_name) = match input {
+            EnvironmentInput::EnvironmentYaml(env_yaml, _) => {
+                (env_yaml.prefix.as_ref(), env_yaml.name.as_ref())
+            }
+            _ => (None, None),
+        };
+
         let prefix = if let Some(prefix) = &args.prefix {
-            if input.prefix.is_some() {
+            if input_prefix.is_some() {
                 tracing::warn!(
                     "--prefix is specified, but the input file also contains a prefix, the input file will be ignored"
                 );
-            } else if input.name.is_some() {
+            } else if input_name.is_some() {
                 tracing::warn!(
                     "--prefix is specified, but the input file also contains a name, the input file will be ignored"
                 );
             }
             prefix
         } else if let Some(ref name) = args.name {
-            if input.prefix.is_some() {
+            if input_prefix.is_some() {
                 tracing::warn!(
                     "--name is specified, but the input file also contains a prefix, the input file will be ignored"
                 );
-            } else if input.name.is_some() {
+            } else if input_name.is_some() {
                 tracing::warn!(
                     "--name is specified, but the input file also contains a name, the input file will be ignored"
                 );
             }
             let registry = Registry::from_env();
             &registry.root().join(name.as_ref())
-        } else if let Some(prefix) = &input.prefix {
-            if input.name.is_some() {
+        } else if let Some(prefix) = input_prefix {
+            if input_name.is_some() {
                 tracing::warn!(
                     "the input file contains both a 'name' and a 'prefix', the 'name' will be ignored"
                 );
             }
             prefix
-        } else if let Some(name) = &input.name {
+        } else if let Some(name) = input_name {
             let registry = Registry::from_env();
             &registry.root().join(name)
         } else {
@@ -371,7 +370,7 @@ impl EnvironmentCreator {
     fn resolve_channels(
         config: &Config,
         args: &Args,
-        input: &mut EnvironmentYaml,
+        input: &EnvironmentInput,
         channel_config: &ChannelConfig,
     ) -> miette::Result<Vec<rattler_conda_types::ChannelUrl>> {
         let mut channels = if args.channel_customization.channel.is_empty() {
@@ -380,14 +379,20 @@ impl EnvironmentCreator {
             args.channel_customization.channel.clone()
         };
 
+        // Extract channels from input if it's an EnvironmentYaml
+        let mut input_channels = match input {
+            EnvironmentInput::EnvironmentYaml(env_yaml, _) => env_yaml.channels.clone(),
+            _ => Vec::new(),
+        };
+
         if args.channel_customization.override_channels {
-            if !input.channels.is_empty() {
+            if !input_channels.is_empty() {
                 tracing::warn!(
                     "--override-channels is specified, but the input also contains channels, these will be ignored"
                 );
             }
         } else {
-            channels.append(&mut input.channels);
+            channels.append(&mut input_channels);
         }
 
         channels
@@ -409,18 +414,8 @@ impl EnvironmentCreator {
         &self,
         command_dispatcher: &CommandDispatcher,
     ) -> miette::Result<Vec<PixiRecord>> {
-        // Create dependencies from match specs
-        let mut dependencies = DependencyMap::default();
-        for spec in self.input.match_specs().cloned() {
-            if let (Some(name), spec) = spec.into_nameless() {
-                let spec = PixiSpec::from_nameless_matchspec(spec, &self.channel_config);
-                dependencies.insert(name, spec);
-            } else {
-                return Err(miette::miette!(
-                    "Pixi cannot deal with nameless match specs yet. Please specify the package name in the match spec."
-                ));
-            }
-        }
+        // Create dependencies from input
+        let dependencies = self.create_dependency_map()?;
 
         // Create the pixi environment spec
         let environment_spec = PixiEnvironmentSpec {
@@ -504,6 +499,102 @@ impl EnvironmentCreator {
         );
 
         Ok(())
+    }
+
+    /// Creates a dependency map from the environment input.
+    ///
+    /// This method handles all three types of environment input (EnvironmentYaml,
+    /// direct MatchSpecs, and explicit environment files) and converts them directly
+    /// to PixiSpec dependencies that can be used by the solver.
+    fn create_dependency_map(&self) -> miette::Result<DependencyMap<PackageName, PixiSpec>> {
+        match &self.input {
+            EnvironmentInput::EnvironmentYaml(env_yaml, _) => {
+                self.process_match_specs(env_yaml.match_specs().cloned())
+            }
+            EnvironmentInput::Specs(specs) => self.process_match_specs(specs.iter().cloned()),
+            EnvironmentInput::Files(explicit_specs) => self.process_explicit_specs(explicit_specs),
+        }
+    }
+
+    /// Processes an iterator of MatchSpecs and converts them to PixiSpec dependencies.
+    fn process_match_specs(
+        &self,
+        specs: impl Iterator<Item = MatchSpec>,
+    ) -> miette::Result<DependencyMap<PackageName, PixiSpec>> {
+        let mut dependencies = DependencyMap::default();
+
+        for spec in specs {
+            if let (Some(name), spec) = spec.into_nameless() {
+                let pixi_spec = PixiSpec::from_nameless_matchspec(spec, &self.channel_config);
+                dependencies.insert(name, pixi_spec);
+            } else {
+                return Err(miette::miette!(
+                    "Pixi cannot deal with nameless match specs yet. Please specify the package name in the match spec."
+                ));
+            }
+        }
+
+        Ok(dependencies)
+    }
+
+    /// Processes explicit environment specs and converts them to PixiSpec dependencies.
+    fn process_explicit_specs(
+        &self,
+        explicit_specs: &[rattler_conda_types::ExplicitEnvironmentSpec],
+    ) -> miette::Result<DependencyMap<PackageName, PixiSpec>> {
+        let mut dependencies = DependencyMap::default();
+
+        for spec in explicit_specs {
+            for entry in &spec.packages {
+                let (package_name, pixi_spec) = self.process_explicit_entry(entry)?;
+                dependencies.insert(package_name, pixi_spec);
+            }
+        }
+
+        Ok(dependencies)
+    }
+
+    /// Processes a single explicit environment entry and converts it to a PixiSpec.
+    fn process_explicit_entry(
+        &self,
+        entry: &rattler_conda_types::ExplicitEnvironmentEntry,
+    ) -> miette::Result<(PackageName, PixiSpec)> {
+        // Extract hash from URL fragment
+        let hash_result = entry
+            .package_archive_hash()
+            .into_diagnostic()
+            .with_context(|| {
+                format!(
+                    "failed to extract hash from explicit environment entry URL '{}'",
+                    entry.url
+                )
+            })?;
+
+        // Create UrlSpec with extracted hash
+        let mut url_spec = UrlSpec {
+            url: entry.url.clone(),
+            md5: None,
+            sha256: None,
+        };
+
+        match hash_result {
+            Some(PackageArchiveHash::Md5(md5)) => url_spec.md5 = Some(md5),
+            Some(PackageArchiveHash::Sha256(sha256)) => url_spec.sha256 = Some(sha256),
+            None => {} // No hash available
+        }
+
+        // Extract basic information from the filename of the url
+        let archive_identifier = ArchiveIdentifier::try_from_url(&entry.url).ok_or_else(|| {
+            miette::miette!(
+                "failed to extract archive identifier from URL '{}'",
+                entry.url
+            )
+        })?;
+
+        let package_name = PackageName::from_str(&archive_identifier.name)
+            .map_err(|_| miette::miette!("Invalid package name in URL '{}'", entry.url))?;
+
+        Ok((package_name, url_spec.into()))
     }
 }
 
@@ -612,4 +703,154 @@ fn print_transaction(
     }
 
     writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rattler_conda_types::{ExplicitEnvironmentEntry, ExplicitEnvironmentSpec, ParseStrictness};
+    use url::Url;
+
+    // Helper function to create a test EnvironmentCreator
+    fn create_test_environment_creator(input: EnvironmentInput) -> EnvironmentCreator {
+        EnvironmentCreator {
+            prefix: PathBuf::from("/tmp/test"),
+            environment_name: "test".to_string(),
+            input,
+            channel_config: ChannelConfig::default_with_root_dir(PathBuf::from("/tmp")),
+            channels: vec![],
+            build_environment: BuildEnvironment::default(),
+        }
+    }
+
+    #[test]
+    fn test_create_dependency_map_from_explicit_specs() {
+        // Create a test explicit environment spec with URL and MD5 hash
+        let url = Url::parse("https://conda.anaconda.org/conda-forge/linux-64/numpy-1.21.0-py39h9894fe3_0.conda#5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b").unwrap();
+        let entry = ExplicitEnvironmentEntry { url };
+        let spec = ExplicitEnvironmentSpec {
+            platform: Some(Platform::Linux64),
+            packages: vec![entry],
+        };
+
+        let input = EnvironmentInput::Files(vec![spec]);
+        let creator = create_test_environment_creator(input);
+
+        // Test the conversion
+        let result = creator.create_dependency_map();
+        assert!(result.is_ok());
+
+        let dependencies = result.unwrap();
+        assert_eq!(dependencies.names().count(), 1);
+
+        // Verify the dependency was created correctly
+        let package_name = PackageName::from_str("numpy").unwrap();
+        assert!(dependencies.contains_key(&package_name));
+    }
+
+    #[test]
+    fn test_create_dependency_map_from_explicit_specs_with_sha256() {
+        // Create a test explicit environment spec with URL and SHA256 hash
+        let url = Url::parse("https://conda.anaconda.org/conda-forge/linux-64/scipy-1.7.0-py39h9894fe3_0.conda#sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef").unwrap();
+        let entry = ExplicitEnvironmentEntry { url };
+        let spec = ExplicitEnvironmentSpec {
+            platform: Some(Platform::Linux64),
+            packages: vec![entry],
+        };
+
+        let input = EnvironmentInput::Files(vec![spec]);
+        let creator = create_test_environment_creator(input);
+
+        // Test the conversion
+        let result = creator.create_dependency_map();
+        assert!(result.is_ok());
+
+        let dependencies = result.unwrap();
+        assert_eq!(dependencies.names().count(), 1);
+
+        // Verify the dependency was created correctly with SHA256
+        let package_name = PackageName::from_str("scipy").unwrap();
+        assert!(dependencies.contains_key(&package_name));
+    }
+
+    #[test]
+    fn test_create_dependency_map_from_explicit_specs_no_hash() {
+        // Create a test explicit environment spec with URL but no hash
+        let url = Url::parse(
+            "https://conda.anaconda.org/conda-forge/linux-64/requests-2.25.1-pyhd3eb1b0_0.conda",
+        )
+        .unwrap();
+        let entry = ExplicitEnvironmentEntry { url };
+        let spec = ExplicitEnvironmentSpec {
+            platform: Some(Platform::Linux64),
+            packages: vec![entry],
+        };
+
+        let input = EnvironmentInput::Files(vec![spec]);
+        let creator = create_test_environment_creator(input);
+
+        // Test the conversion
+        let result = creator.create_dependency_map();
+        assert!(result.is_ok());
+
+        let dependencies = result.unwrap();
+        assert_eq!(dependencies.names().count(), 1);
+
+        // Verify the dependency was created correctly without hashes
+        let package_name = PackageName::from_str("requests").unwrap();
+        assert!(dependencies.contains_key(&package_name));
+    }
+
+    #[test]
+    fn test_create_dependency_map_from_match_specs() {
+        // Create direct MatchSpec input
+        let match_spec = MatchSpec::from_str("numpy>=1.21.0", ParseStrictness::Lenient).unwrap();
+        let input = EnvironmentInput::Specs(vec![match_spec]);
+        let creator = create_test_environment_creator(input);
+
+        // Test the conversion
+        let result = creator.create_dependency_map();
+        assert!(result.is_ok());
+
+        let dependencies = result.unwrap();
+        assert_eq!(dependencies.names().count(), 1);
+
+        // Verify the dependency was created correctly
+        let package_name = PackageName::from_str("numpy").unwrap();
+        assert!(dependencies.contains_key(&package_name));
+    }
+
+    #[test]
+    fn test_create_dependency_map_from_multiple_explicit_specs() {
+        // Create multiple explicit environment specs
+        let url1 = Url::parse("https://conda.anaconda.org/conda-forge/linux-64/numpy-1.21.0-py39h9894fe3_0.conda#5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b").unwrap();
+        let url2 = Url::parse(
+            "https://conda.anaconda.org/conda-forge/linux-64/scipy-1.7.0-py39h9894fe3_0.conda",
+        )
+        .unwrap();
+
+        let spec1 = ExplicitEnvironmentSpec {
+            platform: Some(Platform::Linux64),
+            packages: vec![ExplicitEnvironmentEntry { url: url1 }],
+        };
+
+        let spec2 = ExplicitEnvironmentSpec {
+            platform: Some(Platform::Linux64),
+            packages: vec![ExplicitEnvironmentEntry { url: url2 }],
+        };
+
+        let input = EnvironmentInput::Files(vec![spec1, spec2]);
+        let creator = create_test_environment_creator(input);
+
+        // Test the conversion
+        let result = creator.create_dependency_map();
+        assert!(result.is_ok());
+
+        let dependencies = result.unwrap();
+        assert_eq!(dependencies.names().count(), 2);
+
+        // Verify both dependencies were created
+        assert!(dependencies.contains_key(&PackageName::from_str("numpy").unwrap()));
+        assert!(dependencies.contains_key(&PackageName::from_str("scipy").unwrap()));
+    }
 }
