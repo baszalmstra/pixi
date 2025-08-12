@@ -17,12 +17,22 @@ use std::{collections::HashMap, io, io::Write, path::PathBuf, str::FromStr, time
 use tabwriter::TabWriter;
 
 use crate::{EnvironmentName, command_dispatcher_builder, registry::Registry};
-use pixi_command_dispatcher::{BuildEnvironment, InstallPixiEnvironmentSpec, PixiEnvironmentSpec};
+use pixi_command_dispatcher::{BuildEnvironment, CommandDispatcher, InstallPixiEnvironmentSpec, PixiEnvironmentSpec};
 use pixi_record::PixiRecord;
 use pixi_spec;
 use pixi_spec::PixiSpec;
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::prefix::Prefix;
+
+/// Handles the complete workflow for creating a conda environment
+struct EnvironmentCreator {
+    prefix: PathBuf,
+    environment_name: String,
+    input: EnvironmentYaml,
+    channel_config: ChannelConfig,
+    channels: Vec<rattler_conda_types::ChannelUrl>,
+    build_environment: BuildEnvironment,
+}
 
 /// Create a new conda environment from a list of specified packages.
 #[derive(Parser, Debug)]
@@ -86,270 +96,331 @@ struct ChannelCustomization {
 }
 
 pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
-    // Create the CommandDispatcher to handle solving and installation with progress reporting
+    let command_dispatcher = setup_command_dispatcher(&config)?;
+    let env_config = EnvironmentCreator::resolve(&config, &args).await?;
+    let solved_records = env_config.solve_environment(&command_dispatcher).await?;
+    
+    env_config.display_transaction(&solved_records)?;
+    
+    if args.dry_run {
+        return Ok(());
+    }
+    
+    let confirmed = confirm_installation(&args)?;
+    if !confirmed {
+        eprintln!("Aborting");
+        return Ok(());
+    }
+    
+    env_config.install_environment(&command_dispatcher, solved_records).await
+}
+
+/// Set up the CommandDispatcher with progress reporting
+fn setup_command_dispatcher(config: &Config) -> miette::Result<CommandDispatcher> {
     let multi_progress = global_multi_progress();
     let anchor_pb = multi_progress.add(ProgressBar::hidden());
-    let command_dispatcher = command_dispatcher_builder(&config)
+    
+    Ok(command_dispatcher_builder(config)
         .map_err(|e| miette::miette!("Failed to create command dispatcher: {}", e))?
         .with_reporter(pixi_reporters::TopLevelProgress::new(
             global_multi_progress(),
             anchor_pb,
         ))
-        .finish();
-    // Convert the input into a canonical form.
-    let (mut input, input_path) =
-        match EnvironmentInput::from_files_or_specs(args.file, args.package_spec)? {
-            EnvironmentInput::EnvironmentYaml(environment, path) => (environment, Some(path)),
-            EnvironmentInput::Specs(specs) => (
-                EnvironmentYaml {
-                    dependencies: specs
-                        .into_iter()
-                        .map(|spec| MatchSpecOrSubSection::MatchSpec(Box::new(spec)))
-                        .collect(),
-                    ..EnvironmentYaml::default()
-                },
-                None,
-            ),
-            EnvironmentInput::Files(_) => {
-                unimplemented!("explicit environment files are not yet supported")
-            }
+        .finish())
+}
+
+impl EnvironmentCreator {
+    /// Resolve all environment configuration from command line args and config
+    async fn resolve(config: &Config, args: &Args) -> miette::Result<Self> {
+        // Convert the input into a canonical form
+        let (mut input, input_path) =
+            match EnvironmentInput::from_files_or_specs(args.file.clone(), args.package_spec.clone())? {
+                EnvironmentInput::EnvironmentYaml(environment, path) => (environment, Some(path)),
+                EnvironmentInput::Specs(specs) => (
+                    EnvironmentYaml {
+                        dependencies: specs
+                            .into_iter()
+                            .map(|spec| MatchSpecOrSubSection::MatchSpec(Box::new(spec)))
+                            .collect(),
+                        ..EnvironmentYaml::default()
+                    },
+                    None,
+                ),
+                EnvironmentInput::Files(_) => {
+                    unimplemented!("explicit environment files are not yet supported")
+                }
+            };
+
+        // Determine the path to the environment
+        let prefix = Self::resolve_prefix(args, &input)?;
+        
+        // Handle existing prefix removal
+        Self::handle_existing_prefix(&prefix, args.dry_run, args.yes).await?;
+
+        // Set up channel configuration
+        let mut channel_config = config.global_channel_config().clone();
+        if let Some(input_path) = &input_path {
+            channel_config.root_dir = input_path
+                .parent()
+                .expect("a file must have a parent")
+                .to_path_buf();
+        }
+
+        // Resolve channels
+        let channels = Self::resolve_channels(config, args, &mut input, &channel_config)?;
+
+        // Determine platform
+        let platform = args
+            .channel_customization
+            .platform
+            .unwrap_or_else(Platform::current);
+
+        // Create build environment
+        let build_environment = if platform == Platform::current() {
+            BuildEnvironment::default()
+        } else {
+            BuildEnvironment::simple_cross(platform)
+                .into_diagnostic()
+                .context("failed to create cross-platform build environment")?
         };
 
-    // Determine the path to the environment.
-    let prefix = if let Some(prefix) = &args.prefix {
-        if input.prefix.is_some() {
-            tracing::warn!(
-                "--prefix is specified, but the input file also contains a prefix, the input file will be ignored"
-            );
-        } else if input.name.is_some() {
-            tracing::warn!(
-                "--prefix is specified, but the input file also contains a name, the input file will be ignored"
-            );
-        }
-        prefix
-    } else if let Some(name) = args.name {
-        if input.prefix.is_some() {
-            tracing::warn!(
-                "--name is specified, but the input file also contains a prefix, the input file will be ignored"
-            );
-        } else if input.name.is_some() {
-            tracing::warn!(
-                "--name is specified, but the input file also contains a name, the input file will be ignored"
-            );
-        }
-        let registry = Registry::from_env();
-        &registry.root().join(name.as_ref())
-    } else if let Some(prefix) = &input.prefix {
-        if input.name.is_some() {
-            tracing::warn!(
-                "the input file contains both a 'name' and a 'prefix', the 'name' will be ignored"
-            );
-        }
-        prefix
-    } else if let Some(name) = &input.name {
-        let registry = Registry::from_env();
-        &registry.root().join(name)
-    } else {
-        miette::bail!("either --name or --prefix must be specified");
-    };
+        // Determine environment name
+        let environment_name = input
+            .name
+            .clone()
+            .or_else(|| {
+                prefix
+                    .file_name()
+                    .map(OsStr::to_string_lossy)
+                    .map(Cow::into_owned)
+            })
+            .unwrap_or_else(|| String::from("env"));
 
-    let prefix = if prefix.is_relative() {
-        &std::env::current_dir()
-            .into_diagnostic()
-            .context("failed to determine the current directory")?
-            .join(prefix)
-    } else {
-        prefix
-    };
-    let prefix = dunce::simplified(prefix);
-
-    // Remove the prefix if it already exists
-    if prefix.is_dir() && args.dry_run {
-        miette::bail!(
-            "The prefix already exists, and --dry-run is specified, so the operation will not be performed"
-        );
-    } else if prefix.is_dir() {
-        let allow_remove = args.yes
-            || dialoguer::Confirm::new()
-                .with_prompt(format!(
-                    "{} The prefix '{}' already exists, do you want to remove it?",
-                    console::style("?").blue(),
-                    prefix.display()
-                ))
-                .report(false)
-                .default(false)
-                .show_default(true)
-                .interact()
-                .into_diagnostic()?;
-        if allow_remove {
-            fs_err::remove_dir_all(prefix).into_diagnostic()?;
-        } else {
-            eprintln!("Aborting");
-            return Ok(());
-        }
-    }
-
-    // Construct a channel configuration to resolve channel names.
-    let mut channel_config = config.global_channel_config().clone();
-    if let Some(input_path) = &input_path {
-        channel_config.root_dir = input_path
-            .parent()
-            .expect("a file must have a parent")
-            .to_path_buf();
-    }
-
-    // Determine the channels to use for package resolution.
-    let mut channels = if args.channel_customization.channel.is_empty() {
-        config.default_channels()
-    } else {
-        args.channel_customization.channel
-    };
-    if args.channel_customization.override_channels {
-        if !input.channels.is_empty() {
-            tracing::warn!(
-                "--override-channels is specified, but the input also contains channels, these will be ignored"
-            );
-        }
-    } else {
-        channels.append(&mut input.channels);
-    }
-
-    let channels = channels
-        .into_iter()
-        .map(|channel| channel.into_base_url(&channel_config))
-        .collect::<Result<Vec<_>, ParseChannelError>>()
-        .into_diagnostic()?;
-
-    // Determine the platform to use for package resolution.
-    let platform = args
-        .channel_customization
-        .platform
-        .unwrap_or_else(Platform::current);
-
-    // Create pixi dependencies from match specs
-    let mut dependencies = DependencyMap::default();
-    for spec in input.match_specs().cloned() {
-        if let (Some(name), spec) = spec.into_nameless() {
-            let spec = PixiSpec::from_nameless_matchspec(spec, &channel_config);
-            dependencies.insert(name, spec);
-        } else {
-            return Err(miette::miette!(
-                "Pixi cannot deal with nameless match specs yet. Please specify the package name in the match spec."
-            ));
-        }
-    }
-
-    // Create the build environment for the target platform
-    let build_environment = if platform == Platform::current() {
-        BuildEnvironment::default()
-    } else {
-        BuildEnvironment::simple_cross(platform)
-            .into_diagnostic()
-            .context("failed to create cross-platform build environment")?
-    };
-
-    // Determine the environment name
-    let environment_name = input
-        .name
-        .clone()
-        .or_else(|| {
-            prefix
-                .file_name()
-                .map(OsStr::to_string_lossy)
-                .map(Cow::into_owned)
+        Ok(EnvironmentCreator {
+            prefix,
+            environment_name,
+            input,
+            channel_config,
+            channels,
+            build_environment,
         })
-        .unwrap_or_else(|| String::from("env"));
-
-    // Create the pixi environment solve spec
-    let solve_spec = PixiEnvironmentSpec {
-        name: Some(environment_name.clone()),
-        dependencies,
-        build_environment: build_environment.clone(),
-        channels: channels.clone(),
-        channel_config: channel_config.clone(),
-        ..Default::default()
-    };
-
-    // Solve the pixi environment using CommandDispatcher
-    let solved_records = command_dispatcher
-        .solve_pixi_environment(solve_spec)
-        .await?;
-
-    // Clear the reporter.
-    command_dispatcher.clear_reporter().await;
-
-    // Print the result
-    eprintln!("\nThe following packages will be installed:\n");
-    print_transaction(
-        &solved_records,
-        &std::collections::HashMap::new(),
-        &channel_config,
-    )
-    .into_diagnostic()?;
-
-    if args.dry_run {
-        // This is the point where we would normally ask the user for confirmation for
-        // installation.
-        return Ok(());
     }
 
-    eprintln!(); // Add a newline after the transaction
+    fn resolve_prefix(args: &Args, input: &EnvironmentYaml) -> miette::Result<PathBuf> {
+        let prefix = if let Some(prefix) = &args.prefix {
+            if input.prefix.is_some() {
+                tracing::warn!(
+                    "--prefix is specified, but the input file also contains a prefix, the input file will be ignored"
+                );
+            } else if input.name.is_some() {
+                tracing::warn!(
+                    "--prefix is specified, but the input file also contains a name, the input file will be ignored"
+                );
+            }
+            prefix
+        } else if let Some(ref name) = args.name {
+            if input.prefix.is_some() {
+                tracing::warn!(
+                    "--name is specified, but the input file also contains a prefix, the input file will be ignored"
+                );
+            } else if input.name.is_some() {
+                tracing::warn!(
+                    "--name is specified, but the input file also contains a name, the input file will be ignored"
+                );
+            }
+            let registry = Registry::from_env();
+            &registry.root().join(name.as_ref())
+        } else if let Some(prefix) = &input.prefix {
+            if input.name.is_some() {
+                tracing::warn!(
+                    "the input file contains both a 'name' and a 'prefix', the 'name' will be ignored"
+                );
+            }
+            prefix
+        } else if let Some(name) = &input.name {
+            let registry = Registry::from_env();
+            &registry.root().join(name)
+        } else {
+            miette::bail!("either --name or --prefix must be specified");
+        };
 
-    let do_install = args.yes
-        || dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "{} Do you want to proceed with the installation?",
-                console::style("?").blue()
+        let prefix = if prefix.is_relative() {
+            std::env::current_dir()
+                .into_diagnostic()
+                .context("failed to determine the current directory")?
+                .join(prefix)
+        } else {
+            prefix.to_path_buf()
+        };
+        
+        Ok(dunce::simplified(&prefix).to_path_buf())
+    }
+
+    async fn handle_existing_prefix(prefix: &PathBuf, dry_run: bool, yes: bool) -> miette::Result<()> {
+        if prefix.is_dir() && dry_run {
+            miette::bail!(
+                "The prefix already exists, and --dry-run is specified, so the operation will not be performed"
+            );
+        } else if prefix.is_dir() {
+            let allow_remove = yes
+                || dialoguer::Confirm::new()
+                    .with_prompt(format!(
+                        "{} The prefix '{}' already exists, do you want to remove it?",
+                        console::style("?").blue(),
+                        prefix.display()
+                    ))
+                    .report(false)
+                    .default(false)
+                    .show_default(true)
+                    .interact()
+                    .into_diagnostic()?;
+            if allow_remove {
+                fs_err::remove_dir_all(prefix).into_diagnostic()?;
+            } else {
+                eprintln!("Aborting");
+                miette::bail!("User cancelled due to existing prefix");
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_channels(
+        config: &Config,
+        args: &Args,
+        input: &mut EnvironmentYaml,
+        channel_config: &ChannelConfig,
+    ) -> miette::Result<Vec<rattler_conda_types::ChannelUrl>> {
+        let mut channels = if args.channel_customization.channel.is_empty() {
+            config.default_channels()
+        } else {
+            args.channel_customization.channel.clone()
+        };
+        
+        if args.channel_customization.override_channels {
+            if !input.channels.is_empty() {
+                tracing::warn!(
+                    "--override-channels is specified, but the input also contains channels, these will be ignored"
+                );
+            }
+        } else {
+            channels.append(&mut input.channels);
+        }
+
+        channels
+            .into_iter()
+            .map(|channel| channel.into_base_url(channel_config))
+            .collect::<Result<Vec<_>, ParseChannelError>>()
+            .into_diagnostic()
+    }
+
+    /// Solve the environment using CommandDispatcher
+    async fn solve_environment(
+        &self,
+        command_dispatcher: &CommandDispatcher,
+    ) -> miette::Result<Vec<PixiRecord>> {
+        // Create dependencies from match specs
+        let mut dependencies = DependencyMap::default();
+        for spec in self.input.match_specs().cloned() {
+            if let (Some(name), spec) = spec.into_nameless() {
+                let spec = PixiSpec::from_nameless_matchspec(spec, &self.channel_config);
+                dependencies.insert(name, spec);
+            } else {
+                return Err(miette::miette!(
+                    "Pixi cannot deal with nameless match specs yet. Please specify the package name in the match spec."
+                ));
+            }
+        }
+
+        // Create the pixi environment spec
+        let environment_spec = PixiEnvironmentSpec {
+            name: Some(self.environment_name.clone()),
+            dependencies,
+            build_environment: self.build_environment.clone(),
+            channels: self.channels.clone(),
+            channel_config: self.channel_config.clone(),
+            ..Default::default()
+        };
+
+        // Solve the environment
+        let solved_records = command_dispatcher
+            .solve_pixi_environment(environment_spec)
+            .await?;
+
+        command_dispatcher.clear_reporter().await;
+        Ok(solved_records)
+    }
+
+    /// Display the transaction that will be performed
+    fn display_transaction(&self, records: &[PixiRecord]) -> miette::Result<()> {
+        eprintln!("\nThe following packages will be installed:\n");
+        print_transaction(records, &std::collections::HashMap::new(), &self.channel_config)
+            .into_diagnostic()
+    }
+
+    /// Install the solved environment
+    async fn install_environment(
+        &self,
+        command_dispatcher: &CommandDispatcher,
+        solved_records: Vec<PixiRecord>,
+    ) -> miette::Result<()> {
+        let package_count = solved_records.len();
+        let install_spec = InstallPixiEnvironmentSpec {
+            name: self.environment_name.clone(),
+            records: solved_records,
+            prefix: Prefix::create(self.prefix.clone()).into_diagnostic()?,
+            installed: None,
+            build_environment: self.build_environment.clone(),
+            force_reinstall: std::collections::HashSet::new(),
+            channels: self.channels.clone(),
+            channel_config: self.channel_config.clone(),
+            variants: None,
+            enabled_protocols: Default::default(),
+        };
+
+        let installation_duration = Instant::now();
+        command_dispatcher
+            .install_pixi_environment(install_spec)
+            .await
+            .map_err(|e| miette::miette!("Failed to install pixi environment: {}", e))?;
+        let installation_duration = installation_duration.elapsed();
+
+        command_dispatcher.clear_reporter().await;
+
+        eprintln!(
+            "{}Installed {package_count} packages into {} {}",
+            console::style(console::Emoji("✔ ", "")).green(),
+            self.prefix.display(),
+            console::style(format!(
+                "in {}",
+                humantime::format_duration(installation_duration)
             ))
-            .default(true)
-            .show_default(true)
-            .report(false)
-            .interact()
-            .into_diagnostic()?;
-    if !do_install {
-        eprintln!("Aborting");
-        return Ok(());
+            .dim()
+        );
+
+        Ok(())
     }
-
-    // Create installation spec
-    let package_count = solved_records.len();
-    let install_spec = InstallPixiEnvironmentSpec {
-        name: environment_name,
-        records: solved_records,
-        prefix: Prefix::create(prefix.to_path_buf()).into_diagnostic()?,
-        installed: None,
-        build_environment,
-        force_reinstall: std::collections::HashSet::new(),
-        channels,
-        channel_config: channel_config.clone(),
-        variants: None,
-        enabled_protocols: Default::default(),
-    };
-
-    // Install the environment using CommandDispatcher
-    let installation_duration = Instant::now();
-    command_dispatcher
-        .install_pixi_environment(install_spec)
-        .await
-        .map_err(|e| miette::miette!("Failed to install pixi environment: {}", e))?;
-    let installation_duration = installation_duration.elapsed();
-
-    // Clear the reporter
-    command_dispatcher.clear_reporter().await;
-
-    eprintln!(
-        "{}Installed {package_count} packages into {} {}",
-        console::style(console::Emoji("✔ ", "")).green(),
-        prefix.display(),
-        console::style(format!(
-            "in {}",
-            humantime::format_duration(installation_duration)
-        ))
-        .dim()
-    );
-
-    Ok(())
 }
+
+/// Confirm installation with user
+fn confirm_installation(args: &Args) -> miette::Result<bool> {
+    if args.yes {
+        return Ok(true);
+    }
+    
+    eprintln!(); // Add a newline after the transaction
+    
+    dialoguer::Confirm::new()
+        .with_prompt(format!(
+            "{} Do you want to proceed with the installation?",
+            console::style("?").blue()
+        ))
+        .default(true)
+        .show_default(true)
+        .report(false)
+        .interact()
+        .into_diagnostic()
+}
+
 
 fn print_transaction(
     records: &[PixiRecord],
