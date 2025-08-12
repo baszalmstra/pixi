@@ -10,6 +10,13 @@ use rattler_conda_types::{
 };
 use thiserror::Error;
 
+/// Represents the different ways users can specify environment contents.
+///
+/// This enum captures the various input formats that pixi-conda supports for
+/// defining what should be included in a conda environment. It normalizes the
+/// different input methods (command line specs, environment files, explicit specs)
+/// into a common representation that can be processed uniformly by the rest of
+/// the environment creation pipeline.
 pub enum EnvironmentInput {
     /// The input of the environment is a set of match specs
     Specs(Vec<MatchSpec>),
@@ -21,6 +28,12 @@ pub enum EnvironmentInput {
     Files(Vec<ExplicitEnvironmentSpec>),
 }
 
+/// Errors that can occur while processing environment input specifications.
+///
+/// This error type covers the various ways that user-provided input can be
+/// invalid or problematic, from unrecognizable file formats to conflicting
+/// specifications. It provides specific error messages to help users understand
+/// and fix issues with their environment definitions.
 #[derive(Debug, Error, Diagnostic)]
 pub enum InputError {
     #[error("could not determine the type of environment file for '{0}'")]

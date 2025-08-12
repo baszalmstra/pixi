@@ -10,6 +10,11 @@ use rattler_virtual_packages::{VirtualPackageOverrides, VirtualPackages};
 use thiserror::Error;
 
 /// Errors that can occur when building a CommandDispatcher for pixi-conda operations.
+///
+/// This error type captures all the various failure modes that can occur during
+/// CommandDispatcher setup, from filesystem issues to network configuration problems.
+/// Each variant provides specific context about what went wrong during the
+/// initialization process, helping users and developers diagnose setup issues.
 #[derive(Error, Debug, Diagnostic)]
 pub enum CommandDispatcherError {
     #[error("Failed to get cache directory: {0}")]

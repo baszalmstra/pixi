@@ -17,14 +17,25 @@ use std::{collections::HashMap, io, io::Write, path::PathBuf, str::FromStr, time
 use tabwriter::TabWriter;
 
 use crate::{EnvironmentName, command_dispatcher_builder, registry::Registry};
-use pixi_command_dispatcher::{BuildEnvironment, CommandDispatcher, InstallPixiEnvironmentSpec, PixiEnvironmentSpec};
+use pixi_command_dispatcher::{
+    BuildEnvironment, CommandDispatcher, InstallPixiEnvironmentSpec, PixiEnvironmentSpec,
+};
 use pixi_record::PixiRecord;
 use pixi_spec;
 use pixi_spec::PixiSpec;
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::prefix::Prefix;
 
-/// Handles the complete workflow for creating a conda environment
+/// Central coordinator for conda environment creation operations.
+///
+/// This struct encapsulates all the resolved configuration needed to create a conda
+/// environment, from initial specification through final installation. It serves as
+/// the main context object that carries validated settings between the different
+/// phases of environment creation (resolving, solving, displaying, installing).
+///
+/// Once created via `resolve()`, an EnvironmentCreator instance represents a fully
+/// validated environment specification that can be safely executed without further
+/// configuration conflicts or validation errors.
 struct EnvironmentCreator {
     prefix: PathBuf,
     environment_name: String,
@@ -34,7 +45,16 @@ struct EnvironmentCreator {
     build_environment: BuildEnvironment,
 }
 
-/// Create a new conda environment from a list of specified packages.
+/// Command line arguments for creating a new conda environment.
+///
+/// This struct defines all the options users can specify when creating conda
+/// environments through the CLI. It handles the complex interaction between
+/// different ways of specifying packages (direct specs vs files), environment
+/// targets (names vs explicit paths), and various customization options for
+/// channels, platforms, and installation behavior.
+///
+/// The structure uses clap's derive macros to automatically generate argument
+/// parsing, validation, and help text generation from the field annotations.
 #[derive(Parser, Debug)]
 pub struct Args {
     /// List of packages to install or update in the conda environment.
@@ -72,6 +92,16 @@ pub struct Args {
     channel_customization: ChannelCustomization,
 }
 
+/// Channel-related command line options for environment creation.
+///
+/// This struct groups together all the command line options that control how
+/// conda channels are selected and used during environment creation. It provides
+/// users with fine-grained control over package sources, including the ability
+/// to add custom channels, override default channels entirely, and target
+/// specific platforms for cross-compilation scenarios.
+///
+/// These options work together to determine the final channel configuration
+/// that will be passed to the package solver.
 #[derive(Parser, Debug)]
 struct ChannelCustomization {
     /// Additional channel to search for packages.
@@ -95,31 +125,54 @@ struct ChannelCustomization {
     platform: Option<Platform>,
 }
 
+/// Executes the complete environment creation workflow.
+///
+/// This is the main entry point for creating conda environments. It orchestrates
+/// the entire process from initial setup through final installation:
+/// 1. Sets up the CommandDispatcher for solving and installation operations
+/// 2. Resolves all configuration from command line arguments and global config
+/// 3. Solves the environment to determine package versions and dependencies
+/// 4. Displays the planned transaction to the user
+/// 5. Handles dry-run mode if specified
+/// 6. Confirms installation with the user (unless --yes is specified)
+/// 7. Installs the solved environment to the target prefix
 pub async fn execute(config: Config, args: Args) -> miette::Result<()> {
     let command_dispatcher = setup_command_dispatcher(&config)?;
     let env_config = EnvironmentCreator::resolve(&config, &args).await?;
     let solved_records = env_config.solve_environment(&command_dispatcher).await?;
-    
+
     env_config.display_transaction(&solved_records)?;
-    
+
     if args.dry_run {
         return Ok(());
     }
-    
+
     let confirmed = confirm_installation(&args)?;
     if !confirmed {
         eprintln!("Aborting");
         return Ok(());
     }
-    
-    env_config.install_environment(&command_dispatcher, solved_records).await
+
+    env_config
+        .install_environment(&command_dispatcher, solved_records)
+        .await
 }
 
-/// Set up the CommandDispatcher with progress reporting
+/// Sets up a CommandDispatcher configured for conda environment operations.
+///
+/// This function creates a CommandDispatcher with all necessary components for
+/// solving and installing conda environments:
+/// - Configures progress reporting using the global multi-progress system
+/// - Sets up HTTP clients, caches, and repository gateways
+/// - Configures platform-specific settings and virtual packages
+/// - Enables link scripts execution for proper conda environment setup
+///
+/// The dispatcher is pre-configured with pixi's TopLevelProgress reporter
+/// to provide consistent progress feedback during long-running operations.
 fn setup_command_dispatcher(config: &Config) -> miette::Result<CommandDispatcher> {
     let multi_progress = global_multi_progress();
     let anchor_pb = multi_progress.add(ProgressBar::hidden());
-    
+
     Ok(command_dispatcher_builder(config)
         .map_err(|e| miette::miette!("Failed to create command dispatcher: {}", e))?
         .with_reporter(pixi_reporters::TopLevelProgress::new(
@@ -130,30 +183,39 @@ fn setup_command_dispatcher(config: &Config) -> miette::Result<CommandDispatcher
 }
 
 impl EnvironmentCreator {
-    /// Resolve all environment configuration from command line args and config
+    /// Resolves and validates all configuration needed for environment creation.
+    ///
+    /// This method transforms raw command line arguments and global configuration into
+    /// a fully prepared EnvironmentCreator. It reconciles potentially conflicting inputs
+    /// from different sources (CLI args, input files, global config), validates the
+    /// target environment setup, and prepares all necessary components for the solving
+    /// and installation phases. The result is a self-contained object that knows
+    /// exactly what environment to create and how to create it.
     async fn resolve(config: &Config, args: &Args) -> miette::Result<Self> {
         // Convert the input into a canonical form
-        let (mut input, input_path) =
-            match EnvironmentInput::from_files_or_specs(args.file.clone(), args.package_spec.clone())? {
-                EnvironmentInput::EnvironmentYaml(environment, path) => (environment, Some(path)),
-                EnvironmentInput::Specs(specs) => (
-                    EnvironmentYaml {
-                        dependencies: specs
-                            .into_iter()
-                            .map(|spec| MatchSpecOrSubSection::MatchSpec(Box::new(spec)))
-                            .collect(),
-                        ..EnvironmentYaml::default()
-                    },
-                    None,
-                ),
-                EnvironmentInput::Files(_) => {
-                    unimplemented!("explicit environment files are not yet supported")
-                }
-            };
+        let (mut input, input_path) = match EnvironmentInput::from_files_or_specs(
+            args.file.clone(),
+            args.package_spec.clone(),
+        )? {
+            EnvironmentInput::EnvironmentYaml(environment, path) => (environment, Some(path)),
+            EnvironmentInput::Specs(specs) => (
+                EnvironmentYaml {
+                    dependencies: specs
+                        .into_iter()
+                        .map(|spec| MatchSpecOrSubSection::MatchSpec(Box::new(spec)))
+                        .collect(),
+                    ..EnvironmentYaml::default()
+                },
+                None,
+            ),
+            EnvironmentInput::Files(_) => {
+                unimplemented!("explicit environment files are not yet supported")
+            }
+        };
 
         // Determine the path to the environment
         let prefix = Self::resolve_prefix(args, &input)?;
-        
+
         // Handle existing prefix removal
         Self::handle_existing_prefix(&prefix, args.dry_run, args.yes).await?;
 
@@ -206,6 +268,12 @@ impl EnvironmentCreator {
         })
     }
 
+    /// Determines the target prefix path for the environment.
+    ///
+    /// This method implements the prefix resolution logic, handling the various ways
+    /// users can specify where to create the environment. It prioritizes explicit
+    /// paths over names, warns about conflicting specifications, and ensures the
+    /// final path is absolute and normalized for consistent behavior across platforms.
     fn resolve_prefix(args: &Args, input: &EnvironmentYaml) -> miette::Result<PathBuf> {
         let prefix = if let Some(prefix) = &args.prefix {
             if input.prefix.is_some() {
@@ -252,11 +320,20 @@ impl EnvironmentCreator {
         } else {
             prefix.to_path_buf()
         };
-        
+
         Ok(dunce::simplified(&prefix).to_path_buf())
     }
 
-    async fn handle_existing_prefix(prefix: &PathBuf, dry_run: bool, yes: bool) -> miette::Result<()> {
+    /// Handles the case where the target prefix directory already exists.
+    ///
+    /// In dry-run mode, fails immediately if prefix exists. Otherwise, prompts
+    /// the user for confirmation to remove the existing directory (unless --yes
+    /// is specified). Removes the directory if confirmed, or fails if declined.
+    async fn handle_existing_prefix(
+        prefix: &PathBuf,
+        dry_run: bool,
+        yes: bool,
+    ) -> miette::Result<()> {
         if prefix.is_dir() && dry_run {
             miette::bail!(
                 "The prefix already exists, and --dry-run is specified, so the operation will not be performed"
@@ -284,6 +361,13 @@ impl EnvironmentCreator {
         Ok(())
     }
 
+    /// Resolves the final list of conda channels to use for package lookup.
+    ///
+    /// This method consolidates channel specifications from command line arguments,
+    /// input files, and global configuration into a final ordered list. It handles
+    /// the override semantics where CLI channels can completely replace input file
+    /// channels, and ensures all channel names are converted to proper URLs for
+    /// use by the package resolver.
     fn resolve_channels(
         config: &Config,
         args: &Args,
@@ -295,7 +379,7 @@ impl EnvironmentCreator {
         } else {
             args.channel_customization.channel.clone()
         };
-        
+
         if args.channel_customization.override_channels {
             if !input.channels.is_empty() {
                 tracing::warn!(
@@ -313,7 +397,14 @@ impl EnvironmentCreator {
             .into_diagnostic()
     }
 
-    /// Solve the environment using CommandDispatcher
+    /// Solves the environment to determine exact package versions and dependencies.
+    ///
+    /// This method transforms the high-level package specifications into concrete,
+    /// installable package records. It creates a solver specification that includes
+    /// all the resolved configuration (channels, dependencies, build environment)
+    /// and delegates to the CommandDispatcher to perform the actual dependency
+    /// resolution. The solver handles version constraints, dependency conflicts,
+    /// and platform compatibility to produce a consistent set of packages.
     async fn solve_environment(
         &self,
         command_dispatcher: &CommandDispatcher,
@@ -350,14 +441,29 @@ impl EnvironmentCreator {
         Ok(solved_records)
     }
 
-    /// Display the transaction that will be performed
+    /// Displays the transaction summary showing what packages will be installed.
+    ///
+    /// This method presents the solved package list to the user in a human-readable
+    /// format, showing package names, versions, build strings, channels, and sizes.
+    /// It provides transparency about what the installation will do before asking
+    /// for confirmation, helping users understand the impact of their request.
     fn display_transaction(&self, records: &[PixiRecord]) -> miette::Result<()> {
         eprintln!("\nThe following packages will be installed:\n");
-        print_transaction(records, &std::collections::HashMap::new(), &self.channel_config)
-            .into_diagnostic()
+        print_transaction(
+            records,
+            &std::collections::HashMap::new(),
+            &self.channel_config,
+        )
+        .into_diagnostic()
     }
 
-    /// Install the solved environment
+    /// Performs the actual installation of the solved environment.
+    ///
+    /// This method takes the concrete package records from the solver and creates
+    /// the conda environment at the target prefix. It configures the installation
+    /// specification with all necessary details (prefix, build environment, channels)
+    /// and delegates to the CommandDispatcher to handle the complex process of
+    /// downloading, extracting, and linking packages into a working environment.
     async fn install_environment(
         &self,
         command_dispatcher: &CommandDispatcher,
@@ -401,14 +507,19 @@ impl EnvironmentCreator {
     }
 }
 
-/// Confirm installation with user
+/// Prompts the user to confirm proceeding with the installation.
+///
+/// This function implements the confirmation step that gives users a chance to
+/// review the transaction and decide whether to proceed. It respects the --yes
+/// flag to automatically confirm in non-interactive scenarios, but otherwise
+/// presents a clear prompt with sensible defaults for user interaction.
 fn confirm_installation(args: &Args) -> miette::Result<bool> {
     if args.yes {
         return Ok(true);
     }
-    
+
     eprintln!(); // Add a newline after the transaction
-    
+
     dialoguer::Confirm::new()
         .with_prompt(format!(
             "{} Do you want to proceed with the installation?",
@@ -421,7 +532,13 @@ fn confirm_installation(args: &Args) -> miette::Result<bool> {
         .into_diagnostic()
 }
 
-
+/// Formats and prints the package transaction in a tabular format.
+///
+/// This utility function handles the complex task of presenting package information
+/// in a clear, readable table format. It processes both binary and source packages,
+/// formats channel information appropriately, handles feature annotations, and
+/// uses proper alignment and styling to create professional-looking output that
+/// matches conda's standard transaction display format.
 fn print_transaction(
     records: &[PixiRecord],
     features: &HashMap<PackageName, Vec<String>>,
