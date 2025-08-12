@@ -22,10 +22,10 @@ use pixi_command_dispatcher::{
     BuildEnvironment, CommandDispatcher, InstallPixiEnvironmentSpec, PixiEnvironmentSpec,
 };
 use pixi_record::PixiRecord;
-use pixi_spec;
 use pixi_spec::{PixiSpec, UrlSpec};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::prefix::Prefix;
+use rattler_virtual_packages::{VirtualPackageOverrides, VirtualPackages};
 
 /// Central coordinator for conda environment creation operations.
 ///
@@ -227,13 +227,23 @@ impl EnvironmentCreator {
             .platform
             .unwrap_or_else(Platform::current);
 
+        // Determine the virtual packages of the system
+        let virtual_packages: Vec<_> =
+            VirtualPackages::detect(&VirtualPackageOverrides::from_env())
+                .unwrap_or_default()
+                .into_generic_virtual_packages()
+                .collect();
+
         // Create build environment
-        let build_environment = if platform == Platform::current() {
-            BuildEnvironment::default()
+        let build_environment = if platform.only_platform() == Platform::current().only_platform() {
+            BuildEnvironment::simple(platform, virtual_packages)
         } else {
-            BuildEnvironment::simple_cross(platform)
-                .into_diagnostic()
-                .context("failed to create cross-platform build environment")?
+            BuildEnvironment {
+                host_platform: platform,
+                host_virtual_packages: vec![],
+                build_platform: Platform::current(),
+                build_virtual_packages: virtual_packages,
+            }
         };
 
         // Determine environment name
