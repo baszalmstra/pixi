@@ -2,6 +2,7 @@ pub mod cli;
 mod command_dispatcher;
 mod create;
 mod environment_name;
+mod install;
 mod registry;
 mod run;
 

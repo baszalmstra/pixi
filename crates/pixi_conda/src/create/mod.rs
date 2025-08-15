@@ -17,6 +17,7 @@ use std::ffi::OsStr;
 use std::{collections::HashMap, io, io::Write, path::PathBuf, str::FromStr, time::Instant};
 use tabwriter::TabWriter;
 
+use crate::cli::ChannelCustomization;
 use crate::{EnvironmentName, command_dispatcher_builder, registry::Registry};
 use pixi_command_dispatcher::{
     BuildEnvironment, CommandDispatcher, InstallPixiEnvironmentSpec, PixiEnvironmentSpec,
@@ -91,32 +92,6 @@ pub struct Args {
 
     #[clap(flatten)]
     channel_customization: ChannelCustomization,
-}
-
-/// Channel-related command line options for environment creation.
-///
-/// This struct groups together all the command line options that control how
-/// conda channels are selected and used during environment creation. It provides
-/// users with fine-grained control over package sources, including the ability
-/// to add custom channels, override default channels entirely, and target
-/// specific platforms for cross-compilation scenarios.
-///
-/// These options work together to determine the final channel configuration
-/// that will be passed to the package solver.
-#[derive(Parser, Debug)]
-struct ChannelCustomization {
-    /// Additional channel to search for packages.
-    #[clap(long, short, help_heading = "Channel customization")]
-    channel: Vec<NamedChannelOrUrl>,
-
-    /// Do not search default channels.
-    #[clap(
-        long,
-        help_heading = "Channel customization",
-        default_value = "false",
-        requires = "channel"
-    )]
-    override_channels: bool,
 
     /// Use packages built for this platform. The new environment will be
     /// configured to remember this choice. Should be formatted like
@@ -222,10 +197,7 @@ impl EnvironmentCreator {
         let channels = Self::resolve_channels(config, args, &input, &channel_config)?;
 
         // Determine platform
-        let platform = args
-            .channel_customization
-            .platform
-            .unwrap_or_else(Platform::current);
+        let platform = args.platform.unwrap_or_else(Platform::current);
 
         // Determine the virtual packages of the system
         let virtual_packages: Vec<_> =
