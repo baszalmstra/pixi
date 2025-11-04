@@ -290,3 +290,78 @@ pub struct PassthroughBackendConfig {
     /// Build globs
     pub build_globs: Option<BTreeSet<String>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixi_build_types::{PackageSpecV1, BinaryPackageSpecV1};
+
+    #[test]
+    fn test_matches_target_selector_platform() {
+        // Test that linux-64 selector matches linux-64 platform
+        let selector = TargetSelectorV1::Platform("linux-64".to_string());
+        assert!(matches_target_selector(&selector, Platform::Linux64));
+
+        // Test that linux-64 selector does NOT match osx-arm64 platform
+        assert!(!matches_target_selector(&selector, Platform::OsxArm64));
+    }
+
+    #[test]
+    fn test_extract_dependencies_filters_by_platform() {
+        // Create a TargetsV1 with dependencies in both default and linux-64 target
+        let mut default_deps = OrderMap::new();
+        default_deps.insert(
+            "default-dep".to_string(),
+            PackageSpecV1::Binary(Box::new(BinaryPackageSpecV1::default())),
+        );
+
+        let mut linux_deps = OrderMap::new();
+        linux_deps.insert(
+            "linux-only-dep".to_string(),
+            PackageSpecV1::Binary(Box::new(BinaryPackageSpecV1::default())),
+        );
+
+        let mut target_map = OrderMap::new();
+        target_map.insert(
+            TargetSelectorV1::Platform("linux-64".to_string()),
+            TargetV1 {
+                host_dependencies: Some(linux_deps),
+                build_dependencies: None,
+                run_dependencies: None,
+            },
+        );
+
+        let targets = TargetsV1 {
+            default_target: Some(TargetV1 {
+                host_dependencies: Some(default_deps),
+                build_dependencies: None,
+                run_dependencies: None,
+            }),
+            targets: Some(target_map),
+        };
+
+        // Extract dependencies for linux-64 platform
+        let linux_result = extract_dependencies(
+            &Some(targets.clone()),
+            |t| t.host_dependencies.as_ref(),
+            Platform::Linux64,
+        );
+
+        // Should contain both default-dep and linux-only-dep
+        assert_eq!(linux_result.depends.len(), 2);
+        let dep_names: Vec<_> = linux_result.depends.iter().map(|d| d.name.as_str()).collect();
+        assert!(dep_names.contains(&"default-dep"));
+        assert!(dep_names.contains(&"linux-only-dep"));
+
+        // Extract dependencies for osx-arm64 platform
+        let osx_result = extract_dependencies(
+            &Some(targets),
+            |t| t.host_dependencies.as_ref(),
+            Platform::OsxArm64,
+        );
+
+        // Should only contain default-dep, NOT linux-only-dep
+        assert_eq!(osx_result.depends.len(), 1);
+        assert_eq!(osx_result.depends[0].name, "default-dep");
+    }
+}
