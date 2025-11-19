@@ -25,7 +25,9 @@ rustls-tls = [
 
 [dependencies]
 async-fd-lock = { workspace = true }
+async-trait = { workspace = true }
 fs-err = { workspace = true }
+http = { workspace = true }
 indicatif = { workspace = true }
 is_executable = { workspace = true }
 itertools = { workspace = true }
@@ -40,6 +42,7 @@ rattler_networking = { workspace = true, features = [
   "netrc-rs",
   "system-integration",
 ] }
+rattler_redaction = { workspace = true }
 rattler_shell = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }

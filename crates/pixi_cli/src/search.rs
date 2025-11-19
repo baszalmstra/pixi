@@ -10,7 +10,7 @@ use clap::Parser;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use miette::{IntoDiagnostic, Report};
-use pixi_config::{Config, default_channel_config};
+use pixi_config::{Config, ConfigCli, default_channel_config};
 use pixi_core::{WorkspaceLocator, workspace::WorkspaceLocatorError};
 use pixi_progress::await_in_progress;
 use pixi_utils::reqwest::build_lazy_reqwest_clients;
@@ -47,6 +47,9 @@ pub struct Args {
     /// Limit the number of search results
     #[clap(short, long)]
     pub limit: Option<usize>,
+
+    #[clap(flatten)]
+    pub config: ConfigCli,
 }
 
 /// fetch packages from `repo_data` using `repodata_query_func` based on
@@ -111,11 +114,12 @@ pub async fn execute_impl<W: Write>(
     args: Args,
     out: &mut W,
 ) -> miette::Result<Option<Vec<RepoDataRecord>>> {
+    let config = Config::load_global().merge_config(args.config.into());
     let project = match WorkspaceLocator::for_cli()
         .with_search_start(args.project_config.workspace_locator_start())
         .locate()
     {
-        Ok(project) => Some(project),
+        Ok(project) => Some(project.with_cli_config(config.clone())),
         Err(WorkspaceLocatorError::WorkspaceNotFound(_)) => {
             debug!("No project file found, continuing without project configuration.",);
             None
@@ -144,8 +148,6 @@ pub async fn execute_impl<W: Write>(
     } else {
         build_lazy_reqwest_clients(None, None)?.1
     };
-
-    let config = Config::load_global();
 
     // Fetch the all names from the repodata using gateway
     let gateway = config.gateway().with_client(client).finish();

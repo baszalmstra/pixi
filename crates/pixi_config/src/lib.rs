@@ -17,7 +17,7 @@ use rattler_conda_types::{
     version_spec::{EqualityOperator, LogicalOperator, RangeOperator},
 };
 use rattler_networking::s3_middleware;
-use rattler_repodata_gateway::{Gateway, GatewayBuilder, SourceConfig};
+use rattler_repodata_gateway::{Gateway, GatewayBuilder, SourceConfig, fetch::CacheAction};
 use reqwest::{NoProxy, Proxy};
 use serde::{
     Deserialize, Serialize,
@@ -147,6 +147,10 @@ pub struct ConfigCli {
     /// Do not verify the TLS certificate of the server.
     #[arg(long, action = ArgAction::SetTrue, help_heading = consts::CLAP_CONFIG_OPTIONS)]
     tls_no_verify: bool,
+
+    /// Operate in offline mode, disabling all network access.
+    #[arg(long, action = ArgAction::SetTrue, help_heading = consts::CLAP_CONFIG_OPTIONS)]
+    offline: bool,
 
     /// Use environment activation cache (experimental)
     #[arg(long, help_heading = consts::CLAP_CONFIG_OPTIONS)]
@@ -640,6 +644,11 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_no_verify: Option<bool>,
 
+    /// If set to true, pixi will operate in offline mode, disabling all network access.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offline: Option<bool>,
+
     #[serde(default)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub mirrors: HashMap<Url, Vec<Url>>,
@@ -738,6 +747,7 @@ impl Default for Config {
             default_channels: Vec::new(),
             authentication_override_file: None,
             tls_no_verify: None,
+            offline: None,
             mirrors: HashMap::new(),
             loaded_from: Vec::new(),
             channel_config: default_channel_config(),
@@ -765,6 +775,7 @@ impl From<ConfigCli> for Config {
     fn from(cli: ConfigCli) -> Self {
         Self {
             tls_no_verify: if cli.tls_no_verify { Some(true) } else { None },
+            offline: if cli.offline { Some(true) } else { None },
             authentication_override_file: cli.auth_file,
             pypi_config: cli
                 .pypi_keyring_provider
@@ -808,6 +819,11 @@ impl From<&Config> for rattler_repodata_gateway::ChannelConfig {
     fn from(config: &Config) -> Self {
         let repodata_config = &config.repodata_config;
         let default = repodata_config.default.clone().into();
+        let cache_action = if config.offline == Some(true) {
+            CacheAction::ForceCacheOnly
+        } else {
+            CacheAction::default()
+        };
 
         let per_channel = repodata_config
             .per_channel
@@ -815,13 +831,19 @@ impl From<&Config> for rattler_repodata_gateway::ChannelConfig {
             .map(|(url, config)| {
                 (
                     url.clone(),
-                    config.merge(repodata_config.default.clone()).into(),
+                    SourceConfig {
+                        cache_action,
+                        ..config.merge(repodata_config.default.clone()).into()
+                    },
                 )
             })
             .collect();
 
         rattler_repodata_gateway::ChannelConfig {
-            default,
+            default: SourceConfig {
+                cache_action,
+                ..default
+            },
             per_channel,
         }
     }
@@ -1340,6 +1362,7 @@ impl Config {
                 other.default_channels
             },
             tls_no_verify: other.tls_no_verify.or(self.tls_no_verify),
+            offline: other.offline.or(self.offline),
             authentication_override_file: other
                 .authentication_override_file
                 .or(self.authentication_override_file),

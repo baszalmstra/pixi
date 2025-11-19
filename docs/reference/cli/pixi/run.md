@@ -45,6 +45,8 @@ pixi run [OPTIONS] [TASK]...
 :  Run post-link scripts (insecure)
 - <a id="arg---tls-no-verify" href="#arg---tls-no-verify">`--tls-no-verify`</a>
 :  Do not verify the TLS certificate of the server
+- <a id="arg---offline" href="#arg---offline">`--offline`</a>
+:  Operate in offline mode, disabling all network access
 - <a id="arg---use-environment-activation-cache" href="#arg---use-environment-activation-cache">`--use-environment-activation-cache`</a>
 :  Use environment activation cache (experimental)
 - <a id="arg---force-activate" href="#arg---force-activate">`--force-activate`</a>

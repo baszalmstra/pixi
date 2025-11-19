@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod conda_environment_file;
 pub mod indicatif;
+pub mod offline;
 pub mod prefix;
 mod prefix_guard;
 pub mod reqwest;

@@ -162,12 +162,16 @@ pub enum MappingError {
 
 impl MappingClient {
     /// Construct a new `MappingClientBuilder` with the provided `Client`.
-    pub fn builder(client: LazyClient) -> MappingClientBuilder {
+    pub fn builder(client: LazyClient, offline: bool) -> MappingClientBuilder {
         // Construct a client with a retry policy and local caching
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
         let retry_strategy = RetryTransientMiddleware::new_with_policy(retry_policy);
         let cache_strategy = Cache(HttpCache {
-            mode: CacheMode::Default,
+            mode: if offline {
+                CacheMode::ForceCache
+            } else {
+                CacheMode::Default
+            },
             manager: CACacheManager {
                 path: get_cache_dir()
                     .expect("missing cache directory")

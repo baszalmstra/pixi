@@ -21,6 +21,8 @@ use reqwest::Client;
 use reqwest_middleware::{ClientWithMiddleware, Middleware};
 use reqwest_retry::RetryTransientMiddleware;
 
+use crate::offline::OfflineMiddleware;
+
 /// The default retry policy employed by pixi.
 /// TODO: At some point we might want to make this configurable.
 pub fn default_retry_policy() -> ExponentialBackoff {
@@ -154,6 +156,10 @@ pub fn build_reqwest_middleware_stack(
         auth_middleware(config).expect("could not create auth middleware"),
     ));
 
+    if config.offline == Some(true) {
+        result.push(Arc::new(OfflineMiddleware))
+    }
+
     result.push(Arc::new(RetryTransientMiddleware::new_with_policy(
         default_retry_policy(),
     )));
@@ -256,6 +262,12 @@ pub fn uv_middlewares(config: &Config) -> Vec<Arc<dyn Middleware>> {
     if let Ok(auth_middleware) = auth_middleware(config) {
         middlewares.push(Arc::new(auth_middleware));
     }
+
+    if config.offline == Some(true) {
+        // TODO: Use uv middleware here.
+        middlewares.push(Arc::new(OfflineMiddleware));
+    }
+
     middlewares
 }
 
