@@ -275,8 +275,10 @@ impl MappingClient {
         while let Some(next) = amend_futures.next().await {
             let (record, mut derived_purls) = next.into_diagnostic()?;
 
-            // As a last resort use the verbatim conda-forge purls.
-            if derived_purls.is_none() {
+            // As a last resort use the verbatim conda-forge purls,
+            // but only if we're using the default prefix mapping.
+            // Custom mappings should be exclusive, and disabled means no purls at all.
+            if derived_purls.is_none() && matches!(mapping_source, MappingSource::Prefix) {
                 derived_purls = CondaForgeVerbatim
                     .derive_purls(record, &metrics)
                     .await
