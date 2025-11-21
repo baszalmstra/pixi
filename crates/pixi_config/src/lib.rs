@@ -106,6 +106,22 @@ pub fn pixi_home() -> Option<PathBuf> {
 /// - If that is not set, the default cache directory of
 ///   [`rattler::default_cache_dir`] is used.
 pub fn get_cache_dir() -> miette::Result<PathBuf> {
+    get_cache_dir_with_override(None)
+}
+
+/// Returns the cache directory, with an optional override.
+/// If `override_path` is provided, it will be used instead of the default resolution.
+///
+/// Otherwise, priority order is:
+/// 1. `PIXI_CACHE_DIR` environment variable
+/// 2. `RATTLER_CACHE_DIR` environment variable
+/// 3. `XDG_CACHE_HOME/pixi` (if directory exists)
+/// 4. [`rattler::default_cache_dir`]
+pub fn get_cache_dir_with_override(override_path: Option<&Path>) -> miette::Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.to_path_buf());
+    }
+
     std::env::var("PIXI_CACHE_DIR")
         .ok()
         .map(PathBuf::from)
@@ -719,6 +735,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_platform: Option<Platform>,
 
+    /// Override for the cache directory. When set, this path will be used instead
+    /// of the default cache directory resolution. This is not serialized as it's
+    /// a runtime override (e.g., from --no-cache flag).
+    #[serde(skip)]
+    pub cache_dir_override: Option<PathBuf>,
+
     //////////////////////
     // Deprecated fields //
     //////////////////////
@@ -753,6 +775,7 @@ impl Default for Config {
             proxy_config: ProxyConfig::default(),
             build: BuildConfig::default(),
             tool_platform: None,
+            cache_dir_override: None,
 
             // Deprecated fields
             change_ps1: None,
@@ -793,6 +816,7 @@ impl From<ConfigCli> for Config {
                 },
             },
             pinning_strategy: cli.pinning_strategy,
+            cache_dir_override: None,
             ..Default::default()
         }
     }
@@ -1059,6 +1083,21 @@ impl Config {
         config
     }
 
+    /// Get the cache directory, respecting any override set in this config.
+    ///
+    /// # Returns
+    ///
+    /// The cache directory path
+    pub fn cache_dir(&self) -> miette::Result<PathBuf> {
+        get_cache_dir_with_override(self.cache_dir_override.as_deref())
+    }
+
+    /// Create a new config with the cache directory override set.
+    pub fn with_cache_dir_override(mut self, cache_dir: PathBuf) -> Self {
+        self.cache_dir_override = Some(cache_dir);
+        self
+    }
+
     /// Parse the given toml string and return a Config instance.
     ///
     /// # Returns
@@ -1257,8 +1296,19 @@ impl Config {
 
     /// Load the global config and layer the given cli config on top of it.
     pub fn with_cli_config(cli: &ConfigCli) -> Config {
+        Self::with_cli_config_and_cache_override(cli, None)
+    }
+
+    /// Load the global config and layer the given cli config on top of it,
+    /// with an optional cache directory override.
+    pub fn with_cli_config_and_cache_override(
+        cli: &ConfigCli,
+        cache_dir_override: Option<PathBuf>,
+    ) -> Config {
         let config = Config::load_global();
-        config.merge_config(cli.clone().into())
+        let mut config = config.merge_config(cli.clone().into());
+        config.cache_dir_override = cache_dir_override;
+        config
     }
 
     /// Load the config from the given path (project root).
@@ -1370,6 +1420,7 @@ impl Config {
             proxy_config: self.proxy_config.merge(other.proxy_config),
             build: self.build.merge(other.build),
             tool_platform: self.tool_platform.or(other.tool_platform),
+            cache_dir_override: other.cache_dir_override.or(self.cache_dir_override),
 
             // Deprecated fields that we can ignore as we handle them inside `shell.` field
             change_ps1: None,

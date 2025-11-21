@@ -11,7 +11,7 @@
 use clap::builder::styling::{AnsiColor, Color, Style};
 use clap::{CommandFactory, Parser};
 use indicatif::ProgressDrawTarget;
-use miette::IntoDiagnostic;
+use miette::{IntoDiagnostic, WrapErr};
 use pixi_consts::consts;
 use pixi_core::environment::LockFileUsage;
 use pixi_progress::global_multi_progress;
@@ -119,6 +119,10 @@ pub struct GlobalOptions {
     /// Hide all progress bars, always turned on if stderr is not a terminal.
     #[clap(long, default_value = "false", global = true, env = "PIXI_NO_PROGRESS", help_heading = consts::CLAP_GLOBAL_OPTIONS)]
     no_progress: bool,
+
+    /// Use a temporary cache directory for this command. Useful for preventing cache pollution when building packages with system dependencies.
+    #[clap(long, default_value = "false", global = true, help_heading = consts::CLAP_GLOBAL_OPTIONS)]
+    no_cache: bool,
 }
 
 impl Args {
@@ -227,6 +231,60 @@ impl LockFileUsageConfig {
     }
 }
 
+/// Guard that manages a temporary cache directory.
+/// Sets PIXI_CACHE_DIR to the temporary path and restores it when dropped.
+struct TempCacheGuard {
+    _temp_dir: tempfile::TempDir,
+    original_value: Option<std::ffi::OsString>,
+}
+
+impl Drop for TempCacheGuard {
+    fn drop(&mut self) {
+        // Restore the original PIXI_CACHE_DIR value
+        // SAFETY: We're restoring the environment variable to its original state within
+        // a controlled scope. This is safe because:
+        // 1. We saved the original value before modifying it
+        // 2. We're the only ones modifying PIXI_CACHE_DIR through this guard
+        // 3. This runs in Drop, ensuring cleanup even on panic
+        unsafe {
+            match &self.original_value {
+                Some(val) => std::env::set_var("PIXI_CACHE_DIR", val),
+                None => std::env::remove_var("PIXI_CACHE_DIR"),
+            }
+        }
+    }
+}
+
+/// Sets up a temporary cache directory and returns a guard that will clean it up.
+fn setup_temp_cache() -> miette::Result<TempCacheGuard> {
+    // Save the original PIXI_CACHE_DIR value
+    let original_value = std::env::var_os("PIXI_CACHE_DIR");
+
+    // Create a temporary directory
+    let temp_dir = tempfile::Builder::new()
+        .prefix("pixi-cache-")
+        .tempdir()
+        .into_diagnostic()
+        .wrap_err("failed to create temporary cache directory")?;
+
+    let temp_path = temp_dir.path().to_path_buf();
+
+    tracing::info!("Using temporary cache directory: {}", temp_path.display());
+
+    // Set PIXI_CACHE_DIR to the temporary directory
+    // This is the proper configuration channel for cache directory
+    // SAFETY: We're setting PIXI_CACHE_DIR in a controlled scope with proper cleanup.
+    // The Guard will restore the original value when dropped, preventing env var leaks.
+    unsafe {
+        std::env::set_var("PIXI_CACHE_DIR", &temp_path);
+    }
+
+    Ok(TempCacheGuard {
+        _temp_dir: temp_dir,
+        original_value,
+    })
+}
+
 pub async fn execute() -> miette::Result<()> {
     let args = Args::parse();
 
@@ -267,6 +325,13 @@ pub async fn execute() -> miette::Result<()> {
     let (Some(command), global_options) = (args.command, args.global_options) else {
         // match CI expectations
         std::process::exit(2);
+    };
+
+    // If --no-cache is specified, use a temporary cache directory
+    let _temp_cache_guard = if global_options.no_cache {
+        Some(setup_temp_cache()?)
+    } else {
+        None
     };
 
     // Execute the command
