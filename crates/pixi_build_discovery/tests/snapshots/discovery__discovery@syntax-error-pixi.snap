@@ -1,0 +1,12 @@
+---
+source: crates/pixi_build_discovery/tests/discovery.rs
+assertion_line: 81
+expression: "pixi_test_utils :: format_diagnostic(& err)"
+input_file: tests/data/discovery/syntax-error-pixi/TEST-CASE
+---
+  × expected an equals, found an identifier
+    ╭─[<CARGO_ROOT>/tests/data/discovery/syntax-error-pixi/pixi.toml:11:6]
+ 10 │ # Syntax error - invalid TOML
+ 11 │ this is not valid toml syntax {{{
+    ·      ─────────────
+    ╰────

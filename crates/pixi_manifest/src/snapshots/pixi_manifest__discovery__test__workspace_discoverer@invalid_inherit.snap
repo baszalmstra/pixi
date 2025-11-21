@@ -1,7 +1,17 @@
 ---
 source: crates/pixi_manifest/src/discovery.rs
-expression: snapshot
+expression: combined_snapshot
 ---
+## SearchRoot
+  × `workspace` cannot be false
+    ╭─[<CARGO_ROOT>/tests/data/workspace-discovery/invalid_inherit/pixi.toml:9:22]
+  8 │ # This should error because `workspace = false` is illegal.
+  9 │ name = { workspace = false }
+    ·                      ─────
+ 10 │
+    ╰────
+  help: By default no fields are inherited from the workspace
+## ExplicitManifest
   × `workspace` cannot be false
     ╭─[<CARGO_ROOT>/tests/data/workspace-discovery/invalid_inherit/pixi.toml:9:22]
   8 │ # This should error because `workspace = false` is illegal.

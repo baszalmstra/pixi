@@ -11,8 +11,9 @@ use pixi_build_types::{ProjectModelV1, TargetSelectorV1};
 use pixi_config::Config;
 use pixi_consts::consts::{RATTLER_BUILD_DIRS, RATTLER_BUILD_FILE_NAMES, ROS_BACKEND_FILE_NAMES};
 use pixi_manifest::{
-    DiscoveryStart, ExplicitManifestError, PackageManifest, PrioritizedChannel, WithProvenance,
-    WorkspaceDiscoverer, WorkspaceDiscoveryError, WorkspaceManifest,
+    DiscoveryStart, ExplicitManifestError, KnownPreviewFeature, PackageManifest,
+    PrioritizedChannel, WithProvenance, WorkspaceDiscoverer, WorkspaceDiscoveryError,
+    WorkspaceManifest,
 };
 use pixi_spec::{SourceLocationSpec, SpecConversionError};
 use pixi_spec_containers::DependencyMap;
@@ -121,6 +122,14 @@ pub enum DiscoveryError {
 
     #[error("the manifest path '{0}', does not have a parent directory")]
     NoParentDir(PathBuf),
+
+    #[error(
+        "the pixi.toml file at '{path}' contains a [package] section but the 'pixi-build' preview feature is not enabled"
+    )]
+    #[diagnostic(help(
+        "Add 'preview = [\"pixi-build\"]' under the [workspace] or [project] section in the workspace manifest."
+    ))]
+    MissingPixiBuildPreview { path: PathBuf },
 }
 
 impl DiscoveredBackend {
@@ -307,15 +316,38 @@ impl DiscoveredBackend {
         source_path: PathBuf,
         channel_config: &ChannelConfig,
     ) -> Result<Option<Self>, DiscoveryError> {
+        // Try to discover the workspace and package
+        // WorkspaceDiscoverer now handles the logic for:
+        // - Always parsing pixi.toml files (whether explicit or in directory)
+        // - Parsing pyproject.toml if explicit or contains [tool.pixi (for directory searches)
+        // - Returning appropriate errors for syntax errors and missing features
         let manifests =
             match WorkspaceDiscoverer::new(DiscoveryStart::ExplicitManifest(source_path.clone()))
                 .with_closest_package(true)
                 .discover()
             {
-                Ok(None)
-                | Err(WorkspaceDiscoveryError::ExplicitManifestError(
+                Ok(None) => return Ok(None),
+                Err(WorkspaceDiscoveryError::ExplicitManifestError(
                     ExplicitManifestError::InvalidManifest(_),
                 )) => return Ok(None),
+                // Check if this is a FeatureNotEnabled error for pixi-build
+                Err(WorkspaceDiscoveryError::Toml(e))
+                    if matches!(
+                        &e.error,
+                        pixi_manifest::TomlError::FeatureNotEnabled(feature_err)
+                            if feature_err.feature == <&'static str>::from(KnownPreviewFeature::PixiBuild)
+                    ) =>
+                {
+                    return Err(DiscoveryError::MissingPixiBuildPreview {
+                        path: source_path,
+                    });
+                }
+                // Propagate all other TOML errors (syntax errors, etc.)
+                Err(WorkspaceDiscoveryError::Toml(e)) => {
+                    return Err(DiscoveryError::FailedToDiscoverPackage(
+                        WorkspaceDiscoveryError::Toml(e),
+                    ));
+                }
                 Err(e) => return Err(DiscoveryError::FailedToDiscoverPackage(e)),
                 Ok(Some(workspace)) => workspace.value,
             };

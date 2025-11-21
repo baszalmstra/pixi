@@ -332,11 +332,19 @@ impl WorkspaceDiscoverer {
             // Cheap check to see if the manifest contains a pixi section and if so has the
             // required sections.
             if let ManifestSource::PyProjectToml(source) = &contents {
-                if (source.contains("[tool.pixi")
-                    || matches!(search_path.clone(), SearchPath::Explicit(_)))
-                    && !Self::REQUIRED_SECTIONS
-                        .iter()
-                        .any(|section| source.contains(&format!("[tool.pixi.{section}")))
+                let is_explicit = matches!(search_path, SearchPath::Explicit(_));
+                let contains_pixi = source.contains("[tool.pixi");
+
+                // For directory searches, skip pyproject.toml files that don't contain [tool.pixi
+                if !is_explicit && !contains_pixi {
+                    continue;
+                }
+
+                // If we reach here, either it's explicit or contains [tool.pixi
+                // Check if it has the required sections
+                if !Self::REQUIRED_SECTIONS
+                    .iter()
+                    .any(|section| source.contains(&format!("[tool.pixi.{section}")))
                 {
                     return Err(WorkspaceDiscoveryError::Toml(Box::new(WithSourceCode {
                         error: TomlError::NoPixiTable(
@@ -597,8 +605,9 @@ mod test {
         )
         .unwrap();
 
-        let snapshot =
-            match WorkspaceDiscoverer::new(DiscoveryStart::SearchRoot(test_data_root.join(subdir)))
+        // Helper function to create a snapshot for a given discovery start
+        let create_snapshot = |discovery_start: DiscoveryStart| -> String {
+            match WorkspaceDiscoverer::new(discovery_start)
                 .with_closest_package(true)
                 .discover()
             {
@@ -606,9 +615,11 @@ mod test {
                 Ok(Some(WithWarnings {
                     value: discovered, ..
                 })) => {
-                    let rel_path =
-                        pathdiff::diff_paths(&discovered.workspace.provenance.path, test_data_root)
-                            .unwrap_or(discovered.workspace.provenance.path);
+                    let rel_path = pathdiff::diff_paths(
+                        &discovered.workspace.provenance.path,
+                        &test_data_root,
+                    )
+                    .unwrap_or(discovered.workspace.provenance.path);
                     let mut snapshot = String::new();
                     writeln!(
                         &mut snapshot,
@@ -643,12 +654,26 @@ mod test {
                     snapshot
                 }
                 Err(e) => format_diagnostic(&e),
-            };
+            }
+        };
+
+        // Test with SearchRoot
+        let search_root_snapshot = create_snapshot(DiscoveryStart::SearchRoot(test_data_root.join(subdir)));
+
+        // Test with ExplicitManifest
+        let explicit_manifest_snapshot =
+            create_snapshot(DiscoveryStart::ExplicitManifest(test_data_root.join(subdir)));
+
+        // Combine both results in the snapshot
+        let combined_snapshot = format!(
+            "## SearchRoot\n{}\n## ExplicitManifest\n{}",
+            search_root_snapshot, explicit_manifest_snapshot
+        );
 
         insta::with_settings!({
             snapshot_suffix => subdir.replace("/", "_"),
         }, {
-            insta::assert_snapshot!(snapshot);
+            insta::assert_snapshot!(combined_snapshot);
         });
     }
 

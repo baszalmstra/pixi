@@ -1,7 +1,16 @@
 ---
 source: crates/pixi_manifest/src/discovery.rs
-expression: snapshot
+expression: combined_snapshot
 ---
+## SearchRoot
+  × the workspace does not define a 'description'
+    ╭─[<CARGO_ROOT>/tests/data/workspace-discovery/3tier-resolution-error/pyproject.toml:11:15]
+ 10 │ [tool.pixi.package]
+ 11 │ description = { workspace = true } # This should error - workspace doesn't define description
+    ·               ────────────────────
+ 12 │ name = "package-name"
+    ╰────
+## ExplicitManifest
   × the workspace does not define a 'description'
     ╭─[<CARGO_ROOT>/tests/data/workspace-discovery/3tier-resolution-error/pyproject.toml:11:15]
  10 │ [tool.pixi.package]

@@ -1,7 +1,13 @@
 ---
 source: crates/pixi_manifest/src/discovery.rs
-expression: snapshot
+expression: combined_snapshot
 ---
+## SearchRoot
+Discovered workspace at: nested-pyproject-workspace/pyproject.toml
+- Name: nested-pyproject-workspace
+Package: nested-pyproject @ 0.1.0
+
+## ExplicitManifest
 Discovered workspace at: nested-pyproject-workspace/pyproject.toml
 - Name: nested-pyproject-workspace
 Package: nested-pyproject @ 0.1.0

@@ -1,7 +1,11 @@
 ---
 source: crates/pixi_manifest/src/discovery.rs
-expression: snapshot
+expression: combined_snapshot
 ---
+## SearchRoot
 Discovered workspace at: pixi.toml
 - Name: workspace-discovery
 Package: workspace-discovery @ 0.1.0
+
+## ExplicitManifest
+  × unrecognized manifest file format. Expected either pixi.toml or pyproject.toml.

@@ -1,6 +1,11 @@
 ---
 source: crates/pixi_manifest/src/discovery.rs
-expression: snapshot
+expression: combined_snapshot
 ---
+## SearchRoot
+Discovered workspace at: 3tier-resolution-mixed/pixi.toml
+- Name: 3tier-resolution-workspace
+
+## ExplicitManifest
 Discovered workspace at: 3tier-resolution-mixed/pixi.toml
 - Name: 3tier-resolution-workspace

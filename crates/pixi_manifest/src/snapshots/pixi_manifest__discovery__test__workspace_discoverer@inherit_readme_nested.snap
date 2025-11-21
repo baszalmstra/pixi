@@ -1,7 +1,13 @@
 ---
 source: crates/pixi_manifest/src/discovery.rs
-expression: snapshot
+expression: combined_snapshot
 ---
+## SearchRoot
+Discovered workspace at: inherit_readme/pixi.toml
+- Name: ??
+Package: my-package @ 0.1.0
+
+## ExplicitManifest
 Discovered workspace at: inherit_readme/pixi.toml
 - Name: ??
 Package: my-package @ 0.1.0
