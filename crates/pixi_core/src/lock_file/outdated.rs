@@ -60,17 +60,23 @@ impl<'p> DisregardLockedContent<'p> {
 impl<'p> OutdatedEnvironments<'p> {
     /// Constructs a new instance of this struct by examining the project and
     /// lock-file and finding any mismatches.
+    ///
+    /// The `exclude_newer_override` parameter allows specifying an ephemeral
+    /// exclude-newer value from CLI/ENV that should be used for checking
+    /// satisfiability but not persisted to the lock-file.
     pub(crate) async fn from_workspace_and_lock_file(
         workspace: &'p Workspace,
         lock_file: &LockFile,
         glob_hash_cache: GlobHashCache,
+        exclude_newer_override: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Self {
         // Find all targets that are not satisfied by the lock-file
         let UnsatisfiableTargets {
             mut outdated_conda,
             mut outdated_pypi,
             disregard_locked_content,
-        } = find_unsatisfiable_targets(workspace, lock_file, glob_hash_cache).await;
+        } = find_unsatisfiable_targets(workspace, lock_file, glob_hash_cache, exclude_newer_override)
+            .await;
 
         // Extend the outdated targets to include the solve groups
         let (mut conda_solve_groups_out_of_date, mut pypi_solve_groups_out_of_date) =
@@ -137,10 +143,16 @@ struct UnsatisfiableTargets<'p> {
 
 /// Find all targets (combination of environment and platform) who's
 /// requirements in the `project` are not satisfied by the `lock_file`.
+///
+/// The `exclude_newer_override` parameter allows specifying an ephemeral
+/// exclude-newer value from CLI/ENV. If provided, environments will be marked
+/// as outdated if the lock-file was solved with a different (or no) exclude-newer
+/// value, but the locked content will NOT be discarded (unlike a manifest mismatch).
 async fn find_unsatisfiable_targets<'p>(
     project: &'p Workspace,
     lock_file: &LockFile,
     glob_hash_cache: GlobHashCache,
+    exclude_newer_override: Option<chrono::DateTime<chrono::Utc>>,
 ) -> UnsatisfiableTargets<'p> {
     let mut verified_environments = HashMap::new();
     let mut unsatisfiable_targets = UnsatisfiableTargets::default();
@@ -223,6 +235,37 @@ async fn find_unsatisfiable_targets<'p>(
             }
 
             continue;
+        }
+
+        // Check if the CLI exclude-newer override requires re-solving.
+        // This is different from a manifest mismatch - we don't discard locked content,
+        // we just mark the environment as outdated so it will be re-solved with the new date.
+        if let Some(cli_exclude_newer) = exclude_newer_override {
+            let locked_exclude_newer = locked_environment.solve_options().exclude_newer;
+            // Re-solve if:
+            // 1. Lock-file has no exclude-newer but CLI does, OR
+            // 2. Lock-file's exclude-newer is later than CLI (CLI is more restrictive)
+            let needs_resolve = match locked_exclude_newer {
+                None => true, // Lock-file has no restriction, but CLI does
+                Some(locked) => locked > cli_exclude_newer, // CLI is more restrictive
+            };
+
+            if needs_resolve {
+                tracing::info!(
+                    "environment '{0}' needs re-solving because CLI exclude-newer ({cli_exclude_newer}) is more restrictive than lock-file ({locked_exclude_newer:?})",
+                    environment.name().fancy_display()
+                );
+
+                unsatisfiable_targets
+                    .outdated_conda
+                    .entry(environment.clone())
+                    .or_default()
+                    .extend(platforms.clone());
+
+                // Note: We don't discard locked content here because the packages
+                // might still be valid, just potentially newer than desired.
+                continue;
+            }
         }
 
         // Verify each individual platform

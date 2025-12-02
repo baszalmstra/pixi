@@ -10,6 +10,41 @@ use std::str::FromStr;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ExcludeNewer(pub DateTime<Utc>);
 
+/// Tracks the source of an exclude-newer value to determine how it should be handled.
+///
+/// - `Manifest`: The value came from pixi.toml and should be persisted to the lock-file.
+/// - `Ephemeral`: The value came from CLI/ENV and should NOT be persisted to the lock-file.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ExcludeNewerSource {
+    /// From pixi.toml - should be persisted to lock-file
+    Manifest(DateTime<Utc>),
+    /// From CLI/ENV - should NOT be persisted to lock-file
+    Ephemeral(DateTime<Utc>),
+}
+
+impl ExcludeNewerSource {
+    /// Returns the datetime value regardless of source.
+    pub fn value(&self) -> DateTime<Utc> {
+        match self {
+            ExcludeNewerSource::Manifest(dt) | ExcludeNewerSource::Ephemeral(dt) => *dt,
+        }
+    }
+
+    /// Returns the datetime value only if it came from the manifest.
+    /// This is used when writing to the lock-file, as ephemeral values should not be persisted.
+    pub fn manifest_value(&self) -> Option<DateTime<Utc>> {
+        match self {
+            ExcludeNewerSource::Manifest(dt) => Some(*dt),
+            ExcludeNewerSource::Ephemeral(_) => None,
+        }
+    }
+
+    /// Returns true if the value is ephemeral (from CLI/ENV).
+    pub fn is_ephemeral(&self) -> bool {
+        matches!(self, ExcludeNewerSource::Ephemeral(_))
+    }
+}
+
 impl From<ExcludeNewer> for DateTime<Utc> {
     fn from(value: ExcludeNewer) -> Self {
         value.0

@@ -583,6 +583,7 @@ pub async fn get_update_lock_file_and_prefixes<'env>(
             lock_file_usage: update_lock_file_options.lock_file_usage,
             no_install,
             max_concurrent_solves: update_lock_file_options.max_concurrent_solves,
+            exclude_newer: None,
         })
         .await?
         .0;

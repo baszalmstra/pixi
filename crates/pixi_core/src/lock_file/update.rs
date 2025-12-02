@@ -299,6 +299,7 @@ impl Workspace {
             self,
             &lock_file,
             glob_hash_cache.clone(),
+            options.exclude_newer,
         )
         .await;
         if outdated.is_empty() {
@@ -335,6 +336,7 @@ impl Workspace {
             .with_lock_file(lock_file)
             .with_glob_hash_cache(glob_hash_cache)
             .with_command_dispatcher(command_dispatcher)
+            .with_exclude_newer_override(options.exclude_newer)
             .finish()
             .await?
             .update()
@@ -435,6 +437,10 @@ pub struct UpdateLockFileOptions {
     /// value is None a heuristic is used based on the number of cores
     /// available from the system.
     pub max_concurrent_solves: usize,
+
+    /// An ephemeral exclude-newer value that overrides the manifest setting.
+    /// This value is used during solving but is NOT recorded in the lock-file.
+    pub exclude_newer: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1036,9 +1042,45 @@ pub struct UpdateContext<'p> {
 
     /// Optional list of packages explicitly targeted for update.
     update_targets: Option<std::collections::HashSet<String>>,
+
+    /// An ephemeral exclude-newer override from CLI/ENV.
+    /// This is used for solving but NOT persisted to the lock-file.
+    exclude_newer_override: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl<'p> UpdateContext<'p> {
+    /// Returns the effective exclude-newer value for the given environment.
+    ///
+    /// This uses the CLI override if present, otherwise falls back to the
+    /// manifest value. If both CLI and manifest are set and CLI is later
+    /// (less restrictive), the manifest value is used.
+    fn effective_exclude_newer<E: FeaturesExt<'p>>(
+        &self,
+        environment: &E,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        let manifest_value = environment.exclude_newer();
+
+        match (self.exclude_newer_override, manifest_value) {
+            // CLI override takes precedence
+            (Some(cli), None) => Some(cli),
+            // Use CLI if it's more restrictive (earlier date)
+            (Some(cli), Some(manifest)) => {
+                if cli < manifest {
+                    // CLI is more restrictive - use it but warn
+                    tracing::warn!(
+                        "CLI exclude-newer ({cli}) is earlier than manifest ({manifest}), using CLI value"
+                    );
+                    Some(cli)
+                } else {
+                    // CLI is less restrictive or same - use CLI
+                    Some(cli)
+                }
+            }
+            // No CLI override, use manifest
+            (None, manifest) => manifest,
+        }
+    }
+
     /// Returns a future that will resolve to the solved repodata records for
     /// the given environment group or `None` if the records do not exist
     /// and are also not in the process of being updated.
@@ -1215,6 +1257,10 @@ pub struct UpdateContextBuilder<'p> {
 
     /// Optional list of package names explicitly targeted for update.
     update_targets: Option<std::collections::HashSet<String>>,
+
+    /// An ephemeral exclude-newer override from CLI/ENV.
+    /// This is used for solving but NOT persisted to the lock-file.
+    exclude_newer_override: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl<'p> UpdateContextBuilder<'p> {
@@ -1287,6 +1333,18 @@ impl<'p> UpdateContextBuilder<'p> {
         }
     }
 
+    /// Sets an ephemeral exclude-newer override from CLI/ENV.
+    /// This is used for solving but NOT persisted to the lock-file.
+    pub fn with_exclude_newer_override(
+        self,
+        exclude_newer: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        Self {
+            exclude_newer_override: exclude_newer,
+            ..self
+        }
+    }
+
     /// Construct the context.
     pub async fn finish(self) -> miette::Result<UpdateContext<'p>> {
         let project = self.project;
@@ -1305,6 +1363,7 @@ impl<'p> UpdateContextBuilder<'p> {
                     project,
                     &lock_file,
                     glob_hash_cache.clone(),
+                    self.exclude_newer_override,
                 )
                 .await
             }
@@ -1512,6 +1571,7 @@ impl<'p> UpdateContextBuilder<'p> {
 
             no_install: self.no_install,
             update_targets: self.update_targets,
+            exclude_newer_override: self.exclude_newer_override,
         })
     }
 }
@@ -1530,6 +1590,7 @@ impl<'p> UpdateContext<'p> {
             mapping_client: None,
             command_dispatcher: None,
             update_targets: None,
+            exclude_newer_override: None,
         }
     }
 
@@ -1735,6 +1796,8 @@ impl<'p> UpdateContext<'p> {
                 .unwrap_or_default();
 
             // Spawn a task to solve the pypi environment
+            // Use the effective exclude-newer value (CLI override > manifest)
+            let effective_exclude_newer = self.effective_exclude_newer(&group);
             let pypi_solve_future = spawn_solve_pypi_task(
                 uv_context,
                 group.clone(),
@@ -1748,6 +1811,7 @@ impl<'p> UpdateContext<'p> {
                 project.root().to_path_buf(),
                 locked_group_records,
                 self.no_install,
+                effective_exclude_newer,
             );
 
             pending_futures.push(pypi_solve_future.boxed_local());
@@ -2449,6 +2513,7 @@ async fn spawn_solve_pypi_task<'p>(
     project_root: PathBuf,
     locked_pypi_packages: Arc<PypiRecordsByName>,
     disallow_install_conda_prefix: bool,
+    exclude_newer: Option<chrono::DateTime<chrono::Utc>>,
 ) -> miette::Result<TaskResult> {
     // Get the Pypi dependencies for this environment
     let dependencies = grouped_environment.pypi_dependencies(Some(platform));
@@ -2461,8 +2526,6 @@ async fn spawn_solve_pypi_task<'p>(
             None,
         ));
     }
-
-    let exclude_newer = grouped_environment.exclude_newer();
 
     // Get the system requirements for this environment
     let system_requirements = grouped_environment.system_requirements();
