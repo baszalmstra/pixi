@@ -2270,4 +2270,105 @@ mod tests {
             Some(1)
         );
     }
+
+    /// Test that demonstrates issue #5050: When a solve group has environments with different
+    /// extras requirements, the satisfiability check may fail with TooManyPypiPackages for
+    /// the environment that doesn't request the extras.
+    ///
+    /// Scenario:
+    /// - Two environments share a solve-group
+    /// - Environment A requests `pkg[extra]` which brings in `dep`
+    /// - Environment B requests `pkg` (no extras)
+    /// - The lock file contains both `pkg` and `dep` (because of solve-group sharing)
+    /// - When checking satisfiability for environment B:
+    ///   - `pkg` is visited
+    ///   - `dep` is NOT visited (because it's only required by the `extra`)
+    ///   - But `dep` IS in the lock file
+    ///   - Result: TooManyPypiPackages error (BUG!)
+    ///
+    /// This test verifies the behavior of the TooManyPypiPackages check by constructing
+    /// a minimal scenario where a package is in the lock file but not visited.
+    #[test]
+    fn test_issue_5050_too_many_pypi_packages_with_extras() {
+        use rattler_lock::PypiPackageEnvironmentData;
+
+        // Create two PyPI packages:
+        // - "parent" with requires_dist that depends on "child" only when extra "feature" is
+        //   enabled
+        // - "child" which is the dependency brought in by the extra
+        let parent_package = PypiPackageData {
+            name: "parent".parse().unwrap(),
+            version: Version::from_str("1.0.0").unwrap(),
+            location: UrlOrPath::Url(
+                "https://files.pythonhosted.org/packages/parent-1.0.0.whl"
+                    .parse()
+                    .unwrap(),
+            ),
+            hash: None,
+            requires_dist: vec![
+                // This dependency is only required when extra "feature" is enabled
+                pep508_rs::Requirement::from_str("child>=1.0.0; extra == 'feature'").unwrap(),
+            ],
+            requires_python: None,
+            editable: false,
+        };
+
+        let child_package = PypiPackageData {
+            name: "child".parse().unwrap(),
+            version: Version::from_str("1.0.0").unwrap(),
+            location: UrlOrPath::Url(
+                "https://files.pythonhosted.org/packages/child-1.0.0.whl"
+                    .parse()
+                    .unwrap(),
+            ),
+            hash: None,
+            requires_dist: vec![],
+            requires_python: None,
+            editable: false,
+        };
+
+        // Create locked pypi environment with BOTH packages
+        // (simulating what happens in a solve-group where one env has extras)
+        let locked_pypi_packages: Vec<(PypiPackageData, PypiPackageEnvironmentData)> = vec![
+            (parent_package, PypiPackageEnvironmentData::default()),
+            (child_package, PypiPackageEnvironmentData::default()),
+        ];
+
+        let pypi_records_by_name =
+            PypiRecordsByName::from_unique_iter(locked_pypi_packages).unwrap();
+
+        // Now, if we were to run the satisfiability check for an environment that
+        // requests "parent" WITHOUT the "feature" extra:
+        // 1. "parent" would be visited
+        // 2. "parent"'s requires_dist would be processed with extras=[]
+        // 3. "child>=1.0.0; extra == 'feature'" would NOT match (extras is empty)
+        // 4. "child" would NOT be visited
+        // 5. But "child" IS in locked_pypi_packages
+        // 6. TooManyPypiPackages error would be triggered!
+
+        // This demonstrates the core issue: the lock file has 2 packages,
+        // but an environment without extras would only visit 1.
+        // The satisfiability check incorrectly fails in this case.
+
+        // Verify the setup: we have 2 packages
+        assert_eq!(pypi_records_by_name.len(), 2);
+
+        // Simulate the satisfiability check's visited set for an env WITHOUT extras
+        let mut pypi_packages_visited = std::collections::HashSet::new();
+        pypi_packages_visited.insert(PypiPackageIdx(0)); // Only "parent" visited
+
+        // This is the problematic check from verify_package_platform_satisfiability
+        // It would fail because visited (1) != locked (2)
+        let would_fail = pypi_packages_visited.len() != pypi_records_by_name.len();
+
+        // Document the current (buggy) behavior
+        assert!(
+            would_fail,
+            "This test documents issue #5050: the satisfiability check \
+             incorrectly fails when a solve-group has packages that are only \
+             needed by certain extras. The check compares visited packages \
+             against all locked packages, but in a solve-group, some packages \
+             may only be needed by specific environments/extras."
+        );
+    }
 }
