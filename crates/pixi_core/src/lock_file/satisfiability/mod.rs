@@ -2279,12 +2279,25 @@ mod tests {
     /// - Two environments share a solve-group
     /// - Environment A requests `pkg[extra]` which brings in `dep`
     /// - Environment B requests `pkg` (no extras)
-    /// - The lock file contains both `pkg` and `dep` (because of solve-group sharing)
-    /// - When checking satisfiability for environment B:
-    ///   - `pkg` is visited
-    ///   - `dep` is NOT visited (because it's only required by the `extra`)
-    ///   - But `dep` IS in the lock file
-    ///   - Result: TooManyPypiPackages error (BUG!)
+    /// - The solve-group solution contains both `pkg` and `dep`
+    ///
+    /// BUG: Currently, both packages end up in BOTH environments' lock file sections,
+    /// even though Environment B doesn't need `dep`.
+    ///
+    /// EXPECTED: When writing the lock file, packages should be split per-environment:
+    /// - Environment A's section: `pkg`, `dep` (both needed)
+    /// - Environment B's section: `pkg` only (dep not needed without extras)
+    ///
+    /// When the lock file incorrectly contains `dep` for Environment B, the satisfiability
+    /// check fails with TooManyPypiPackages because:
+    /// - `pkg` is visited
+    /// - `dep` is NOT visited (because it's only required by the `extra`)
+    /// - But `dep` IS in Environment B's lock file section (INCORRECT!)
+    /// - Result: TooManyPypiPackages error
+    ///
+    /// FIX DIRECTION: The extraction logic in `spawn_extract_environment_task` should
+    /// ensure that packages are only included if they are reachable from the environment's
+    /// own dependencies, respecting extras and markers.
     ///
     /// This test verifies the behavior of the TooManyPypiPackages check by constructing
     /// a minimal scenario where a package is in the lock file but not visited.
@@ -2362,13 +2375,16 @@ mod tests {
         let would_fail = pypi_packages_visited.len() != pypi_records_by_name.len();
 
         // Document the current (buggy) behavior
+        // When this test starts failing (would_fail becomes false), the bug is fixed!
         assert!(
             would_fail,
-            "This test documents issue #5050: the satisfiability check \
-             incorrectly fails when a solve-group has packages that are only \
-             needed by certain extras. The check compares visited packages \
-             against all locked packages, but in a solve-group, some packages \
-             may only be needed by specific environments/extras."
+            "This test documents issue #5050: When packages from a solve-group \
+             are not correctly split per-environment in the lock file, the \
+             satisfiability check fails with TooManyPypiPackages. \
+             \
+             FIX: Ensure spawn_extract_environment_task in update.rs correctly \
+             filters packages based on the environment's actual dependencies, \
+             including proper handling of extras and markers."
         );
     }
 }
