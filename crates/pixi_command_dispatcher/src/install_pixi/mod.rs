@@ -167,6 +167,13 @@ impl InstallPixiEnvironmentSpec {
         drop(build_futures);
 
         // Install the environment using the prefix installer
+        // TODO: Once rattler exports `LinkOptions` from `rattler::install`, we should add:
+        //   .with_link_options(LinkOptions {
+        //       allow_symbolic_links: command_dispatcher.allow_symbolic_links(),
+        //       allow_hard_links: command_dispatcher.allow_hard_links(),
+        //       allow_ref_links: command_dispatcher.allow_ref_links(),
+        //   })
+        // See: https://github.com/prefix-dev/pixi/issues/5332
         let mut installer = Installer::new()
             .with_target_platform(self.build_environment.host_platform)
             .with_download_client(command_dispatcher.download_client().clone())
