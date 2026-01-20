@@ -68,11 +68,11 @@ impl RattlerBuildBackend {
                             "recipe/recipe.yaml",
                             "recipe/recipe.yml",
                         ]
-                            .into_iter()
-                            .find_map(|relative_path| {
-                                let recipe_path = manifest_dir.join(relative_path);
-                                recipe_path.is_file().then_some(recipe_path)
-                            })
+                        .into_iter()
+                        .find_map(|relative_path| {
+                            let recipe_path = manifest_dir.join(relative_path);
+                            recipe_path.is_file().then_some(recipe_path)
+                        })
                     });
                     recipe_path_local.expect("Could not find a recipe.yaml in the source directory to use as the recipe manifest.")
                 };

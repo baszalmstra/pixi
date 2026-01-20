@@ -951,7 +951,11 @@ numpy:
             recipe
         );
         assert_eq!(
-            try_initialize(&recipe, None).await.unwrap().recipe_source.path,
+            try_initialize(&recipe, None)
+                .await
+                .unwrap()
+                .recipe_source
+                .path,
             recipe
         );
 
@@ -967,7 +971,11 @@ numpy:
             recipe
         );
         assert_eq!(
-            try_initialize(&recipe, None).await.unwrap().recipe_source.path,
+            try_initialize(&recipe, None)
+                .await
+                .unwrap()
+                .recipe_source
+                .path,
             recipe
         );
 
@@ -1001,12 +1009,12 @@ numpy:
 
         let tmp = tempdir().unwrap();
         let pixi_dir = tmp.path().join("pixi");
-        std::fs::create_dir(&pixi_dir).unwrap();
+        fs::create_dir(&pixi_dir).unwrap();
 
         let recipe_dir = pixi_dir.join("../recipe-custom-dir");
         let recipe = recipe_dir.join("recipe.yml");
-        std::fs::create_dir(recipe_dir).unwrap();
-        std::fs::write(&recipe, FAKE_RECIPE).unwrap();
+        fs::create_dir(recipe_dir).unwrap();
+        fs::write(&recipe, FAKE_RECIPE).unwrap();
 
         let config = RattlerBuildBackendConfig {
             recipe_yaml: Some(PathBuf::from("../recipe-custom-dir/recipe.yml")),
