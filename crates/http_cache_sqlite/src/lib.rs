@@ -66,7 +66,7 @@ impl SqliteCacheManager {
     pub fn new(path: PathBuf) -> Result<Self> {
         // Ensure the parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            fs_err::create_dir_all(parent)?;
         }
 
         let connection = Connection::open(&path)?;
@@ -127,10 +127,7 @@ fn response_to_parts(response: &HttpResponse) -> Result<(Vec<u8>, String)> {
 
 #[async_trait::async_trait]
 impl CacheManager for SqliteCacheManager {
-    async fn get(
-        &self,
-        cache_key: &str,
-    ) -> Result<Option<(HttpResponse, CachePolicy)>> {
+    async fn get(&self, cache_key: &str) -> Result<Option<(HttpResponse, CachePolicy)>> {
         let conn = self
             .connection
             .lock()
@@ -183,7 +180,10 @@ impl CacheManager for SqliteCacheManager {
             .connection
             .lock()
             .map_err(|e| -> BoxError { format!("mutex poisoned: {e}").into() })?;
-        conn.execute("DELETE FROM http_cache WHERE cache_key = ?1", params![cache_key])?;
+        conn.execute(
+            "DELETE FROM http_cache WHERE cache_key = ?1",
+            params![cache_key],
+        )?;
         Ok(())
     }
 }
@@ -198,7 +198,10 @@ mod tests {
     /// Build a minimal [`HttpResponse`] with the given body bytes.
     fn make_response(body: &[u8], status: u16) -> HttpResponse {
         let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/octet-stream".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        );
         let value = serde_json::json!({
             "body": body,
             "headers": headers,
@@ -282,7 +285,11 @@ mod tests {
         let (manager, _dir) = temp_manager();
 
         manager
-            .put("key".to_string(), make_response(b"data", 200), make_policy())
+            .put(
+                "key".to_string(),
+                make_response(b"data", 200),
+                make_policy(),
+            )
             .await
             .unwrap();
         assert!(manager.get("key").await.unwrap().is_some());
@@ -414,11 +421,19 @@ mod tests {
     #[tokio::test]
     async fn creates_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("deeply").join("nested").join("cache.sqlite");
+        let db_path = dir
+            .path()
+            .join("deeply")
+            .join("nested")
+            .join("cache.sqlite");
         let manager = SqliteCacheManager::new(db_path).unwrap();
 
         manager
-            .put("ok".to_string(), make_response(b"nested", 200), make_policy())
+            .put(
+                "ok".to_string(),
+                make_response(b"nested", 200),
+                make_policy(),
+            )
             .await
             .unwrap();
 
