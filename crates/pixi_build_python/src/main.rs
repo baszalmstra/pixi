@@ -32,6 +32,46 @@ use crate::pypi_mapping::{
     map_requirements_with_channels,
 };
 
+/// Compute the `python_abi` version spec from an optional `requires-python`
+/// specifier string.
+///
+/// Extracts the lower bound and pins it to a single minor version:
+/// - `">=3.9"`     → `">=3.9,<3.10a0"`
+/// - `">=3.9.3"`   → `">=3.9.3,<3.10a0"`
+/// - `">=3.11,<4"` → `">=3.11,<3.12a0"`
+/// - `None`        → `">=3.8,<3.9a0"` (default)
+fn python_abi_spec_from_requires_python(requires_python: Option<&str>) -> String {
+    let (major, minor, patch) = requires_python
+        .and_then(|s| {
+            // Find the first >= bound and extract major.minor[.patch]
+            for part in s.split(',') {
+                let part = part.trim();
+                if let Some(version) = part.strip_prefix(">=") {
+                    let version = version.trim();
+                    let nums: Vec<&str> = version.split('.').collect();
+                    if nums.len() >= 2 {
+                        let major = nums[0].parse::<u32>().ok()?;
+                        let minor = nums[1].parse::<u32>().ok()?;
+                        let patch = if nums.len() >= 3 {
+                            nums[2].parse::<u32>().ok()
+                        } else {
+                            None
+                        };
+                        return Some((major, minor, patch));
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or((3, 8, None));
+
+    let lower = match patch {
+        Some(p) => format!(">={major}.{minor}.{p}"),
+        None => format!(">={major}.{minor}"),
+    };
+    format!("{lower},<{major}.{}a0", minor + 1)
+}
+
 #[derive(Default, Clone)]
 pub struct PythonGenerator {}
 
@@ -177,6 +217,24 @@ impl GenerateRecipe for PythonGenerator {
             // This is the default behavior for pure Python packages.
             true
         };
+
+        // Validate abi3 + noarch conflict
+        if config.abi3 == Some(true) && is_noarch {
+            miette::bail!(
+                "abi3 = true is incompatible with noarch packages. \
+                 The stable ABI is only meaningful for packages with compiled extensions."
+            );
+        }
+
+        // Add python_abi host dependency when abi3 is enabled
+        if config.abi3 == Some(true) {
+            let requires_python_str = pyproject_metadata_provider.requires_python().ok().flatten();
+            let abi_spec =
+                python_abi_spec_from_requires_python(requires_python_str.as_deref());
+            let python_abi_req: Item<PackageDependency> =
+                format!("python_abi {abi_spec}").parse().into_diagnostic()?;
+            requirements.host.push(python_abi_req);
+        }
 
         // Use NoArch platform for mapping if this is a noarch package
         let mapping_platform = if is_noarch {
@@ -1032,6 +1090,150 @@ build-backend = "hatchling.build"
             host_deps,
             vec!["pip", "python"],
             "host deps should only contain pip and python when ignore_pypi_mapping=true"
+        );
+    }
+
+    #[test]
+    fn test_python_abi_spec_from_requires_python() {
+        // Basic lower bound
+        assert_eq!(
+            python_abi_spec_from_requires_python(Some(">=3.9")),
+            ">=3.9,<3.10a0"
+        );
+        // With patch version
+        assert_eq!(
+            python_abi_spec_from_requires_python(Some(">=3.9.3")),
+            ">=3.9.3,<3.10a0"
+        );
+        // Multiple specifiers - uses the >= bound
+        assert_eq!(
+            python_abi_spec_from_requires_python(Some(">=3.11,<4")),
+            ">=3.11,<3.12a0"
+        );
+        // 3.8 lower bound
+        assert_eq!(
+            python_abi_spec_from_requires_python(Some(">=3.8")),
+            ">=3.8,<3.9a0"
+        );
+        // None defaults to 3.8
+        assert_eq!(
+            python_abi_spec_from_requires_python(None),
+            ">=3.8,<3.9a0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_abi3_adds_python_abi_to_host() {
+        let project_model = project_fixture!({
+            "name": "foobar",
+            "version": "0.1.0",
+            "targets": {
+                "defaultTarget": {}
+            }
+        });
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+        fs::write(
+            temp_dir.path().join("pyproject.toml"),
+            r#"[project]
+name = "foobar"
+version = "0.1.0"
+requires-python = ">=3.9"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )
+        .await
+        .expect("Failed to write pyproject.toml");
+
+        let config = PythonBackendConfig {
+            abi3: Some(true),
+            noarch: Some(false),
+            compilers: Some(vec!["c".to_string()]),
+            ..Default::default()
+        };
+
+        let generated_recipe = PythonGenerator::default()
+            .generate_recipe(
+                &project_model,
+                &config,
+                temp_dir.path().to_path_buf(),
+                Platform::Linux64,
+                None,
+                &HashSet::new(),
+                vec![],
+                None,
+            )
+            .await
+            .expect("Failed to generate recipe");
+
+        let host_deps: Vec<String> = generated_recipe
+            .recipe
+            .requirements
+            .host
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+
+        assert!(
+            host_deps.iter().any(|d| d.contains("python_abi")),
+            "host deps should contain python_abi when abi3=true, got: {host_deps:?}"
+        );
+        // Check the version spec
+        let abi_dep = host_deps.iter().find(|d| d.contains("python_abi")).unwrap();
+        assert!(
+            abi_dep.contains(">=3.9") && abi_dep.contains("<3.10a0"),
+            "python_abi should have >=3.9,<3.10a0 spec, got: {abi_dep}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_abi3_with_noarch_errors() {
+        let config = PythonBackendConfig {
+            abi3: Some(true),
+            noarch: Some(true),
+            ignore_pyproject_manifest: Some(true),
+            ..Default::default()
+        };
+
+        let result = generate_test_recipe(&config).await;
+        assert!(result.is_err(), "abi3=true with noarch=true should error");
+    }
+
+    #[tokio::test]
+    async fn test_abi3_without_requires_python_defaults() {
+        let config = PythonBackendConfig {
+            abi3: Some(true),
+            noarch: Some(false),
+            compilers: Some(vec!["c".to_string()]),
+            ignore_pyproject_manifest: Some(true),
+            ..Default::default()
+        };
+
+        let generated_recipe = generate_test_recipe(&config)
+            .await
+            .expect("Failed to generate recipe");
+
+        let host_deps: Vec<String> = generated_recipe
+            .recipe
+            .requirements
+            .host
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+
+        let abi_dep = host_deps.iter().find(|d| d.contains("python_abi"));
+        assert!(
+            abi_dep.is_some(),
+            "host deps should contain python_abi, got: {host_deps:?}"
+        );
+        let abi_dep = abi_dep.unwrap();
+        assert!(
+            abi_dep.contains(">=3.8") && abi_dep.contains("<3.9a0"),
+            "python_abi should default to >=3.8,<3.9a0, got: {abi_dep}"
         );
     }
 
