@@ -283,30 +283,14 @@ See https://pixi.sh/latest/concepts/conda_pypi/#pinned-package-conflicts for mor
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn resolve_pypi(
-    context: UvResolutionContext,
-    pypi_options: &PypiOptions,
-    dependencies: IndexMap<uv_normalize::PackageName, IndexSet<PixiPypiSpec>>,
-    system_requirements: SystemRequirements,
+/// Discover which python packages are already provided by locked conda
+/// records. The resulting map feeds two downstream steps: entries become
+/// `==version` constraints via [`build_conda_constraints`], and
+/// [`CondaResolverProvider`] uses them to short-circuit uv's lookups so the
+/// conda-installed version wins instead of a PyPI one.
+fn build_conda_python_packages_map(
     locked_pixi_records: &[PixiRecord],
-    locked_pypi_packages: &[UnresolvedPypiRecord],
-    platform: rattler_conda_types::Platform,
-    pb: &ProgressBar,
-    project_root: &Path,
-    command_dispatcher: CommandDispatcher,
-    repodata_building_records: miette::Result<Arc<PixiRecordsByName>>,
-    project_env_vars: HashMap<EnvironmentName, EnvironmentVars>,
-    environment: Environment<'_>,
-    disallow_install_conda_prefix: bool,
-    exclude_newer: uv_resolver::ExcludeNewer,
-    solve_strategy: SolveStrategy,
-    build_cache: Arc<PypiEnvironmentBuildCache>,
-) -> miette::Result<(LockedPypiRecords, Option<CondaPrefixUpdated>)> {
-    // Solve python packages
-    pb.set_message("resolving pypi dependencies");
-
-    // Determine which pypi packages are already installed as conda package.
+) -> miette::Result<CondaPythonPackages> {
     let conda_python_packages = locked_pixi_records
         .iter()
         .flat_map(|record| {
@@ -353,9 +337,17 @@ pub async fn resolve_pypi(
         tracing::info!("there are no python packages installed by conda");
     }
 
-    // Build a lookup map of original git references before consuming dependencies.
-    // This is used later to preserve branch/tag info in the lock file that uv normalizes away.
-    let original_git_references = dependencies
+    Ok(conda_python_packages)
+}
+
+/// Capture each git dependency's original branch/tag/rev *before* handing
+/// the requirements to uv, which normalizes the reference away and keeps
+/// only the resolved commit. Without this snapshot the lock file would lose
+/// the human-readable reference the user typed.
+fn collect_original_git_references(
+    dependencies: &IndexMap<uv_normalize::PackageName, IndexSet<PixiPypiSpec>>,
+) -> HashMap<uv_normalize::PackageName, pixi_spec::GitReference> {
+    dependencies
         .iter()
         .filter_map(|(name, specs)| {
             specs.iter().find_map(|spec| {
@@ -365,11 +357,17 @@ pub async fn resolve_pypi(
                     .map(|rev| (name.clone(), rev))
             })
         })
-        .collect();
+        .collect()
+}
 
-    // Pre-populate the git resolver with locked git references.
-    // This ensures that when uv resolves git dependencies, it will find the cached commit
-    // and not panic in `url_to_precise` function.
+/// Seed uv's git resolver with commit SHAs from the lock file. Without this,
+/// `url_to_precise` panics when uv tries to resolve a locked git dependency
+/// and finds no cached commit for it — the resolver assumes a prior lookup
+/// has already populated the cache.
+fn prepopulate_git_resolver(
+    locked_pypi_packages: &[UnresolvedPypiRecord],
+    context: &UvResolutionContext,
+) {
     for package_data in locked_pypi_packages {
         if let Some(location) = package_data.as_package_data().location().as_url()
             && LockedGitUrl::is_locked_git_url(location)
@@ -396,6 +394,172 @@ pub async fn resolve_pypi(
             }
         }
     }
+}
+
+fn build_registry_client(
+    context: &UvResolutionContext,
+    marker_environment: &uv_pep508::MarkerEnvironment,
+    index_locations: &uv_distribution_types::IndexLocations,
+    index_strategy: uv_configuration::IndexStrategy,
+) -> Arc<RegistryClient> {
+    let allow_insecure_hosts = configure_insecure_hosts_for_tls_bypass(
+        context.allow_insecure_host.clone(),
+        context.tls_no_verify,
+        index_locations,
+    );
+
+    let base_client_builder = BaseClientBuilder::default()
+        .allow_insecure_host(allow_insecure_hosts)
+        .markers(marker_environment)
+        .keyring(context.keyring_provider)
+        .connectivity(Connectivity::Online)
+        .native_tls(context.use_native_tls)
+        .extra_middleware(context.extra_middleware.clone());
+
+    let mut uv_client_builder =
+        RegistryClientBuilder::new(base_client_builder, context.cache.clone())
+            .index_locations(index_locations.clone())
+            .index_strategy(index_strategy);
+
+    for p in &context.proxies {
+        uv_client_builder = uv_client_builder.proxy(p.clone())
+    }
+
+    Arc::new(uv_client_builder.build())
+}
+
+/// Turn conda-provided python packages into `==version` uv requirements.
+/// Emitting these as `RequirementSource::Registry` is a deliberate lie: the
+/// packages don't come from PyPI, but [`CondaResolverProvider`] intercepts
+/// lookups for these names before uv ever hits a registry, so the source
+/// kind is only ever used for constraint bookkeeping.
+fn build_conda_constraints(
+    conda_python_packages: &CondaPythonPackages,
+) -> miette::Result<Vec<uv_distribution_types::Requirement>> {
+    conda_python_packages
+        .values()
+        .map(|(_, p)| {
+            // Create pep440 version from the conda version
+            let specifier = uv_pep440::VersionSpecifier::from_version(
+                uv_pep440::Operator::Equal,
+                to_uv_version(&p.version)?,
+            )?;
+
+            // Only one requirement source and we just assume that's a PyPI source
+            let source = RequirementSource::Registry {
+                specifier: specifier.into(),
+                index: None,
+                conflict: None,
+            };
+
+            Ok::<_, ConversionError>(uv_distribution_types::Requirement {
+                name: to_uv_normalize(p.name.as_normalized())?,
+                extras: vec![].into(),
+                marker: Default::default(),
+                source,
+                groups: Default::default(),
+                origin: None,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .into_diagnostic()
+}
+
+/// Convert locked pypi packages into uv `Preference`s so a re-resolve
+/// produces minimal lock-file churn. Git-locked packages are deliberately
+/// skipped: pinning them by version would fight uv, which resolves git
+/// dependencies from the manifest reference plus the cache
+/// [`prepopulate_git_resolver`] seeds.
+fn build_preferences(
+    locked_pypi_packages: &[UnresolvedPypiRecord],
+) -> miette::Result<Vec<Preference>> {
+    #[derive(Debug, thiserror::Error)]
+    enum PixiPreferencesError {
+        #[error(transparent)]
+        Conversion(#[from] ConversionError),
+        #[error(transparent)]
+        Preference(#[from] PreferenceError),
+
+        #[error(transparent)]
+        OidParse(#[from] uv_git_types::OidParseError),
+
+        #[error(transparent)]
+        GitUrlParse(#[from] uv_git_types::GitUrlParseError),
+    }
+
+    locked_pypi_packages
+        .iter()
+        .map(|record| {
+            let Some(version) = record.version() else {
+                return Ok(None);
+            };
+            let requirement = uv_pep508::Requirement {
+                name: to_uv_normalize(record.name())?,
+                extras: Vec::new().into(),
+                version_or_url: Some(uv_pep508::VersionOrUrl::VersionSpecifier(
+                    uv_pep440::VersionSpecifiers::from(
+                        uv_pep440::VersionSpecifier::equals_version(to_uv_version(version)?),
+                    ),
+                )),
+                marker: uv_pep508::MarkerTree::TRUE,
+                origin: None,
+            };
+
+            // For git packages, we don't add them as preferences.
+            // because they are resolved based on the reference (branch/tag/rev) in the manifest.
+            // This matches how uv handles git dependencies - it doesn't try to pin them via preferences.
+            // The git resolver cache (pre-populated above) ensures the locked commit is preferred.
+            if let Some(location) = record.as_package_data().location().as_url()
+                && LockedGitUrl::is_locked_git_url(location)
+            {
+                // Skip git packages - they'll be resolved based on manifest reference
+                // with the cached commit from the git resolver
+                return Ok(None);
+            }
+
+            // Create preference for registry and URL packages
+            let named = uv_requirements_txt::RequirementsTxtRequirement::Named(requirement);
+            let entry = uv_requirements_txt::RequirementEntry {
+                requirement: named,
+                hashes: Default::default(),
+            };
+
+            Ok(Preference::from_entry(entry)?)
+        })
+        .filter_map(|pref| pref.transpose())
+        .collect::<Result<Vec<_>, PixiPreferencesError>>()
+        .into_diagnostic()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_pypi(
+    context: UvResolutionContext,
+    pypi_options: &PypiOptions,
+    dependencies: IndexMap<uv_normalize::PackageName, IndexSet<PixiPypiSpec>>,
+    system_requirements: SystemRequirements,
+    locked_pixi_records: &[PixiRecord],
+    locked_pypi_packages: &[UnresolvedPypiRecord],
+    platform: rattler_conda_types::Platform,
+    pb: &ProgressBar,
+    project_root: &Path,
+    command_dispatcher: CommandDispatcher,
+    repodata_building_records: miette::Result<Arc<PixiRecordsByName>>,
+    project_env_vars: HashMap<EnvironmentName, EnvironmentVars>,
+    environment: Environment<'_>,
+    disallow_install_conda_prefix: bool,
+    exclude_newer: uv_resolver::ExcludeNewer,
+    solve_strategy: SolveStrategy,
+    build_cache: Arc<PypiEnvironmentBuildCache>,
+) -> miette::Result<(LockedPypiRecords, Option<CondaPrefixUpdated>)> {
+    // Solve python packages
+    pb.set_message("resolving pypi dependencies");
+
+    let conda_python_packages = build_conda_python_packages_map(locked_pixi_records)?;
+
+    // Must run before `dependencies` is consumed into uv requirements below.
+    let original_git_references = collect_original_git_references(&dependencies);
+
+    prepopulate_git_resolver(locked_pypi_packages, &context);
 
     // Determine the python interpreter that is installed as part of the conda
     // packages.
@@ -463,33 +627,12 @@ pub async fn resolve_pypi(
     )
     .into_diagnostic()?;
 
-    // Configure insecure hosts for TLS verification bypass
-    let allow_insecure_hosts = configure_insecure_hosts_for_tls_bypass(
-        context.allow_insecure_host.clone(),
-        context.tls_no_verify,
+    let registry_client = build_registry_client(
+        &context,
+        &marker_environment,
         &index_locations,
+        index_strategy,
     );
-
-    let registry_client = {
-        let base_client_builder = BaseClientBuilder::default()
-            .allow_insecure_host(allow_insecure_hosts)
-            .markers(&marker_environment)
-            .keyring(context.keyring_provider)
-            .connectivity(Connectivity::Online)
-            .native_tls(context.use_native_tls)
-            .extra_middleware(context.extra_middleware.clone());
-
-        let mut uv_client_builder =
-            RegistryClientBuilder::new(base_client_builder, context.cache.clone())
-                .index_locations(index_locations.clone())
-                .index_strategy(index_strategy);
-
-        for p in &context.proxies {
-            uv_client_builder = uv_client_builder.proxy(p.clone())
-        }
-
-        Arc::new(uv_client_builder.build())
-    };
     let dependency_overrides =
         pypi_options.dependency_overrides.as_ref().map(|overrides|->Result<Vec<_>, _> {
             overrides
@@ -619,93 +762,9 @@ pub async fn resolve_pypi(
         Arc::clone(&last_error),
     );
 
-    // Constrain the conda packages to the specific python packages
-    let constraints = conda_python_packages
-        .values()
-        .map(|(_, p)| {
-            // Create pep440 version from the conda version
-            let specifier = uv_pep440::VersionSpecifier::from_version(
-                uv_pep440::Operator::Equal,
-                to_uv_version(&p.version)?,
-            )?;
+    let constraints = build_conda_constraints(&conda_python_packages)?;
 
-            // Only one requirement source and we just assume that's a PyPI source
-            let source = RequirementSource::Registry {
-                specifier: specifier.into(),
-                index: None,
-                conflict: None,
-            };
-
-            Ok::<_, ConversionError>(uv_distribution_types::Requirement {
-                name: to_uv_normalize(p.name.as_normalized())?,
-                extras: vec![].into(),
-                marker: Default::default(),
-                source,
-                groups: Default::default(),
-                origin: None,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .into_diagnostic()?;
-
-    #[derive(Debug, thiserror::Error)]
-    enum PixiPreferencesError {
-        #[error(transparent)]
-        Conversion(#[from] ConversionError),
-        #[error(transparent)]
-        Preference(#[from] PreferenceError),
-
-        #[error(transparent)]
-        OidParse(#[from] uv_git_types::OidParseError),
-
-        #[error(transparent)]
-        GitUrlParse(#[from] uv_git_types::GitUrlParseError),
-    }
-
-    // Create preferences from the locked pypi packages
-    // This will ensure minimal lock file updates
-    let preferences = locked_pypi_packages
-        .iter()
-        .map(|record| {
-            let Some(version) = record.version() else {
-                return Ok(None);
-            };
-            let requirement = uv_pep508::Requirement {
-                name: to_uv_normalize(record.name())?,
-                extras: Vec::new().into(),
-                version_or_url: Some(uv_pep508::VersionOrUrl::VersionSpecifier(
-                    uv_pep440::VersionSpecifiers::from(
-                        uv_pep440::VersionSpecifier::equals_version(to_uv_version(version)?),
-                    ),
-                )),
-                marker: uv_pep508::MarkerTree::TRUE,
-                origin: None,
-            };
-
-            // For git packages, we don't add them as preferences.
-            // because they are resolved based on the reference (branch/tag/rev) in the manifest.
-            // This matches how uv handles git dependencies - it doesn't try to pin them via preferences.
-            // The git resolver cache (pre-populated above) ensures the locked commit is preferred.
-            if let Some(location) = record.as_package_data().location().as_url()
-                && LockedGitUrl::is_locked_git_url(location)
-            {
-                // Skip git packages - they'll be resolved based on manifest reference
-                // with the cached commit from the git resolver
-                return Ok(None);
-            }
-
-            // Create preference for registry and URL packages
-            let named = uv_requirements_txt::RequirementsTxtRequirement::Named(requirement);
-            let entry = uv_requirements_txt::RequirementEntry {
-                requirement: named,
-                hashes: Default::default(),
-            };
-
-            Ok(Preference::from_entry(entry)?)
-        })
-        .filter_map(|pref| pref.transpose())
-        .collect::<Result<Vec<_>, PixiPreferencesError>>()
-        .into_diagnostic()?;
+    let preferences = build_preferences(locked_pypi_packages)?;
 
     let resolver_env = ResolverEnvironment::specific(marker_environment.clone().into());
 
