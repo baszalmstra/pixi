@@ -1070,7 +1070,15 @@ fn spawn_compute_future<K: Key>(
     current: Option<AnyKey>,
     generation: SpawnGeneration,
 ) -> BoxFuture<'static, Result<K::Value, ComputeError>> {
-    let handle = tokio::spawn(async move {
+    // The compute body runs inside a task spawned by `tokio::spawn`.
+    // An optional `SpawnHook` on the engine may wrap that body with
+    // caller-side task-local setup (e.g. scoping a reporter context)
+    // before spawn. The hook operates on a `BoxFuture<'static, ()>`;
+    // a oneshot channel carries the typed result out.
+    let (result_tx, result_rx) = oneshot::channel::<Result<K::Value, ComputeError>>();
+
+    let engine_for_inner = engine.clone();
+    let body: BoxFuture<'static, ()> = Box::pin(async move {
         let guard_stack = Arc::new(GuardStack::new());
 
         // Synthetic fallback: stored in its own slot, outside the
@@ -1085,13 +1093,13 @@ fn spawn_compute_future<K: Key>(
         guard_stack.set_fallback(Arc::new(GuardHandle::new(fallback_tx)));
 
         let mut child_ctx = ComputeCtx {
-            engine: engine.clone(),
+            engine: engine_for_inner.clone(),
             current,
             deps: Arc::new(Mutex::new(Vec::new())),
             guard_stack,
         };
 
-        let engine_for_body = engine.clone();
+        let engine_for_body = engine_for_inner.clone();
         let key_for_body = key.clone();
         let compute_body = async move {
             let value = key_for_body.compute(&mut child_ctx).await;
@@ -1111,7 +1119,7 @@ fn spawn_compute_future<K: Key>(
         // the race's random pick would occasionally let a cycled
         // task return `Ok` of a value derived from a dependency
         // that had already been reported as cyclic.
-        tokio::select! {
+        let result: Result<K::Value, ComputeError> = tokio::select! {
             biased;
             cycle = fallback_rx => Err(ComputeError::Cycle(
                 // The sender lives in the fallback frame on our
@@ -1120,7 +1128,19 @@ fn spawn_compute_future<K: Key>(
                 cycle.expect("synthetic cycle fallback sender dropped"),
             )),
             value = compute_body => Ok(value),
-        }
+        };
+
+        // The only way the receiver is gone is if the outer future
+        // wrapping this task was dropped, in which case the task is
+        // already being torn down and the send is irrelevant.
+        let _ = result_tx.send(result);
     });
-    boxed_compute_future(handle)
+
+    let wrapped = match engine.spawn_hook.as_ref() {
+        Some(hook) => hook.wrap(&engine.global_data, body),
+        None => body,
+    };
+
+    let handle = tokio::spawn(wrapped);
+    boxed_compute_future(handle, result_rx)
 }
