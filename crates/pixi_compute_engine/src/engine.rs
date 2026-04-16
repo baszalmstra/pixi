@@ -2,11 +2,37 @@
 
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
+
 use crate::{
     ComputeCtx, ComputeEngineBuilder, ComputeError, DataStore, InjectedKey, Key,
     cycle::active_edges::ActiveEdges,
     key_graph::{KeyGraph, Lookup},
 };
+
+/// A hook invoked at every compute-task spawn site, just before the
+/// engine calls [`tokio::spawn`].
+///
+/// [`SpawnHook::wrap`] is called **synchronously in the spawning
+/// task's context**, so it can snapshot caller-side task-locals (e.g.
+/// a tracing span or a reporter context). The future it returns is
+/// what gets spawned; a typical implementation wraps `fut` with
+/// [`tokio::task_local::LocalKey::scope`] to install the captured
+/// task-local into the spawned task for its entire lifetime.
+///
+/// The future is required to be `'static` because it is handed to
+/// [`tokio::spawn`]; the engine boxes it at the spawn site so
+/// implementations do not need to impose a tighter bound.
+pub trait SpawnHook: Send + Sync + 'static {
+    /// Wrap the compute body future before it is spawned. The
+    /// returned future's output type must remain `()`; the engine
+    /// carries the typed compute result out of band.
+    fn wrap(
+        &self,
+        data: &DataStore,
+        fut: BoxFuture<'static, ()>,
+    ) -> BoxFuture<'static, ()>;
+}
 
 /// The top-level compute engine.
 ///
@@ -83,6 +109,9 @@ pub(crate) struct EngineInner {
     pub(crate) sequential_branches: bool,
     /// Engine-wide shared data, set at construction time.
     pub(crate) global_data: DataStore,
+    /// Optional hook invoked on every compute-task spawn. See
+    /// [`SpawnHook`] for the calling protocol.
+    pub(crate) spawn_hook: Option<Arc<dyn SpawnHook>>,
 }
 
 impl Default for ComputeEngine {

@@ -283,7 +283,7 @@ pub use ctx::ComputeCtx;
 pub use cycle::CycleError;
 pub use data::DataStore;
 pub use demand::Demand;
-pub use engine::ComputeEngine;
+pub use engine::{ComputeEngine, SpawnHook};
 pub use error::ComputeError;
 pub use injected::InjectedKey;
 pub use introspection::{DependencyGraph, GraphNode, NodeState};
