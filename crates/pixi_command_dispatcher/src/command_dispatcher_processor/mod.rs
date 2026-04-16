@@ -25,22 +25,21 @@ use crate::{
     command_dispatcher::{
         BackendSourceBuildId, BuildBackendMetadataId, CommandDispatcherChannel,
         CommandDispatcherContext, CommandDispatcherData, DevSourceMetadataId, ForegroundMessage,
-        GitCheckoutId, InstallPixiEnvironmentId, InstantiatedToolEnvId, SolveCondaEnvironmentId,
+        InstallPixiEnvironmentId, InstantiatedToolEnvId, SolveCondaEnvironmentId,
         SolvePixiEnvironmentId, SourceBuildCacheStatusId, SourceBuildId, SourceMetadataId,
-        SourceRecordId, UrlCheckoutId,
-        url::{UrlCheckout, UrlError},
+        SourceRecordId,
     },
     executor::ExecutorFutures,
     install_pixi::InstallPixiEnvironmentError,
     instantiate_tool_env::InstantiateToolEnvironmentSpec,
     instantiate_tool_env::{InstantiateToolEnvironmentError, InstantiateToolEnvironmentResult},
     reporter,
+    reporter_context::CURRENT_REPORTER_CONTEXT,
     solve_conda::SolveCondaEnvironmentError,
 };
 use futures::{StreamExt, future::LocalBoxFuture};
-use pixi_git::{GitError, resolver::RepositoryReference, source::Fetch};
+use pixi_compute_engine::ComputeEngine;
 use pixi_record::PixiRecord;
-use pixi_spec::UrlSpec;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -48,7 +47,6 @@ mod backend_source_build;
 mod build_backend_metadata;
 pub(crate) mod dedup;
 mod dev_source_metadata;
-mod git;
 mod install_pixi;
 mod instantiate_tool_env;
 mod solve_conda;
@@ -57,12 +55,16 @@ mod source_build;
 mod source_build_cache_status;
 mod source_metadata;
 mod source_record;
-mod url;
 
 /// Runs the command_dispatcher background task
 pub(crate) struct CommandDispatcherProcessor {
     /// The receiver for messages from a [`CommandDispatcher]`.
     receiver: mpsc::UnboundedReceiver<ForegroundMessage>,
+
+    /// The compute engine shared with the [`CommandDispatcher`]. Used by
+    /// `create_task_command_dispatcher` to propagate the engine to
+    /// sub-dispatchers.
+    engine: ComputeEngine,
 
     /// Keeps track of the parent context for each task that is being processed.
     parent_contexts: HashMap<CommandDispatcherContext, CommandDispatcherContext>,
@@ -144,16 +146,6 @@ pub(crate) struct CommandDispatcherProcessor {
     instantiated_tool_envs_reporters:
         HashMap<InstantiatedToolEnvId, Vec<reporter::InstantiateToolEnvId>>,
 
-    /// Git checkouts in the process of being checked out, or already
-    /// checked out.
-    git_checkouts: dedup::DedupTaskRegistry<RepositoryReference, GitCheckoutId, Fetch, GitError>,
-    git_checkout_reporters: HashMap<GitCheckoutId, Vec<reporter::GitCheckoutId>>,
-
-    /// Url checkouts in the process of being checked out, or already
-    /// checked out.
-    url_checkouts: dedup::DedupTaskRegistry<UrlSpec, UrlCheckoutId, UrlCheckout, UrlError>,
-    url_checkout_reporters: HashMap<UrlCheckoutId, Vec<reporter::UrlCheckoutId>>,
-
     /// Source builds that are currently being processed.
     source_build: dedup::DedupTaskRegistry<
         SourceBuildSpec,
@@ -202,7 +194,7 @@ pub(crate) struct CommandDispatcherProcessor {
     monitor_futures: ExecutorFutures<LocalBoxFuture<'static, CommandDispatcherContext>>,
 
     /// The reporter to use for reporting progress
-    reporter: Option<Box<dyn Reporter>>,
+    reporter: Option<Arc<dyn Reporter>>,
 }
 
 type BoxedDispatcherResult<T, E> = Box<Result<T, CommandDispatcherError<E>>>;
@@ -230,8 +222,6 @@ enum TaskResult {
         SourceRecordId,
         BoxedDispatcherResult<Arc<ResolvedSourceRecord>, SourceRecordError>,
     ),
-    GitCheckedOut(GitCheckoutId, BoxedDispatcherResult<Fetch, GitError>),
-    UrlCheckedOut(UrlCheckoutId, BoxedDispatcherResult<UrlCheckout, UrlError>),
     InstallPixiEnvironment(
         InstallPixiEnvironmentId,
         BoxedDispatcherResult<InstallPixiEnvironmentResult, InstallPixiEnvironmentError>,
@@ -368,7 +358,8 @@ impl CommandDispatcherProcessor {
     /// expected.
     pub fn spawn(
         inner: Arc<CommandDispatcherData>,
-        reporter: Option<Box<dyn Reporter>>,
+        engine: ComputeEngine,
+        reporter: Option<Arc<dyn Reporter>>,
     ) -> (
         mpsc::UnboundedSender<ForegroundMessage>,
         std::thread::JoinHandle<()>,
@@ -379,6 +370,7 @@ impl CommandDispatcherProcessor {
         let join_handle = std::thread::spawn(move || {
             let task = Self {
                 receiver: rx,
+                engine,
                 parent_contexts: HashMap::new(),
                 active_source_requests: HashMap::new(),
                 cancellation_tokens: HashMap::new(),
@@ -396,10 +388,6 @@ impl CommandDispatcherProcessor {
                 source_record_reporters: HashMap::default(),
                 instantiated_tool_envs: Default::default(),
                 instantiated_tool_envs_reporters: HashMap::default(),
-                git_checkouts: Default::default(),
-                git_checkout_reporters: HashMap::default(),
-                url_checkouts: Default::default(),
-                url_checkout_reporters: HashMap::default(),
                 source_build: Default::default(),
                 source_build_reporters: HashMap::default(),
                 source_build_cache_status: Default::default(),
@@ -465,8 +453,6 @@ impl CommandDispatcherProcessor {
                 self.on_instantiate_tool_environment(task)
             }
             ForegroundMessage::BuildBackendMetadata(task) => self.on_build_backend_metadata(task),
-            ForegroundMessage::GitCheckout(task) => self.on_checkout_git(task),
-            ForegroundMessage::UrlCheckout(task) => self.on_checkout_url(task),
             ForegroundMessage::SourceBuild(task) => self.on_source_build(task),
             ForegroundMessage::QuerySourceBuildCache(task) => {
                 self.on_source_build_cache_status(task)
@@ -500,20 +486,6 @@ impl CommandDispatcherProcessor {
             TaskResult::BuildBackendMetadata(id, result) => {
                 self.complete_dedup_task::<BuildBackendMetadataSpec>(
                     CommandDispatcherContext::BuildBackendMetadata(id),
-                    id,
-                    *result,
-                );
-            }
-            TaskResult::GitCheckedOut(id, result) => {
-                self.complete_dedup_task::<pixi_git::GitUrl>(
-                    CommandDispatcherContext::GitCheckout(id),
-                    id,
-                    *result,
-                );
-            }
-            TaskResult::UrlCheckedOut(id, result) => {
-                self.complete_dedup_task::<pixi_spec::UrlSpec>(
-                    CommandDispatcherContext::UrlCheckout(id),
                     id,
                     *result,
                 );
@@ -577,6 +549,7 @@ impl CommandDispatcherProcessor {
             channel: Some(CommandDispatcherChannel::Weak(self.sender.clone())),
             context: Some(context),
             data: self.inner.clone(),
+            engine: self.engine.clone(),
             processor_handle: None,
         }
     }
@@ -684,16 +657,31 @@ impl CommandDispatcherProcessor {
                 CommandDispatcherContext::DevSourceMetadata(_id) => {
                     return None;
                 }
-                CommandDispatcherContext::GitCheckout(_id) => {
-                    return None;
-                }
-                CommandDispatcherContext::UrlCheckout(_id) => {
-                    return None;
-                }
             };
         }
 
         None
+    }
+
+    /// Wraps `fut` in a [`CURRENT_REPORTER_CONTEXT`] scope set to this
+    /// task's own [`reporter::ReporterContext`], so child operations
+    /// (including compute-engine Keys spawned by the hook installed in
+    /// [`CommandDispatcherBuilder::finish`](crate::CommandDispatcherBuilder::finish))
+    /// see this task as their reporter parent.
+    ///
+    /// If the task has no reporter id of its own (e.g. no reporter is
+    /// attached), [`reporter_context`](Self::reporter_context) walks up
+    /// to the nearest ancestor that does, so the scope still carries
+    /// *some* attribution when possible.
+    pub(crate) fn scope_task<F>(
+        &self,
+        context: CommandDispatcherContext,
+        fut: F,
+    ) -> impl std::future::Future<Output = F::Output> + use<F>
+    where
+        F: std::future::Future,
+    {
+        CURRENT_REPORTER_CONTEXT.scope(self.reporter_context(context), fut)
     }
 
     /// Called to clear the reporter.
@@ -771,40 +759,6 @@ impl HasDedupTaskFields for SourceBuildSpec {
             reporter_map: &mut proc.source_build_reporters,
             monitor_futures: &mut proc.monitor_futures,
             dedup: &mut proc.source_build,
-        }
-    }
-}
-
-impl HasDedupTaskFields for pixi_git::GitUrl {
-    type Id = GitCheckoutId;
-    type Ok = Fetch;
-    type Err = GitError;
-    fn dedup_task_fields(
-        proc: &mut CommandDispatcherProcessor,
-    ) -> DedupTaskFields<'_, Self::Id, Self::ReporterId, Self::Ok, Self::Err> {
-        DedupTaskFields {
-            parent_contexts: &mut proc.parent_contexts,
-            reporter: &proc.reporter,
-            reporter_map: &mut proc.git_checkout_reporters,
-            monitor_futures: &mut proc.monitor_futures,
-            dedup: &mut proc.git_checkouts,
-        }
-    }
-}
-
-impl HasDedupTaskFields for pixi_spec::UrlSpec {
-    type Id = UrlCheckoutId;
-    type Ok = UrlCheckout;
-    type Err = UrlError;
-    fn dedup_task_fields(
-        proc: &mut CommandDispatcherProcessor,
-    ) -> DedupTaskFields<'_, Self::Id, Self::ReporterId, Self::Ok, Self::Err> {
-        DedupTaskFields {
-            parent_contexts: &mut proc.parent_contexts,
-            reporter: &proc.reporter,
-            reporter_map: &mut proc.url_checkout_reporters,
-            monitor_futures: &mut proc.monitor_futures,
-            dedup: &mut proc.url_checkouts,
         }
     }
 }
@@ -909,7 +863,7 @@ struct NewDedupTask<Id> {
 /// `complete_dedup_task`.
 pub(crate) struct DedupTaskFields<'a, Id, ReporterId, Ok, Err> {
     parent_contexts: &'a mut HashMap<CommandDispatcherContext, CommandDispatcherContext>,
-    reporter: &'a Option<Box<dyn Reporter>>,
+    reporter: &'a Option<Arc<dyn Reporter>>,
     reporter_map: &'a mut HashMap<Id, Vec<ReporterId>>,
     monitor_futures: &'a mut ExecutorFutures<LocalBoxFuture<'static, CommandDispatcherContext>>,
     dedup: &'a mut dyn ErasedDedupRegistry<Id, Ok, Err>,
@@ -1171,12 +1125,6 @@ impl CommandDispatcherProcessor {
             }
             CommandDispatcherContext::SourceBuild(id) => {
                 self.source_build.on_subscriber_cancelled(id);
-            }
-            CommandDispatcherContext::GitCheckout(id) => {
-                self.git_checkouts.on_subscriber_cancelled(id);
-            }
-            CommandDispatcherContext::UrlCheckout(id) => {
-                self.url_checkouts.on_subscriber_cancelled(id);
             }
             // Non-dedup tasks never push subscriber monitors.
             _ => unreachable!("subscriber cancellation for non-dedup context: {context:?}"),

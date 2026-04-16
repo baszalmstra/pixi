@@ -1,17 +1,13 @@
+use pixi_compute_engine::ComputeError;
 use pixi_git::{GitError, GitUrl, git::GitReference, source::Fetch};
 use pixi_path::AbsPathBuf;
 use pixi_record::{PinnedGitCheckout, PinnedGitSpec, PinnedSourceSpec};
 use pixi_spec::GitSpec;
 
-use super::{Task, TaskSpec};
-use crate::{CommandDispatcher, CommandDispatcherError, SourceCheckout, SourceCheckoutError};
-
-/// A task that is send to the background to checkout a git repository.
-pub(crate) type GitCheckoutTask = Task<GitUrl>;
-impl TaskSpec for GitUrl {
-    type Output = Fetch;
-    type Error = GitError;
-}
+use crate::{
+    CommandDispatcher, CommandDispatcherError, SourceCheckout, SourceCheckoutError,
+    checkout::CheckoutGit,
+};
 
 impl CommandDispatcher {
     /// Check out the git repository associated with the given spec.
@@ -33,7 +29,7 @@ impl CommandDispatcher {
             .map_err(CommandDispatcherError::Failed)?
             .with_reference(git_reference.clone());
 
-        // Fetch the git url in the background
+        // Fetch the git url via the compute engine
         let fetch = self
             .checkout_git_url(git_url)
             .await
@@ -52,14 +48,25 @@ impl CommandDispatcher {
         Self::fetch_to_checkout(fetch, pinned)
     }
 
-    /// Check out a particular git repository.
-    ///
-    /// The git checkout is performed in the background.
+    /// Check out a particular git repository via the compute engine.
     pub async fn checkout_git_url(
         &self,
         git_url: GitUrl,
     ) -> Result<Fetch, CommandDispatcherError<GitError>> {
-        self.execute_task(git_url).await
+        let result = self
+            .engine
+            .compute(&CheckoutGit::new(&git_url))
+            .await
+            .map_err(|e| match e {
+                ComputeError::Cycle(_) | ComputeError::Canceled => {
+                    CommandDispatcherError::Cancelled
+                }
+            })?;
+
+        match result.as_ref() {
+            Ok(fetch) => Ok(fetch.clone()),
+            Err(e) => Err(CommandDispatcherError::Failed(e.clone())),
+        }
     }
 
     /// Checkout a pinned git repository.
@@ -72,7 +79,7 @@ impl CommandDispatcher {
             git_spec.source.reference.clone().into(),
             git_spec.source.commit,
         );
-        // Fetch the git url in the background
+        // Fetch the git url via the compute engine
         let fetch = self
             .checkout_git_url(git_url)
             .await

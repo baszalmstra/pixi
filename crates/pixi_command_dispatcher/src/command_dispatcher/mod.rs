@@ -13,10 +13,10 @@ use std::{
 
 pub use builder::CommandDispatcherBuilder;
 pub use error::{CommandDispatcherError, CommandDispatcherErrorResultExt};
-pub(crate) use git::GitCheckoutTask;
 pub use instantiate_backend::{InstantiateBackendError, InstantiateBackendSpec};
 use pixi_build_discovery::{DiscoveredBackend, EnabledProtocols};
 use pixi_build_frontend::BackendOverride;
+use pixi_compute_engine::ComputeEngine;
 use pixi_git::resolver::GitResolver;
 use pixi_glob::GlobHashCache;
 use pixi_path::{AbsPathBuf, AbsPresumedDirPathBuf};
@@ -27,10 +27,9 @@ use rattler::package_cache::PackageCache;
 use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, Platform};
 use rattler_networking::LazyClient;
 use rattler_repodata_gateway::Gateway;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use typed_path::Utf8TypedPath;
-use url::UrlCheckoutTask;
 
 use crate::{
     BuildBackendMetadata, BuildBackendMetadataError, BuildBackendMetadataSpec, DevSourceMetadata,
@@ -52,6 +51,7 @@ use crate::{
         InstantiateToolEnvironmentSpec,
     },
     limits::ResolvedLimits,
+    reporter::Reporter,
     solve_conda::SolveCondaEnvironmentError,
     source_build::{SourceBuildError, SourceBuildResult, SourceBuildSpec},
 };
@@ -80,6 +80,11 @@ pub struct CommandDispatcher {
 
     /// Holds the shared data required by the command dispatcher.
     pub(crate) data: Arc<CommandDispatcherData>,
+
+    /// The generic compute engine. Coexists with the legacy processor during
+    /// migration; new Key-based operations run through this engine while
+    /// legacy operations continue to use the channel-based processor.
+    pub(crate) engine: ComputeEngine,
 
     /// Holds a strong reference to the process thread handle, this allows us to
     /// wait for the background thread to finish once the last (user facing)
@@ -158,6 +163,19 @@ pub(crate) struct CommandDispatcherData {
 
     /// The execution type of the dispatcher.
     pub executor: Executor,
+
+    /// Reporter used by compute-engine-backed keys to emit lifecycle
+    /// events. Stored as [`Arc`] so it can be cheaply cloned into
+    /// spawned tasks; shared with the legacy channel-based processor.
+    pub reporter: Option<Arc<dyn Reporter>>,
+
+    /// Semaphore that bounds concurrent git checkouts driven through
+    /// the compute engine.
+    pub git_checkout_semaphore: Arc<Semaphore>,
+
+    /// Semaphore that bounds concurrent URL archive fetches driven
+    /// through the compute engine.
+    pub url_checkout_semaphore: Arc<Semaphore>,
 }
 
 /// A channel through which to send any messages to the command_dispatcher. Some
@@ -198,8 +216,6 @@ pub(crate) enum CommandDispatcherContext {
     DevSourceMetadata(DevSourceMetadataId),
     InstallPixiEnvironment(InstallPixiEnvironmentId),
     InstantiateToolEnv(InstantiatedToolEnvId),
-    GitCheckout(GitCheckoutId),
-    UrlCheckout(UrlCheckoutId),
 }
 
 slotmap::new_key_type! {
@@ -245,14 +261,6 @@ pub(crate) struct DevSourceMetadataId(pub usize);
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct InstantiatedToolEnvId(pub usize);
 
-/// An id that uniquely identifies a git checkout request.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub(crate) struct GitCheckoutId(pub usize);
-
-/// An id that uniquely identifies a URL checkout request.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub(crate) struct UrlCheckoutId(pub usize);
-
 /// A message send to the dispatch task.
 #[allow(clippy::large_enum_variant)]
 #[derive(derive_more::From)]
@@ -266,8 +274,6 @@ pub(crate) enum ForegroundMessage {
     SourceBuild(SourceBuildTask),
     QuerySourceBuildCache(SourceBuildCacheStatusTask),
     DevSourceMetadata(DevSourceMetadataTask),
-    GitCheckout(GitCheckoutTask),
-    UrlCheckout(UrlCheckoutTask),
     InstallPixiEnvironment(InstallPixiEnvironmentTask),
     InstantiateToolEnvironment(Task<InstantiateToolEnvironmentSpec>),
     ClearReporter(oneshot::Sender<()>),
@@ -374,6 +380,15 @@ impl CommandDispatcher {
     /// Returns the executor used by the command dispatcher.
     pub fn executor(&self) -> Executor {
         self.data.executor
+    }
+
+    /// Returns a reference to the compute engine.
+    ///
+    /// The engine handles Key-based computations with automatic
+    /// deduplication, caching, and cycle detection. During migration,
+    /// it coexists with the legacy channel-based processor.
+    pub fn engine(&self) -> &ComputeEngine {
+        &self.engine
     }
 
     /// Returns the cache for source metadata.

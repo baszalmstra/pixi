@@ -17,11 +17,12 @@ use pixi_command_dispatcher::{
         BuildBackendMetadataReporter, CondaSolveId, DedupGroupId, GitCheckoutId,
         InstantiateToolEnvId, InstantiateToolEnvironmentReporter, PixiInstallId, PixiSolveId,
         SourceBuildId, SourceBuildReporter, SourceMetadataId, SourceMetadataReporter,
-        SourceRecordId, SourceRecordReporter,
+        SourceRecordId, SourceRecordReporter, UrlCheckoutId, UrlCheckoutReporter,
     },
 };
 use pixi_git::resolver::RepositoryReference;
 use serde::Serialize;
+use url::Url;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize)]
@@ -81,6 +82,19 @@ pub enum Event {
     },
     GitCheckoutFinished {
         id: GitCheckoutId,
+    },
+
+    UrlCheckoutQueued {
+        id: UrlCheckoutId,
+        url: Url,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<ReporterContext>,
+    },
+    UrlCheckoutStarted {
+        id: UrlCheckoutId,
+    },
+    UrlCheckoutFinished {
+        id: UrlCheckoutId,
     },
 
     BuildBackendMetadataQueued {
@@ -173,6 +187,7 @@ pub struct EventReporter {
     next_pixi_solve_id: AtomicUsize,
     next_pixi_install_id: AtomicUsize,
     next_git_checkout_id: AtomicUsize,
+    next_url_checkout_id: AtomicUsize,
     next_source_metadata_id: AtomicUsize,
     next_instantiate_tool_env_id: AtomicUsize,
 }
@@ -188,6 +203,9 @@ impl Clone for EventReporter {
             ),
             next_git_checkout_id: AtomicUsize::new(
                 self.next_git_checkout_id.load(Ordering::Relaxed),
+            ),
+            next_url_checkout_id: AtomicUsize::new(
+                self.next_url_checkout_id.load(Ordering::Relaxed),
             ),
             next_source_metadata_id: AtomicUsize::new(
                 self.next_source_metadata_id.load(Ordering::Relaxed),
@@ -267,6 +285,7 @@ impl EventReporter {
                 next_pixi_solve_id: AtomicUsize::new(0),
                 next_pixi_install_id: AtomicUsize::new(0),
                 next_git_checkout_id: AtomicUsize::new(0),
+                next_url_checkout_id: AtomicUsize::new(0),
                 next_source_metadata_id: AtomicUsize::new(0),
                 next_instantiate_tool_env_id: AtomicUsize::new(0),
             },
@@ -368,12 +387,41 @@ impl PixiInstallReporter for EventReporter {
     }
 }
 
+impl UrlCheckoutReporter for EventReporter {
+    fn on_queued(
+        &self,
+        context: Option<ReporterContext>,
+        env: &Url,
+    ) -> UrlCheckoutId {
+        let next_id = UrlCheckoutId(self.next_url_checkout_id.fetch_add(1, Ordering::Relaxed));
+        let event = Event::UrlCheckoutQueued {
+            id: next_id,
+            url: env.clone(),
+            context,
+        };
+        eprintln!("{}", serde_json::to_string_pretty(&event).unwrap());
+        self.events.push(event);
+        next_id
+    }
+
+    fn on_started(&self, checkout_id: UrlCheckoutId) {
+        let event = Event::UrlCheckoutStarted { id: checkout_id };
+        eprintln!("{}", serde_json::to_string_pretty(&event).unwrap());
+        self.events.push(event);
+    }
+
+    fn on_finished(&self, checkout_id: UrlCheckoutId) {
+        let event = Event::UrlCheckoutFinished { id: checkout_id };
+        eprintln!("{}", serde_json::to_string_pretty(&event).unwrap());
+        self.events.push(event);
+    }
+}
+
 impl GitCheckoutReporter for EventReporter {
     fn on_queued(
         &self,
         context: Option<ReporterContext>,
         env: &RepositoryReference,
-        _dedup_id: DedupGroupId,
     ) -> GitCheckoutId {
         let next_id = GitCheckoutId(self.next_git_checkout_id.fetch_add(1, Ordering::Relaxed));
 
@@ -631,6 +679,10 @@ impl BackendSourceBuildReporter for EventReporter {
 
 impl Reporter for EventReporter {
     fn as_git_reporter(&self) -> Option<&dyn GitCheckoutReporter> {
+        Some(self)
+    }
+
+    fn as_url_reporter(&self) -> Option<&dyn UrlCheckoutReporter> {
         Some(self)
     }
 

@@ -1,10 +1,13 @@
+use pixi_compute_engine::ComputeError;
 use pixi_path::AbsPresumedDirPathBuf;
 use pixi_record::{PinnedSourceSpec, PinnedUrlSpec};
 use pixi_spec::UrlSpec;
 pub use pixi_url::UrlError;
 
-use super::{Task, TaskSpec};
-use crate::{CommandDispatcher, CommandDispatcherError, SourceCheckout, SourceCheckoutError};
+use crate::{
+    CommandDispatcher, CommandDispatcherError, SourceCheckout, SourceCheckoutError,
+    checkout::CheckoutUrl,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlCheckout {
@@ -20,20 +23,13 @@ impl UrlCheckout {
     }
 }
 
-/// A task that is send to the background to checkout a url.
-pub(crate) type UrlCheckoutTask = Task<UrlSpec>;
-impl TaskSpec for UrlSpec {
-    type Output = UrlCheckout;
-    type Error = UrlError;
-}
-
 impl CommandDispatcher {
     /// Check out the url associated with the given spec.
     pub async fn pin_and_checkout_url(
         &self,
         url_spec: UrlSpec,
     ) -> Result<SourceCheckout, CommandDispatcherError<SourceCheckoutError>> {
-        // Fetch the url in the background
+        // Fetch the url via the compute engine
         let UrlCheckout { pinned_url, dir } = self
             .checkout_url(url_spec)
             .await
@@ -45,14 +41,25 @@ impl CommandDispatcher {
         })
     }
 
-    /// Check out a particular url.
-    ///
-    /// The url checkout is performed in the background.
+    /// Check out a particular url via the compute engine.
     pub async fn checkout_url(
         &self,
         url: UrlSpec,
     ) -> Result<UrlCheckout, CommandDispatcherError<UrlError>> {
-        self.execute_task(url).await
+        let result = self
+            .engine
+            .compute(&CheckoutUrl(url))
+            .await
+            .map_err(|e| match e {
+                ComputeError::Cycle(_) | ComputeError::Canceled => {
+                    CommandDispatcherError::Cancelled
+                }
+            })?;
+
+        match result.as_ref() {
+            Ok(checkout) => Ok(checkout.clone()),
+            Err(e) => Err(CommandDispatcherError::Failed(e.clone())),
+        }
     }
 
     /// Checkout a pinned url.
@@ -66,7 +73,7 @@ impl CommandDispatcher {
             sha256: Some(pinned_url_spec.sha256),
             subdirectory: pinned_url_spec.subdirectory.clone(),
         };
-        // Fetch the url in the background
+        // Fetch the url via the compute engine
         let fetch = self
             .checkout_url(url_spec)
             .await

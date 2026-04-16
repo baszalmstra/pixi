@@ -190,9 +190,16 @@ pub async fn simple_test() {
 
     let event_tree = EventTree::from(events);
 
-    // Redact temp paths and git hashes for stable snapshots
+    // Redact temp paths and git hashes for stable snapshots.
+    //
+    // The first regex uses `[^@\n]+` rather than `[^@]+` to prevent the
+    // greedy match from spanning multiple tree lines: the event tree
+    // emits several URLs that all end in `/multi-output-recipe/`, and a
+    // newline-crossing greedy `[^@]+` would collapse the span from one
+    // URL's `file:///` through the next line's `@<commit>`, eating the
+    // `?subdirectory=&rev=` query of the outer URL.
     let output = event_tree.to_string();
-    let output = regex::Regex::new(r"file:///[^@]+/multi-output-recipe/")
+    let output = regex::Regex::new(r"file:///[^@\n]+/multi-output-recipe/")
         .unwrap()
         .replace_all(&output, "file://[LOCAL_GIT_REPO]");
     let output = regex::Regex::new(r"rev=[a-z0-9]+")
@@ -1877,4 +1884,232 @@ pub async fn test_metadata_refetched_when_source_file_modified() {
         metadata_requests, 1,
         "Metadata should be re-fetched after source file modification"
     );
+}
+
+/// Verifies that the compute engine is wired into the CommandDispatcher and
+/// that extension traits on DataStore provide access to shared resources.
+#[tokio::test]
+pub async fn compute_engine_wired_into_dispatcher() {
+    use pixi_command_dispatcher::compute_data::{
+        HasCacheDirs, HasDownloadClient, HasGateway, HasGitResolver, HasUrlResolver,
+    };
+    use pixi_compute_engine::{ComputeCtx, Key};
+    use std::fmt;
+
+    // A trivial Key that reads Gateway from global_data to prove the wiring works.
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    struct ProbeKey;
+
+    impl fmt::Display for ProbeKey {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "ProbeKey")
+        }
+    }
+
+    impl Key for ProbeKey {
+        type Value = bool;
+        async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
+            let data = ctx.global_data();
+            // Each trait accessor must succeed without panicking.
+            let _ = data.gateway();
+            let _ = data.git_resolver();
+            let _ = data.url_resolver();
+            let _ = data.download_client();
+            let _ = data.cache_dirs();
+            true
+        }
+    }
+
+    let dispatcher = CommandDispatcher::builder()
+        .with_cache_dirs(default_cache_dirs())
+        .finish();
+
+    // Run a Key through the engine; if global data is missing this panics.
+    let result = dispatcher.engine().compute(&ProbeKey).await.unwrap();
+    assert!(result, "ProbeKey should return true after reading all data");
+}
+
+/// Verifies that a compute-engine-backed URL checkout emits the full
+/// reporter lifecycle in order. The reporter is discovered through
+/// `DataStore`; the `CheckoutUrl` Key fires `on_queued`, then acquires
+/// the semaphore, then fires `on_started`, then fetches, then
+/// `on_finished` via a drop-guard.
+#[tokio::test]
+pub async fn reporter_url_checkout_lifecycle() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let cache_dirs = CacheDirs::new(to_abs_dir(tempdir.path().join("pixi-cache")));
+    let archive = tempfile::tempdir().unwrap();
+    let url = file_url_for_test(&archive, "archive.zip");
+
+    let (reporter, events) = EventReporter::new();
+    let dispatcher = CommandDispatcher::builder()
+        .with_cache_dirs(cache_dirs)
+        .with_executor(Executor::Serial)
+        .with_reporter(reporter)
+        .finish();
+
+    let spec = UrlSpec {
+        url: url.clone(),
+        md5: None,
+        sha256: None,
+        subdirectory: Subdirectory::default(),
+    };
+
+    dispatcher
+        .checkout_url(spec)
+        .await
+        .expect("url checkout should succeed");
+
+    let events = events.take();
+    let url_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                event_reporter::Event::UrlCheckoutQueued { .. }
+                    | event_reporter::Event::UrlCheckoutStarted { .. }
+                    | event_reporter::Event::UrlCheckoutFinished { .. }
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        url_events.len(),
+        3,
+        "expected 3 url lifecycle events, got: {url_events:#?}"
+    );
+    assert!(matches!(
+        url_events[0],
+        event_reporter::Event::UrlCheckoutQueued { context: None, .. }
+    ));
+    assert!(matches!(
+        url_events[1],
+        event_reporter::Event::UrlCheckoutStarted { .. }
+    ));
+    assert!(matches!(
+        url_events[2],
+        event_reporter::Event::UrlCheckoutFinished { .. }
+    ));
+}
+
+/// Two concurrent `checkout_url` calls for the same URL dedup to a
+/// single compute, so the reporter lifecycle fires exactly once.
+#[tokio::test]
+pub async fn reporter_url_checkout_dedup() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let cache_dirs = CacheDirs::new(to_abs_dir(tempdir.path().join("pixi-cache")));
+    let archive = tempfile::tempdir().unwrap();
+    let url = file_url_for_test(&archive, "archive.zip");
+
+    let (reporter, events) = EventReporter::new();
+    let dispatcher = CommandDispatcher::builder()
+        .with_cache_dirs(cache_dirs)
+        .with_executor(Executor::Concurrent)
+        .with_reporter(reporter)
+        .finish();
+
+    let spec = UrlSpec {
+        url: url.clone(),
+        md5: None,
+        sha256: None,
+        subdirectory: Subdirectory::default(),
+    };
+
+    let (a, b) = tokio::join!(
+        dispatcher.checkout_url(spec.clone()),
+        dispatcher.checkout_url(spec.clone()),
+    );
+    a.expect("first checkout should succeed");
+    b.expect("second checkout should succeed");
+
+    let events = events.take();
+    let queued = events
+        .iter()
+        .filter(|e| matches!(e, event_reporter::Event::UrlCheckoutQueued { .. }))
+        .count();
+    let started = events
+        .iter()
+        .filter(|e| matches!(e, event_reporter::Event::UrlCheckoutStarted { .. }))
+        .count();
+    let finished = events
+        .iter()
+        .filter(|e| matches!(e, event_reporter::Event::UrlCheckoutFinished { .. }))
+        .count();
+    assert_eq!(
+        (queued, started, finished),
+        (1, 1, 1),
+        "deduped URL checkout should fire the lifecycle exactly once, \
+         got queued={queued} started={started} finished={finished}"
+    );
+}
+
+/// With `max_concurrent_url_checkouts = 1`, `on_started` for each
+/// distinct URL is serialized behind the previous URL's `on_finished`.
+/// The semaphore lives in `DataStore` and is acquired between
+/// `on_queued` and `on_started` inside the `CheckoutUrl` Key.
+#[tokio::test]
+pub async fn semaphore_serializes_concurrent_url_checkouts() {
+    use pixi_command_dispatcher::{Limit, Limits};
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let cache_dirs = CacheDirs::new(to_abs_dir(tempdir.path().join("pixi-cache")));
+    let archive = tempfile::tempdir().unwrap();
+    let url_a = file_url_for_test(&archive, "a.zip");
+    let url_b = file_url_for_test(&archive, "b.zip");
+    let url_c = file_url_for_test(&archive, "c.zip");
+
+    let (reporter, events) = EventReporter::new();
+    let dispatcher = CommandDispatcher::builder()
+        .with_cache_dirs(cache_dirs)
+        .with_executor(Executor::Concurrent)
+        .with_reporter(reporter)
+        .with_limits(Limits {
+            max_concurrent_url_checkouts: Limit::from(1usize),
+            ..Limits::default()
+        })
+        .finish();
+
+    let mk = |url: Url| UrlSpec {
+        url,
+        md5: None,
+        sha256: None,
+        subdirectory: Subdirectory::default(),
+    };
+
+    let (a, b, c) = tokio::join!(
+        dispatcher.checkout_url(mk(url_a)),
+        dispatcher.checkout_url(mk(url_b)),
+        dispatcher.checkout_url(mk(url_c)),
+    );
+    a.expect("a should succeed");
+    b.expect("b should succeed");
+    c.expect("c should succeed");
+
+    // Serialization invariant: across the entire recorded event stream,
+    // between any `UrlCheckoutStarted(id)` and its matching
+    // `UrlCheckoutFinished(id)`, no other `UrlCheckoutStarted` appears.
+    let events = events.take();
+    let mut in_flight: Option<pixi_command_dispatcher::reporter::UrlCheckoutId> = None;
+    for ev in &events {
+        match ev {
+            event_reporter::Event::UrlCheckoutStarted { id } => {
+                assert!(
+                    in_flight.is_none(),
+                    "on_started for {id:?} fired while {in_flight:?} was still in flight \
+                     — semaphore did not serialize"
+                );
+                in_flight = Some(*id);
+            }
+            event_reporter::Event::UrlCheckoutFinished { id } => {
+                assert_eq!(
+                    in_flight,
+                    Some(*id),
+                    "on_finished for {id:?} without a matching on_started"
+                );
+                in_flight = None;
+            }
+            _ => {}
+        }
+    }
+    assert!(in_flight.is_none(), "a checkout was still in flight at end");
 }

@@ -101,14 +101,13 @@ pub trait CondaSolveReporter {
 #[serde(transparent)]
 pub struct GitCheckoutId(pub usize);
 
-pub trait GitCheckoutReporter {
+pub trait GitCheckoutReporter: Send + Sync {
     /// Called when a git checkout was queued on the
     /// [`crate::CommandDispatcher`].
     fn on_queued(
         &self,
         reason: Option<ReporterContext>,
         env: &RepositoryReference,
-        dedup_id: DedupGroupId,
     ) -> GitCheckoutId;
 
     /// Called when the git checkout has started.
@@ -122,14 +121,13 @@ pub trait GitCheckoutReporter {
 #[serde(transparent)]
 pub struct UrlCheckoutId(pub usize);
 
-pub trait UrlCheckoutReporter {
+pub trait UrlCheckoutReporter: Send + Sync {
     /// Called when a url checkout was queued on the
     /// [`crate::CommandDispatcher`].
     fn on_queued(
         &self,
         reason: Option<ReporterContext>,
         env: &Url,
-        dedup_id: DedupGroupId,
     ) -> UrlCheckoutId;
 
     /// Called when the url checkout has started.
@@ -397,16 +395,16 @@ pub(crate) trait Reportable {
     /// `dedup_group_id` is `Some` for deduplicated tasks, `None` otherwise.
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId>;
 
     /// Notify the reporter that this task has started.
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId);
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId);
 
     /// Notify the reporter that this task has finished.
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, failed: bool);
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, failed: bool);
 }
 
 // --- Reportable implementations ---
@@ -418,7 +416,7 @@ macro_rules! impl_reportable {
             type ReporterId = $id;
             fn report_queued(
                 &self,
-                reporter: &Option<Box<dyn Reporter>>,
+                reporter: &Option<Arc<dyn Reporter>>,
                 parent: Option<ReporterContext>,
                 dedup_group_id: Option<DedupGroupId>,
             ) -> Option<Self::ReporterId> {
@@ -426,10 +424,10 @@ macro_rules! impl_reportable {
                     .and_then(|r| r.$accessor())
                     .map(|r| r.on_queued(parent, impl_reportable!(@queued_spec self $(, $arg)?), dedup_group_id.expect("dedup tasks must provide a DedupGroupId")))
             }
-            fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+            fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
                 if let Some(r) = reporter.as_deref().and_then(|r| r.$accessor()) { r.on_started(id); }
             }
-            fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
+            fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
                 if let Some(r) = reporter.as_deref().and_then(|r| r.$accessor()) { r.on_finished(id); }
             }
         }
@@ -454,28 +452,22 @@ impl Reportable for pixi_git::GitUrl {
     type ReporterId = GitCheckoutId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
-        dedup_group_id: Option<DedupGroupId>,
+        _dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
         let repo_ref = pixi_git::resolver::RepositoryReference::from(self);
         reporter
             .as_deref()
             .and_then(|r| r.as_git_reporter())
-            .map(|r| {
-                r.on_queued(
-                    parent,
-                    &repo_ref,
-                    dedup_group_id.expect("dedup tasks must provide a DedupGroupId"),
-                )
-            })
+            .map(|r| r.on_queued(parent, &repo_ref))
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter.as_deref().and_then(|r| r.as_git_reporter()) {
             r.on_started(id);
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
         if let Some(r) = reporter.as_deref().and_then(|r| r.as_git_reporter()) {
             r.on_finished(id);
         }
@@ -486,27 +478,21 @@ impl Reportable for pixi_spec::UrlSpec {
     type ReporterId = UrlCheckoutId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
-        dedup_group_id: Option<DedupGroupId>,
+        _dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
         reporter
             .as_deref()
             .and_then(|r| r.as_url_reporter())
-            .map(|r| {
-                r.on_queued(
-                    parent,
-                    &self.url,
-                    dedup_group_id.expect("dedup tasks must provide a DedupGroupId"),
-                )
-            })
+            .map(|r| r.on_queued(parent, &self.url))
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter.as_deref().and_then(|r| r.as_url_reporter()) {
             r.on_started(id);
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
         if let Some(r) = reporter.as_deref().and_then(|r| r.as_url_reporter()) {
             r.on_finished(id);
         }
@@ -517,7 +503,7 @@ impl Reportable for BuildBackendMetadataSpec {
     type ReporterId = BuildBackendMetadataId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
@@ -532,7 +518,7 @@ impl Reportable for BuildBackendMetadataSpec {
                 )
             })
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_build_backend_metadata_reporter())
@@ -540,7 +526,7 @@ impl Reportable for BuildBackendMetadataSpec {
             r.on_started(id, Box::new(futures::stream::empty()));
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_build_backend_metadata_reporter())
@@ -554,7 +540,7 @@ impl Reportable for SourceBuildSpec {
     type ReporterId = SourceBuildId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
@@ -569,7 +555,7 @@ impl Reportable for SourceBuildSpec {
                 )
             })
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_source_build_reporter())
@@ -577,7 +563,7 @@ impl Reportable for SourceBuildSpec {
             r.on_started(id, Box::new(futures::stream::empty()));
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_source_build_reporter())
@@ -591,7 +577,7 @@ impl Reportable for crate::PixiEnvironmentSpec {
     type ReporterId = PixiSolveId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         _dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
@@ -600,12 +586,12 @@ impl Reportable for crate::PixiEnvironmentSpec {
             .and_then(|r| r.as_pixi_solve_reporter())
             .map(|r| r.on_queued(parent, self))
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter.as_deref().and_then(|r| r.as_pixi_solve_reporter()) {
             r.on_started(id);
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
         if let Some(r) = reporter.as_deref().and_then(|r| r.as_pixi_solve_reporter()) {
             r.on_finished(id);
         }
@@ -616,7 +602,7 @@ impl Reportable for SolveCondaEnvironmentSpec {
     type ReporterId = CondaSolveId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         _dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
@@ -625,7 +611,7 @@ impl Reportable for SolveCondaEnvironmentSpec {
             .and_then(|r| r.as_conda_solve_reporter())
             .map(|r| r.on_queued(parent, self))
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_conda_solve_reporter())
@@ -633,7 +619,7 @@ impl Reportable for SolveCondaEnvironmentSpec {
             r.on_started(id);
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_conda_solve_reporter())
@@ -647,7 +633,7 @@ impl Reportable for InstallPixiEnvironmentSpec {
     type ReporterId = PixiInstallId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         _dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
@@ -656,7 +642,7 @@ impl Reportable for InstallPixiEnvironmentSpec {
             .and_then(|r| r.as_pixi_install_reporter())
             .map(|r| r.on_queued(parent, self))
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_pixi_install_reporter())
@@ -664,7 +650,7 @@ impl Reportable for InstallPixiEnvironmentSpec {
             r.on_started(id);
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, _failed: bool) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_pixi_install_reporter())
@@ -678,7 +664,7 @@ impl Reportable for BackendSourceBuildSpec {
     type ReporterId = BackendSourceBuildId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         _dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
@@ -687,7 +673,7 @@ impl Reportable for BackendSourceBuildSpec {
             .and_then(|r| r.as_backend_source_build_reporter())
             .map(|r| r.on_queued(parent, self))
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_backend_source_build_reporter())
@@ -695,7 +681,7 @@ impl Reportable for BackendSourceBuildSpec {
             r.on_started(id, Box::new(futures::stream::empty()));
         }
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
         if let Some(r) = reporter
             .as_deref()
             .and_then(|r| r.as_backend_source_build_reporter())
@@ -710,16 +696,16 @@ impl Reportable for Box<BackendSourceBuildSpec> {
     type ReporterId = BackendSourceBuildId;
     fn report_queued(
         &self,
-        reporter: &Option<Box<dyn Reporter>>,
+        reporter: &Option<Arc<dyn Reporter>>,
         parent: Option<ReporterContext>,
         dedup_group_id: Option<DedupGroupId>,
     ) -> Option<Self::ReporterId> {
         (**self).report_queued(reporter, parent, dedup_group_id)
     }
-    fn report_started(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId) {
+    fn report_started(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId) {
         BackendSourceBuildSpec::report_started(reporter, id);
     }
-    fn report_finished(reporter: &Option<Box<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
+    fn report_finished(reporter: &Option<Arc<dyn Reporter>>, id: Self::ReporterId, failed: bool) {
         BackendSourceBuildSpec::report_finished(reporter, id, failed);
     }
 }
@@ -729,14 +715,14 @@ impl Reportable for DevSourceMetadataSpec {
     type ReporterId = ();
     fn report_queued(
         &self,
-        _: &Option<Box<dyn Reporter>>,
+        _: &Option<Arc<dyn Reporter>>,
         _: Option<ReporterContext>,
         _: Option<DedupGroupId>,
     ) -> Option<()> {
         None
     }
-    fn report_started(_: &Option<Box<dyn Reporter>>, _: ()) {}
-    fn report_finished(_: &Option<Box<dyn Reporter>>, _: (), _: bool) {}
+    fn report_started(_: &Option<Arc<dyn Reporter>>, _: ()) {}
+    fn report_finished(_: &Option<Arc<dyn Reporter>>, _: (), _: bool) {}
 }
 
 /// No-op reportable for tasks that have no reporter.
@@ -744,14 +730,14 @@ impl Reportable for crate::source_build_cache_status::SourceBuildCacheStatusSpec
     type ReporterId = ();
     fn report_queued(
         &self,
-        _: &Option<Box<dyn Reporter>>,
+        _: &Option<Arc<dyn Reporter>>,
         _: Option<ReporterContext>,
         _: Option<DedupGroupId>,
     ) -> Option<()> {
         None
     }
-    fn report_started(_: &Option<Box<dyn Reporter>>, _: ()) {}
-    fn report_finished(_: &Option<Box<dyn Reporter>>, _: (), _: bool) {}
+    fn report_started(_: &Option<Arc<dyn Reporter>>, _: ()) {}
+    fn report_finished(_: &Option<Arc<dyn Reporter>>, _: (), _: bool) {}
 }
 
 #[derive(Debug, Clone, Copy, Serialize, derive_more::From)]
