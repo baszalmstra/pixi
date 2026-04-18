@@ -190,6 +190,26 @@ impl ComputeCtx {
         }
     }
 
+    /// Build a root ctx paired with a synthetic cycle fallback so a
+    /// user-facing scope (see
+    /// [`ComputeEngine::with_ctx`](crate::ComputeEngine::with_ctx))
+    /// can surface transitive cycles instead of parking forever when
+    /// an awaited dep fails with a cycle.
+    pub(crate) fn new_root_with_fallback(
+        engine: Arc<EngineInner>,
+    ) -> (Self, oneshot::Receiver<CycleError>) {
+        let (tx, rx) = oneshot::channel();
+        let guard_stack = Arc::new(GuardStack::new());
+        guard_stack.set_fallback(Arc::new(GuardHandle::new(tx)));
+        let ctx = Self {
+            engine,
+            current: None,
+            deps: Arc::new(Mutex::new(Vec::new())),
+            guard_stack,
+        };
+        (ctx, rx)
+    }
+
     /// Access the engine-wide shared data store.
     ///
     /// Values are set at engine construction time via

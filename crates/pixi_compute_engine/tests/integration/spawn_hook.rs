@@ -30,11 +30,7 @@ impl Key for ReadTag {
 struct CaptureTagHook;
 
 impl SpawnHook for CaptureTagHook {
-    fn wrap(
-        &self,
-        _data: &DataStore,
-        fut: BoxFuture<'static, ()>,
-    ) -> BoxFuture<'static, ()> {
+    fn wrap(&self, _data: &DataStore, fut: BoxFuture<'static, ()>) -> BoxFuture<'static, ()> {
         let captured = CURRENT_TAG.try_with(|c| *c).ok().flatten();
         Box::pin(CURRENT_TAG.scope(captured, fut))
     }
@@ -50,7 +46,9 @@ async fn hook_propagates_task_local_across_spawn() {
     // must capture "hello" and re-install it in the spawned task, so
     // the Key sees it.
     let got = CURRENT_TAG
-        .scope(Some("hello"), async { engine.compute(&ReadTag).await.unwrap() })
+        .scope(Some("hello"), async {
+            engine.compute(&ReadTag).await.unwrap()
+        })
         .await;
     assert_eq!(got, Some("hello"));
 }
@@ -73,13 +71,8 @@ struct CountingHook {
 }
 
 impl SpawnHook for CountingHook {
-    fn wrap(
-        &self,
-        _data: &DataStore,
-        fut: BoxFuture<'static, ()>,
-    ) -> BoxFuture<'static, ()> {
-        self.count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn wrap(&self, _data: &DataStore, fut: BoxFuture<'static, ()>) -> BoxFuture<'static, ()> {
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         fut
     }
 }
