@@ -50,9 +50,13 @@ impl CommandDispatcherProcessor {
 
         // Add the task to the list of pending futures.
         let dispatcher = self.create_task_command_dispatcher(dispatcher_context);
+        let work = self.scope_task(
+            dispatcher_context,
+            task.spec.install(dispatcher, install_reporter),
+        );
         self.pending_futures.push(
             cancellation_token
-                .run_until_cancelled_owned(task.spec.install(dispatcher, install_reporter))
+                .run_until_cancelled_owned(work)
                 .map(move |result| {
                     TaskResult::InstallPixiEnvironment(
                         pending_env_id,

@@ -74,9 +74,10 @@ impl CommandDispatcherProcessor {
             .as_ref()
             .and_then(|reporter| reporter.create_run_exports_reporter(reporter_context));
 
+        let work = self.scope_task(context, task.spec.request(dispatcher, run_exports_reporter));
         self.pending_futures.push(
             cancellation_token
-                .run_until_cancelled_owned(task.spec.request(dispatcher, run_exports_reporter))
+                .run_until_cancelled_owned(work)
                 .map(move |result| {
                     TaskResult::SourceRecord(
                         id,

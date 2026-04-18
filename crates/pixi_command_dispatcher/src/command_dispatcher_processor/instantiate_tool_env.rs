@@ -52,9 +52,10 @@ impl CommandDispatcherProcessor {
         }
 
         let command_queue = self.create_task_command_dispatcher(context);
+        let work = self.scope_task(context, task.spec.instantiate(command_queue));
         self.pending_futures.push(
             cancellation_token
-                .run_until_cancelled_owned(task.spec.instantiate(command_queue))
+                .run_until_cancelled_owned(work)
                 .map(move |result| {
                     TaskResult::InstantiateToolEnv(
                         id,

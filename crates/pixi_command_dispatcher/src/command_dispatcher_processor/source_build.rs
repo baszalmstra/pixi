@@ -56,13 +56,14 @@ impl CommandDispatcherProcessor {
             run_exports_reporter = created;
         }
 
+        let work = self.scope_task(
+            context,
+            task.spec
+                .build(dispatcher, run_exports_reporter.clone(), tx),
+        );
         self.pending_futures.push(
             cancellation_token
-                .run_until_cancelled_owned(task.spec.build(
-                    dispatcher,
-                    run_exports_reporter.clone(),
-                    tx,
-                ))
+                .run_until_cancelled_owned(work)
                 .map(move |result| {
                     TaskResult::SourceBuild(
                         id,

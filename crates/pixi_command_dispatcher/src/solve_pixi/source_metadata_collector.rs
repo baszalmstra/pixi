@@ -16,8 +16,10 @@ use thiserror::Error;
 
 use crate::{
     BuildBackendMetadataSpec, BuildEnvironment, CommandDispatcher, CommandDispatcherError,
-    PackageNotProvidedError, SourceCheckoutError, SourceMetadataSpec, SourceRecordError,
+    ComputeResultExt, PackageNotProvidedError, SourceCheckoutError, SourceMetadataSpec,
+    SourceRecordError,
     executor::CancellationAwareFutures,
+    source_checkout::SourceCheckoutExt,
     source_metadata::{CycleEnvironment, SourceMetadata, SourceMetadataError},
 };
 
@@ -63,7 +65,7 @@ pub enum CollectSourceMetadataError {
         name: String,
         #[source]
         #[diagnostic_source]
-        error: CommandDispatcherError<SourceCheckoutError>,
+        error: SourceCheckoutError,
     },
 }
 
@@ -192,15 +194,16 @@ impl SourceMetadataCollector {
         let preferred_build_source = self.preferred_build_sources.get(&name).cloned();
         // Always checkout the manifest-defined source location (root), discovery
         // will pick build_source; we only pass preferred locations.
+        let source_name = name.as_source().to_string();
         let manifest_source_checkout = self
             .command_queue
-            .pin_and_checkout(spec.location)
+            .engine
+            .with_ctx(async |ctx| ctx.pin_and_checkout(spec.location).await)
             .await
-            .map_err(|err| CollectSourceMetadataError::SourceCheckoutError {
-                name: name.as_source().to_string(),
-                error: err,
-            })
-            .map_err(CommandDispatcherError::Failed)?;
+            .map_err_into_dispatcher(|error| CollectSourceMetadataError::SourceCheckoutError {
+                name: source_name,
+                error,
+            })?;
 
         // Extract information for the particular source spec.
         let source_metadata = match self

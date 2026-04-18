@@ -4,6 +4,7 @@ mod event_tree;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use pixi_path::AbsPathBuf;
@@ -14,9 +15,9 @@ use itertools::Itertools;
 use pixi_build_backend_passthrough::PassthroughBackend;
 use pixi_build_frontend::{BackendOverride, InMemoryOverriddenBackends};
 use pixi_command_dispatcher::{
-    BuildEnvironment, CacheDirs, CommandDispatcher, CommandDispatcherError, Executor,
-    InstallPixiEnvironmentSpec, InstantiateToolEnvironmentSpec, PixiEnvironmentSpec,
-    SourceBuildCacheStatusSpec, build::PinnedSourceCodeLocation,
+    BuildEnvironment, CacheDirs, CommandDispatcher, Executor, InstallPixiEnvironmentSpec,
+    InstantiateToolEnvironmentSpec, PixiEnvironmentSpec, SourceBuildCacheStatusSpec,
+    SourceCheckoutError, build::PinnedSourceCodeLocation, source_checkout::UrlSourceCheckoutExt,
 };
 use pixi_config::default_channel_config;
 use pixi_record::{PinnedPathSpec, PinnedSourceSpec};
@@ -35,6 +36,9 @@ use tempfile::TempDir;
 use url::Url;
 
 use crate::{event_reporter::Event, event_tree::EventTree};
+use pixi_command_dispatcher::{ReporterContextSpawnHook, source_checkout::UrlCheckoutSemaphore};
+use pixi_compute_engine::ComputeEngine;
+use tokio::sync::Semaphore;
 
 /// Converts a PathBuf to AbsPresumedDirPathBuf for tests.
 fn to_abs_dir(path: impl Into<PathBuf>) -> pixi_path::AbsPresumedDirPathBuf {
@@ -120,6 +124,33 @@ fn file_url_for_test(tempdir: &TempDir, name: &str) -> Url {
     Url::from_file_path(&path).unwrap()
 }
 
+/// Build a minimal [`ComputeEngine`] sufficient for URL-checkout tests.
+///
+/// Populates the data store with only the entries the `CheckoutUrl` Key
+/// reads (url resolver, download client, cache dirs, url-checkout
+/// semaphore, optional reporter), and installs the reporter-context
+/// spawn hook so lifecycle events carry context across task spawns.
+fn url_test_engine(
+    cache_dirs: CacheDirs,
+    reporter: Option<Arc<dyn pixi_command_dispatcher::Reporter>>,
+    sequential: bool,
+    max_concurrent: Option<usize>,
+) -> pixi_compute_engine::ComputeEngine {
+    let mut builder = ComputeEngine::builder()
+        .sequential_branches(sequential)
+        .with_data(pixi_url::UrlResolver::default())
+        .with_data(rattler_networking::LazyClient::default())
+        .with_data(cache_dirs)
+        .with_spawn_hook(Arc::new(ReporterContextSpawnHook));
+    if let Some(reporter) = reporter {
+        builder = builder.with_data(reporter);
+    }
+    if let Some(n) = max_concurrent {
+        builder = builder.with_data(UrlCheckoutSemaphore(Arc::new(Semaphore::new(n))));
+    }
+    builder.build()
+}
+
 #[tokio::test]
 #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
 pub async fn simple_test() {
@@ -190,9 +221,16 @@ pub async fn simple_test() {
 
     let event_tree = EventTree::from(events);
 
-    // Redact temp paths and git hashes for stable snapshots
+    // Redact temp paths and git hashes for stable snapshots.
+    //
+    // The first regex uses `[^@\n]+` rather than `[^@]+` to prevent the
+    // greedy match from spanning multiple tree lines: the event tree
+    // emits several URLs that all end in `/multi-output-recipe/`, and a
+    // newline-crossing greedy `[^@]+` would collapse the span from one
+    // URL's `file:///` through the next line's `@<commit>`, eating the
+    // `?subdirectory=&rev=` query of the outer URL.
     let output = event_tree.to_string();
-    let output = regex::Regex::new(r"file:///[^@]+/multi-output-recipe/")
+    let output = regex::Regex::new(r"file:///[^@\n]+/multi-output-recipe/")
         .unwrap()
         .replace_all(&output, "file://[LOCAL_GIT_REPO]");
     let output = regex::Regex::new(r"rev=[a-z0-9]+")
@@ -1218,10 +1256,7 @@ pub async fn pin_and_checkout_url_reuses_cached_checkout() {
     let sha = dummy_sha();
     let checkout_dir = prepare_cached_checkout(url_cache_root.as_std_path(), sha);
 
-    let dispatcher = CommandDispatcher::builder()
-        .with_cache_dirs(cache_dirs)
-        .with_executor(Executor::Serial)
-        .finish();
+    let engine = url_test_engine(cache_dirs, None, true, None);
 
     // Since we have the same expected hash we expect to return existing archive.
     let spec = UrlSpec {
@@ -1231,9 +1266,11 @@ pub async fn pin_and_checkout_url_reuses_cached_checkout() {
         subdirectory: Subdirectory::default(),
     };
 
-    let checkout = dispatcher
-        .pin_and_checkout_url(spec.clone())
+    let spec_for_engine = spec.clone();
+    let checkout = engine
+        .with_ctx(async |ctx| ctx.pin_and_checkout_url(spec_for_engine).await)
         .await
+        .expect("engine scope should succeed")
         .expect("url checkout should succeed");
 
     assert_eq!(checkout.path.as_std_path(), checkout_dir);
@@ -1253,10 +1290,7 @@ pub async fn pin_and_checkout_url_reports_sha_mismatch_from_concurrent_request()
     let archive = tempfile::tempdir().unwrap();
     let url = file_url_for_test(&archive, "archive.zip");
 
-    let dispatcher = CommandDispatcher::builder()
-        .with_cache_dirs(cache_dirs)
-        .with_executor(Executor::Concurrent)
-        .finish();
+    let engine = url_test_engine(cache_dirs, None, false, None);
 
     let good_spec = UrlSpec {
         url: url.clone(),
@@ -1272,16 +1306,16 @@ pub async fn pin_and_checkout_url_reports_sha_mismatch_from_concurrent_request()
     };
 
     let (good, bad) = tokio::join!(
-        dispatcher.checkout_url(good_spec),
-        dispatcher.checkout_url(bad_spec),
+        engine.with_ctx(async |ctx| ctx.pin_and_checkout_url(good_spec).await),
+        engine.with_ctx(async |ctx| ctx.pin_and_checkout_url(bad_spec).await),
     );
 
-    assert!(good.is_ok());
+    assert!(good.expect("engine scope").is_ok());
     assert!(matches!(
-        bad,
-        Err(CommandDispatcherError::Failed(
+        bad.expect("engine scope"),
+        Err(SourceCheckoutError::UrlError(
             UrlError::Sha256Mismatch { .. }
-        ))
+        )),
     ));
 }
 
@@ -1292,10 +1326,7 @@ pub async fn pin_and_checkout_url_validates_cached_results() {
     let archive = tempfile::tempdir().unwrap();
     let url = file_url_for_test(&archive, "archive.zip");
 
-    let dispatcher = CommandDispatcher::builder()
-        .with_cache_dirs(cache_dirs)
-        .with_executor(Executor::Serial)
-        .finish();
+    let engine = url_test_engine(cache_dirs, None, true, None);
 
     let spec = UrlSpec {
         url: url.clone(),
@@ -1304,9 +1335,10 @@ pub async fn pin_and_checkout_url_validates_cached_results() {
         subdirectory: Subdirectory::default(),
     };
 
-    dispatcher
-        .checkout_url(spec.clone())
+    engine
+        .with_ctx(async |ctx| ctx.pin_and_checkout_url(spec).await)
         .await
+        .expect("engine scope")
         .expect("initial download succeeds");
 
     let bad_spec = UrlSpec {
@@ -1316,10 +1348,14 @@ pub async fn pin_and_checkout_url_validates_cached_results() {
         subdirectory: Subdirectory::default(),
     };
 
-    let err = dispatcher.checkout_url(bad_spec).await.unwrap_err();
+    let err = engine
+        .with_ctx(async |ctx| ctx.pin_and_checkout_url(bad_spec).await)
+        .await
+        .expect("engine scope")
+        .unwrap_err();
     assert!(matches!(
         err,
-        CommandDispatcherError::Failed(UrlError::Sha256Mismatch { .. })
+        SourceCheckoutError::UrlError(UrlError::Sha256Mismatch { .. })
     ));
 }
 
@@ -1877,4 +1913,222 @@ pub async fn test_metadata_refetched_when_source_file_modified() {
         metadata_requests, 1,
         "Metadata should be re-fetched after source file modification"
     );
+}
+
+/// Verifies that the compute engine is wired into the CommandDispatcher and
+/// that extension traits on DataStore provide access to shared resources.
+#[tokio::test]
+pub async fn compute_engine_wired_into_dispatcher() {
+    use pixi_command_dispatcher::compute_data::{
+        HasCacheDirs, HasDownloadClient, HasGateway, HasGitResolver, HasUrlResolver,
+    };
+    use pixi_compute_engine::{ComputeCtx, Key};
+    use std::fmt;
+
+    // A trivial Key that reads Gateway from global_data to prove the wiring works.
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    struct ProbeKey;
+
+    impl fmt::Display for ProbeKey {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "ProbeKey")
+        }
+    }
+
+    impl Key for ProbeKey {
+        type Value = bool;
+        async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
+            let data = ctx.global_data();
+            // Each trait accessor must succeed without panicking.
+            let _ = data.gateway();
+            let _ = data.git_resolver();
+            let _ = data.url_resolver();
+            let _ = data.download_client();
+            let _ = data.cache_dirs();
+            true
+        }
+    }
+
+    let dispatcher = CommandDispatcher::builder()
+        .with_cache_dirs(default_cache_dirs())
+        .finish();
+
+    // Run a Key through the engine; if global data is missing this panics.
+    let result = dispatcher.engine().compute(&ProbeKey).await.unwrap();
+    assert!(result, "ProbeKey should return true after reading all data");
+}
+
+/// Verifies that a compute-engine-backed URL checkout emits the full
+/// reporter lifecycle in order. The reporter is discovered through
+/// `DataStore`; the `CheckoutUrl` Key fires `on_queued`, then acquires
+/// the semaphore, then fires `on_started`, then fetches, then
+/// `on_finished` via a drop-guard.
+#[tokio::test]
+pub async fn reporter_url_checkout_lifecycle() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let cache_dirs = CacheDirs::new(to_abs_dir(tempdir.path().join("pixi-cache")));
+    let archive = tempfile::tempdir().unwrap();
+    let url = file_url_for_test(&archive, "archive.zip");
+
+    let (reporter, events) = EventReporter::new();
+    let engine = url_test_engine(cache_dirs, Some(Arc::new(reporter)), true, None);
+
+    let spec = UrlSpec {
+        url: url.clone(),
+        md5: None,
+        sha256: None,
+        subdirectory: Subdirectory::default(),
+    };
+
+    engine
+        .with_ctx(async |ctx| ctx.pin_and_checkout_url(spec).await)
+        .await
+        .expect("engine scope")
+        .expect("url checkout should succeed");
+
+    let events = events.take();
+    let url_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                event_reporter::Event::UrlCheckoutQueued { .. }
+                    | event_reporter::Event::UrlCheckoutStarted { .. }
+                    | event_reporter::Event::UrlCheckoutFinished { .. }
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        url_events.len(),
+        3,
+        "expected 3 url lifecycle events, got: {url_events:#?}"
+    );
+    assert!(matches!(
+        url_events[0],
+        event_reporter::Event::UrlCheckoutQueued { context: None, .. }
+    ));
+    assert!(matches!(
+        url_events[1],
+        event_reporter::Event::UrlCheckoutStarted { .. }
+    ));
+    assert!(matches!(
+        url_events[2],
+        event_reporter::Event::UrlCheckoutFinished { .. }
+    ));
+}
+
+/// Two concurrent `checkout_url` calls for the same URL dedup to a
+/// single compute, so the reporter lifecycle fires exactly once.
+#[tokio::test]
+pub async fn reporter_url_checkout_dedup() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let cache_dirs = CacheDirs::new(to_abs_dir(tempdir.path().join("pixi-cache")));
+    let archive = tempfile::tempdir().unwrap();
+    let url = file_url_for_test(&archive, "archive.zip");
+
+    let (reporter, events) = EventReporter::new();
+    let engine = url_test_engine(cache_dirs, Some(Arc::new(reporter)), false, None);
+
+    let spec = UrlSpec {
+        url: url.clone(),
+        md5: None,
+        sha256: None,
+        subdirectory: Subdirectory::default(),
+    };
+
+    let spec_a = spec.clone();
+    let spec_b = spec.clone();
+    let (a, b) = tokio::join!(
+        engine.with_ctx(async |ctx| ctx.pin_and_checkout_url(spec_a).await),
+        engine.with_ctx(async |ctx| ctx.pin_and_checkout_url(spec_b).await),
+    );
+    a.expect("engine scope")
+        .expect("first checkout should succeed");
+    b.expect("engine scope")
+        .expect("second checkout should succeed");
+
+    let events = events.take();
+    let queued = events
+        .iter()
+        .filter(|e| matches!(e, event_reporter::Event::UrlCheckoutQueued { .. }))
+        .count();
+    let started = events
+        .iter()
+        .filter(|e| matches!(e, event_reporter::Event::UrlCheckoutStarted { .. }))
+        .count();
+    let finished = events
+        .iter()
+        .filter(|e| matches!(e, event_reporter::Event::UrlCheckoutFinished { .. }))
+        .count();
+    assert_eq!(
+        (queued, started, finished),
+        (1, 1, 1),
+        "deduped URL checkout should fire the lifecycle exactly once, \
+         got queued={queued} started={started} finished={finished}"
+    );
+}
+
+/// With `max_concurrent_url_checkouts = 1`, `on_started` for each
+/// distinct URL is serialized behind the previous URL's `on_finished`.
+/// The semaphore lives in `DataStore` and is acquired between
+/// `on_queued` and `on_started` inside the `CheckoutUrl` Key.
+#[tokio::test]
+pub async fn semaphore_serializes_concurrent_url_checkouts() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let cache_dirs = CacheDirs::new(to_abs_dir(tempdir.path().join("pixi-cache")));
+    let archive = tempfile::tempdir().unwrap();
+    let url_a = file_url_for_test(&archive, "a.zip");
+    let url_b = file_url_for_test(&archive, "b.zip");
+    let url_c = file_url_for_test(&archive, "c.zip");
+
+    let (reporter, events) = EventReporter::new();
+    let engine = url_test_engine(cache_dirs, Some(Arc::new(reporter)), false, Some(1));
+
+    let mk = |url: Url| UrlSpec {
+        url,
+        md5: None,
+        sha256: None,
+        subdirectory: Subdirectory::default(),
+    };
+
+    let spec_a = mk(url_a);
+    let spec_b = mk(url_b);
+    let spec_c = mk(url_c);
+    let (a, b, c) = tokio::join!(
+        engine.with_ctx(async |ctx| ctx.pin_and_checkout_url(spec_a).await),
+        engine.with_ctx(async |ctx| ctx.pin_and_checkout_url(spec_b).await),
+        engine.with_ctx(async |ctx| ctx.pin_and_checkout_url(spec_c).await),
+    );
+    a.expect("a engine scope").expect("a should succeed");
+    b.expect("b engine scope").expect("b should succeed");
+    c.expect("c engine scope").expect("c should succeed");
+
+    // Serialization invariant: across the entire recorded event stream,
+    // between any `UrlCheckoutStarted(id)` and its matching
+    // `UrlCheckoutFinished(id)`, no other `UrlCheckoutStarted` appears.
+    let events = events.take();
+    let mut in_flight: Option<pixi_command_dispatcher::reporter::UrlCheckoutId> = None;
+    for ev in &events {
+        match ev {
+            event_reporter::Event::UrlCheckoutStarted { id } => {
+                assert!(
+                    in_flight.is_none(),
+                    "on_started for {id:?} fired while {in_flight:?} was still in flight \
+                     — semaphore did not serialize"
+                );
+                in_flight = Some(*id);
+            }
+            event_reporter::Event::UrlCheckoutFinished { id } => {
+                assert_eq!(
+                    in_flight,
+                    Some(*id),
+                    "on_finished for {id:?} without a matching on_started"
+                );
+                in_flight = None;
+            }
+            _ => {}
+        }
+    }
+    assert!(in_flight.is_none(), "a checkout was still in flight at end");
 }

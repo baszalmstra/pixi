@@ -23,7 +23,8 @@ use crate::cache::common::CacheRevision;
 use crate::input_hash::{ConfigurationHash, ProjectModelHash};
 use crate::{
     BuildEnvironment, CommandDispatcher, CommandDispatcherError, CommandDispatcherErrorResultExt,
-    InstantiateBackendError, InstantiateBackendSpec, SourceCheckout, SourceCheckoutError,
+    ComputeResultExt, InstantiateBackendError, InstantiateBackendSpec, SourceCheckout,
+    SourceCheckoutError,
     build::{PinnedSourceCodeLocation, SourceRecordOrCheckout, WorkDirKey},
     cache::{
         build_backend_metadata::{
@@ -32,6 +33,7 @@ use crate::{
         },
         common::{CacheEntry, CacheKey, CacheKeyString, MetadataCache, MetadataCacheKey},
     },
+    source_checkout::SourceCheckoutExt,
 };
 use pixi_build_discovery::BackendSpec;
 use pixi_build_frontend::BackendOverride;
@@ -128,11 +130,13 @@ impl BuildBackendMetadataSpec {
         log_sink: UnboundedSender<String>,
     ) -> Result<BuildBackendMetadata, CommandDispatcherError<BuildBackendMetadataError>> {
         // Ensure that the source is checked out before proceeding.
+        // Never has an alternative root because we want to get the manifest.
+        let manifest_source = self.manifest_source.clone();
         let manifest_source_checkout = command_dispatcher
-            // Never has an alternative root because we want to get the manifest
-            .checkout_pinned_source(self.manifest_source.clone())
+            .engine
+            .with_ctx(async |ctx| ctx.checkout_pinned_source(manifest_source).await)
             .await
-            .map_err_with(BuildBackendMetadataError::SourceCheckout)?;
+            .map_err_into_dispatcher(BuildBackendMetadataError::SourceCheckout)?;
 
         // Discover information about the build backend from the source code (cached by path).
         let discovered_backend = command_dispatcher
@@ -165,18 +169,25 @@ impl BuildBackendMetadataSpec {
 
                 // Check if we have a preferred build source that matches this same location
                 match &self.preferred_build_source {
-                    Some(pinned) if pinned.matches_source_spec(&resolved_location) => Some((
-                        command_dispatcher
-                            .checkout_pinned_source(pinned.clone())
-                            .await
-                            .map_err_with(BuildBackendMetadataError::SourceCheckout)?,
-                        relative_build_source_spec,
-                    )),
+                    Some(pinned) if pinned.matches_source_spec(&resolved_location) => {
+                        let pinned = pinned.clone();
+                        Some((
+                            command_dispatcher
+                                .engine
+                                .with_ctx(async |ctx| ctx.checkout_pinned_source(pinned).await)
+                                .await
+                                .map_err_into_dispatcher(
+                                    BuildBackendMetadataError::SourceCheckout,
+                                )?,
+                            relative_build_source_spec,
+                        ))
+                    }
                     _ => Some((
                         command_dispatcher
-                            .pin_and_checkout(resolved_location)
+                            .engine
+                            .with_ctx(async |ctx| ctx.pin_and_checkout(resolved_location).await)
                             .await
-                            .map_err_with(BuildBackendMetadataError::SourceCheckout)?,
+                            .map_err_into_dispatcher(BuildBackendMetadataError::SourceCheckout)?,
                         relative_build_source_spec,
                     )),
                 }

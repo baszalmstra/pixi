@@ -1,5 +1,3 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
-
 use itertools::chain;
 use miette::Diagnostic;
 use pixi_build_discovery::EnabledProtocols;
@@ -7,17 +5,18 @@ use pixi_glob::GlobSet;
 use pixi_record::{CanonicalSourceLocation, PinnedSourceSpec, VariantValue};
 use pixi_spec::ResolvedExcludeNewer;
 use rattler_conda_types::{ChannelConfig, ChannelUrl};
+use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use rattler_conda_types::PackageName;
-
+use crate::source_checkout::SourceCheckoutExt;
 use crate::{
     BuildEnvironment, CommandDispatcher, CommandDispatcherError, CommandDispatcherErrorResultExt,
-    SourceCheckoutError,
+    ComputeResultExt, SourceCheckoutError,
     build::{BuildCacheEntry, BuildCacheError, BuildInput, CachedBuild, PinnedSourceCodeLocation},
     input_hash::{ConfigurationHash, ProjectModelHash},
 };
+use rattler_conda_types::PackageName;
 
 /// A query to retrieve information from the source build cache. This is
 /// memoized to allow querying information from the cache while it is also
@@ -360,9 +359,10 @@ impl SourceBuildCacheStatusSpec {
 
         // Checkout the source for the package.
         let source_checkout = command_dispatcher
-            .checkout_pinned_source(manifest_source.clone())
+            .engine
+            .with_ctx(async |x| x.checkout_pinned_source(manifest_source.clone()).await)
             .await
-            .map_err_with(SourceBuildCacheStatusError::SourceCheckout)?;
+            .map_err_into_dispatcher(SourceBuildCacheStatusError::SourceCheckout)?;
 
         // Determine the backend parameters for the package.
         let backend = command_dispatcher
@@ -418,10 +418,12 @@ impl SourceBuildCacheStatusSpec {
         };
 
         // Checkout the source for the package.
+        let pinned_source = self.source.source_code().clone();
         let source_build_checkout = command_dispatcher
-            .checkout_pinned_source(self.source.source_code().clone())
+            .engine
+            .with_ctx(async |ctx| ctx.checkout_pinned_source(pinned_source).await)
             .await
-            .map_err_with(SourceBuildCacheStatusError::SourceCheckout)?;
+            .map_err_into_dispatcher(SourceBuildCacheStatusError::SourceCheckout)?;
 
         let source_dir = source_build_checkout.path.as_dir_or_file_parent();
         let timestamp = cached_build.record.package_record.timestamp;

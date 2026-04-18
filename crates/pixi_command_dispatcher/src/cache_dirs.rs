@@ -4,6 +4,7 @@ use crate::cache::source_record::SourceRecordCache;
 use pixi_consts::consts;
 use pixi_path::{AbsPresumedDirPath, AbsPresumedDirPathBuf};
 
+#[derive(Clone)]
 pub struct CacheDirs {
     /// The root cache directory, all other cache directories are derived from
     /// this.

@@ -6,39 +6,31 @@
 //! checkouts. It ensures efficient execution by avoiding redundant computations
 //! and supporting concurrent operations.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
-pub use builder::CommandDispatcherBuilder;
-pub use error::{CommandDispatcherError, CommandDispatcherErrorResultExt};
-pub(crate) use git::GitCheckoutTask;
+pub use builder::{CommandDispatcherBuilder, ReporterContextSpawnHook};
+pub use error::{CommandDispatcherError, CommandDispatcherErrorResultExt, ComputeResultExt};
 pub use instantiate_backend::{InstantiateBackendError, InstantiateBackendSpec};
 use pixi_build_discovery::{DiscoveredBackend, EnabledProtocols};
 use pixi_build_frontend::BackendOverride;
+use pixi_compute_engine::ComputeEngine;
 use pixi_git::resolver::GitResolver;
 use pixi_glob::GlobHashCache;
-use pixi_path::{AbsPathBuf, AbsPresumedDirPathBuf};
-use pixi_record::{PinnedPathSpec, PinnedSourceSpec, PixiRecord};
-use pixi_spec::{SourceLocationSpec, UrlSpec};
+use pixi_record::PixiRecord;
 use pixi_url::UrlResolver;
 use rattler::package_cache::PackageCache;
 use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, Platform};
 use rattler_networking::LazyClient;
 use rattler_repodata_gateway::Gateway;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use typed_path::Utf8TypedPath;
-use url::UrlCheckoutTask;
 
 use crate::{
     BuildBackendMetadata, BuildBackendMetadataError, BuildBackendMetadataSpec, DevSourceMetadata,
-    DevSourceMetadataError, DevSourceMetadataSpec, Executor, InvalidPathError, PixiEnvironmentSpec,
+    DevSourceMetadataError, DevSourceMetadataSpec, Executor, PixiEnvironmentSpec,
     ResolvedSourceRecord, SolveCondaEnvironmentSpec, SolvePixiEnvironmentError,
-    SourceBuildCacheEntry, SourceBuildCacheStatusError, SourceBuildCacheStatusSpec, SourceCheckout,
-    SourceCheckoutError, SourceMetadata, SourceMetadataError, SourceMetadataSpec,
-    SourceRecordError, SourceRecordSpec,
+    SourceBuildCacheEntry, SourceBuildCacheStatusError, SourceBuildCacheStatusSpec, SourceMetadata,
+    SourceMetadataError, SourceMetadataSpec, SourceRecordError, SourceRecordSpec,
     backend_source_build::{BackendBuiltSource, BackendSourceBuildError, BackendSourceBuildSpec},
     build::BuildCache,
     cache::{build_backend_metadata::BuildBackendMetadataCache, source_record::SourceRecordCache},
@@ -58,9 +50,7 @@ use crate::{
 
 mod builder;
 mod error;
-mod git;
 mod instantiate_backend;
-pub mod url;
 
 /// The command dispatcher is responsible for synchronizing requests between
 /// different conda environments.
@@ -80,6 +70,11 @@ pub struct CommandDispatcher {
 
     /// Holds the shared data required by the command dispatcher.
     pub(crate) data: Arc<CommandDispatcherData>,
+
+    /// The generic compute engine. Coexists with the legacy processor during
+    /// migration; new Key-based operations run through this engine while
+    /// legacy operations continue to use the channel-based processor.
+    pub(crate) engine: ComputeEngine,
 
     /// Holds a strong reference to the process thread handle, this allows us to
     /// wait for the background thread to finish once the last (user facing)
@@ -124,9 +119,6 @@ pub(crate) struct CommandDispatcherData {
     /// The resolver of url archives.
     pub url_resolver: UrlResolver,
 
-    /// The base directory to use if relative paths are discovered.
-    pub root_dir: AbsPresumedDirPathBuf,
-
     /// The location to store caches.
     pub cache_dirs: CacheDirs,
 
@@ -158,6 +150,14 @@ pub(crate) struct CommandDispatcherData {
 
     /// The execution type of the dispatcher.
     pub executor: Executor,
+
+    /// Semaphore that bounds concurrent git checkouts driven through
+    /// the compute engine. `None` means unbounded.
+    pub git_checkout_semaphore: Option<Arc<Semaphore>>,
+
+    /// Semaphore that bounds concurrent URL archive fetches driven
+    /// through the compute engine. `None` means unbounded.
+    pub url_checkout_semaphore: Option<Arc<Semaphore>>,
 }
 
 /// A channel through which to send any messages to the command_dispatcher. Some
@@ -198,8 +198,6 @@ pub(crate) enum CommandDispatcherContext {
     DevSourceMetadata(DevSourceMetadataId),
     InstallPixiEnvironment(InstallPixiEnvironmentId),
     InstantiateToolEnv(InstantiatedToolEnvId),
-    GitCheckout(GitCheckoutId),
-    UrlCheckout(UrlCheckoutId),
 }
 
 slotmap::new_key_type! {
@@ -245,14 +243,6 @@ pub(crate) struct DevSourceMetadataId(pub usize);
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct InstantiatedToolEnvId(pub usize);
 
-/// An id that uniquely identifies a git checkout request.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub(crate) struct GitCheckoutId(pub usize);
-
-/// An id that uniquely identifies a URL checkout request.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub(crate) struct UrlCheckoutId(pub usize);
-
 /// A message send to the dispatch task.
 #[allow(clippy::large_enum_variant)]
 #[derive(derive_more::From)]
@@ -266,8 +256,6 @@ pub(crate) enum ForegroundMessage {
     SourceBuild(SourceBuildTask),
     QuerySourceBuildCache(SourceBuildCacheStatusTask),
     DevSourceMetadata(DevSourceMetadataTask),
-    GitCheckout(GitCheckoutTask),
-    UrlCheckout(UrlCheckoutTask),
     InstallPixiEnvironment(InstallPixiEnvironmentTask),
     InstantiateToolEnvironment(Task<InstantiateToolEnvironmentSpec>),
     ClearReporter(oneshot::Sender<()>),
@@ -374,6 +362,15 @@ impl CommandDispatcher {
     /// Returns the executor used by the command dispatcher.
     pub fn executor(&self) -> Executor {
         self.data.executor
+    }
+
+    /// Returns a reference to the compute engine.
+    ///
+    /// The engine handles Key-based computations with automatic
+    /// deduplication, caching, and cycle detection. During migration,
+    /// it coexists with the legacy channel-based processor.
+    pub fn engine(&self) -> &ComputeEngine {
+        &self.engine
     }
 
     /// Returns the cache for source metadata.
@@ -645,93 +642,6 @@ impl CommandDispatcher {
         self.execute_task(spec).await
     }
 
-    /// Checks out a particular source based on a source location spec.
-    ///
-    /// This function resolves the source specification to a concrete checkout
-    /// by:
-    /// 1. For path sources: Resolving relative paths against the root directory or against an alternative root path
-    ///
-    /// i.e. in the case of an out-of-tree build.
-    /// Some examples for different inputs:
-    /// - `/foo/bar` => `/foo/bar` (absolute paths are unchanged)
-    /// - `./bar` => `<root_dir>/bar`
-    /// - `bar` => `<root_dir>/bar` (or `<alternative_root>/bar` if provided)
-    /// - `../bar` => `<alternative_root>/../bar` (normalized, validated for security)
-    /// - `~/bar` => `<home_dir>/bar`
-    ///
-    /// Usually:
-    /// * `root_dir` => workspace root directory (parent of workspace manifest)
-    /// * `alternative_root` => package root directory (parent of package manifest)
-    ///
-    /// 2. For git sources: Cloning or fetching the repository and checking out
-    ///    the specified reference
-    /// 3. For URL sources: Downloading and extracting the archive
-    ///
-    /// The function handles path normalization and ensures security by
-    /// preventing directory traversal attacks. It also manages caching of
-    /// source checkouts to avoid redundant downloads or clones when the
-    /// same source is used multiple times.
-    pub async fn pin_and_checkout(
-        &self,
-        source_location_spec: SourceLocationSpec,
-    ) -> Result<SourceCheckout, CommandDispatcherError<SourceCheckoutError>> {
-        match source_location_spec {
-            SourceLocationSpec::Url(url) => {
-                self.pin_and_checkout_url(UrlSpec {
-                    url: url.url,
-                    md5: url.md5,
-                    sha256: url.sha256,
-                    subdirectory: url.subdirectory,
-                })
-                .await
-            }
-            SourceLocationSpec::Path(path) => {
-                let source_path = self
-                    .data
-                    .resolve_typed_path(path.path.to_path())
-                    .map_err(SourceCheckoutError::from)
-                    .map_err(CommandDispatcherError::Failed)?;
-                Ok(SourceCheckout {
-                    path: source_path,
-                    pinned: PinnedSourceSpec::Path(PinnedPathSpec { path: path.path }),
-                })
-            }
-            SourceLocationSpec::Git(git_spec) => self.pin_and_checkout_git(git_spec).await,
-        }
-    }
-
-    /// Checkout pinned source record.
-    ///
-    /// Similar to `pin_and_checkout` but works with already pinned source
-    /// specifications. This is used when we have a concrete revision (e.g.,
-    /// a specific git commit) that we want to check out rather than
-    /// resolving a reference like a branch name.
-    ///
-    /// The method handles different source types appropriately:
-    /// - For path sources: Resolves and validates the path
-    /// - For git sources: Checks out the specific revision
-    /// - For URL sources: Extracts the archive with the exact checksum
-    pub async fn checkout_pinned_source(
-        &self,
-        pinned_spec: PinnedSourceSpec,
-    ) -> Result<SourceCheckout, CommandDispatcherError<SourceCheckoutError>> {
-        match pinned_spec {
-            PinnedSourceSpec::Path(ref path_spec) => {
-                let source_path = self
-                    .data
-                    .resolve_typed_path(path_spec.path.to_path())
-                    .map_err(SourceCheckoutError::from)
-                    .map_err(CommandDispatcherError::Failed)?;
-                Ok(SourceCheckout {
-                    path: source_path,
-                    pinned: pinned_spec,
-                })
-            }
-            PinnedSourceSpec::Git(git_spec) => self.checkout_pinned_git(git_spec).await,
-            PinnedSourceSpec::Url(url_spec) => self.checkout_pinned_url(url_spec).await,
-        }
-    }
-
     /// Discovers the build backend at a specific path on disk and caches it by
     /// path.
     pub async fn discover_backend(
@@ -744,36 +654,6 @@ impl CommandDispatcher {
         self.discovery_cache()
             .get_or_discover(source_path, &channel_config, &enabled_protocols)
             .await
-    }
-}
-
-impl CommandDispatcherData {
-    /// Resolves the source path to a full path.
-    ///
-    /// This function does not check if the path exists and also does not follow
-    /// symlinks.
-    fn resolve_typed_path(&self, path_spec: Utf8TypedPath) -> Result<AbsPathBuf, InvalidPathError> {
-        if path_spec.is_absolute() {
-            // SAFETY: we checked that the path is absolute
-            Ok(unsafe { AbsPathBuf::new_unchecked(PathBuf::from(path_spec.as_str())) })
-        } else if let Ok(user_path) = path_spec.strip_prefix("~/") {
-            let home_dir = dirs::home_dir().ok_or_else(|| {
-                InvalidPathError::CouldNotDetermineHomeDirectory(PathBuf::from(path_spec.as_str()))
-            })?;
-            let home_dir = AbsPathBuf::new(home_dir)
-                .expect("the home directory is absolute")
-                .into_assume_dir();
-            home_dir
-                .join(Path::new(user_path.as_str()))
-                .normalized()
-                .map_err(Into::into)
-        } else {
-            let native_path = Path::new(path_spec.as_str());
-            self.root_dir
-                .join(native_path)
-                .normalized()
-                .map_err(Into::into)
-        }
     }
 }
 

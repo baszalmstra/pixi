@@ -20,9 +20,9 @@ use pep440_rs::VersionSpecifiers;
 use pixi_build_discovery::EnabledProtocols;
 use pixi_command_dispatcher::{
     BuildBackendMetadataSpec, BuildEnvironment, CommandDispatcher, CommandDispatcherError,
-    CommandDispatcherErrorResultExt, DevSourceMetadataError, DevSourceMetadataSpec,
-    ResolvedSourceRecord, SourceCheckoutError, SourceRecordError, SourceRecordSpec,
-    executor::CancellationAwareFutures,
+    CommandDispatcherErrorResultExt, ComputeResultExt, DevSourceMetadataError,
+    DevSourceMetadataSpec, ResolvedSourceRecord, SourceCheckoutError, SourceRecordError,
+    SourceRecordSpec, executor::CancellationAwareFutures,
 };
 use pixi_config::Config;
 use pixi_git::url::RepositoryUrl;
@@ -71,6 +71,7 @@ use crate::workspace::{
     grouped_environment::GroupedEnvironment,
 };
 use futures::stream::FuturesUnordered;
+use pixi_command_dispatcher::source_checkout::SourceCheckoutExt;
 use pixi_manifest::EnvironmentName;
 use pixi_uv_context::UvResolutionContext;
 use pixi_uv_conversions::{
@@ -1826,9 +1827,10 @@ async fn resolve_single_dev_dependency(
     dev_source_names: HashSet<PackageName>,
 ) -> Result<Vec<Dependency>, CommandDispatcherError<PlatformUnsat>> {
     let pinned_source = command_dispatcher
-        .pin_and_checkout(source_spec.location)
+        .engine()
+        .with_ctx(async |ctx| ctx.pin_and_checkout(source_spec.location).await)
         .await
-        .map_err_with(PlatformUnsat::from)?;
+        .map_err_into_dispatcher(PlatformUnsat::from)?;
 
     // Create the spec for getting dev source metadata
     let spec = DevSourceMetadataSpec {

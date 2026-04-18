@@ -3,14 +3,19 @@ use std::sync::Arc;
 use crate::cache::build_backend_metadata::BuildBackendMetadataCache;
 use crate::cache::source_record::SourceRecordCache;
 use crate::discover_backend_cache::DiscoveryCache;
+use crate::path::RootDir;
+use crate::reporter_context::CURRENT_REPORTER_CONTEXT;
 use crate::{
     CacheDirs, CommandDispatcher, Executor, Limits, Reporter,
     build::BuildCache,
     command_dispatcher::{CommandDispatcherChannel, CommandDispatcherData},
     command_dispatcher_processor::CommandDispatcherProcessor,
     limits::ResolvedLimits,
+    source_checkout::{GitCheckoutSemaphore, UrlCheckoutSemaphore},
 };
+use futures::future::BoxFuture;
 use pixi_build_frontend::BackendOverride;
+use pixi_compute_engine::{ComputeEngine, DataStore, SpawnHook};
 use pixi_git::resolver::GitResolver;
 use pixi_glob::GlobHashCache;
 use pixi_path::{AbsPathBuf, AbsPresumedDirPathBuf};
@@ -20,12 +25,13 @@ use rattler_conda_types::{GenericVirtualPackage, Platform};
 use rattler_networking::LazyClient;
 use rattler_repodata_gateway::{Gateway, MaxConcurrency};
 use rattler_virtual_packages::{VirtualPackageOverrides, VirtualPackages};
+use tokio::sync::Semaphore;
 
 #[derive(Default)]
 pub struct CommandDispatcherBuilder {
     gateway: Option<Gateway>,
     root_dir: Option<AbsPresumedDirPathBuf>,
-    reporter: Option<Box<dyn Reporter>>,
+    reporter: Option<Arc<dyn Reporter>>,
     git_resolver: Option<GitResolver>,
     url_resolver: Option<UrlResolver>,
     download_client: Option<LazyClient>,
@@ -58,7 +64,7 @@ impl CommandDispatcherBuilder {
     /// Sets the reporter used by the [`CommandDispatcher`] to report progress.
     pub fn with_reporter<F: Reporter + 'static>(self, reporter: F) -> Self {
         Self {
-            reporter: Some(Box::new(reporter)),
+            reporter: Some(Arc::new(reporter)),
             ..self
         }
     }
@@ -185,12 +191,21 @@ impl CommandDispatcherBuilder {
             )
         });
 
+        let limits = ResolvedLimits::from(self.limits);
+        let git_checkout_semaphore = limits
+            .max_concurrent_git_checkouts
+            .map(|n| Arc::new(Semaphore::new(n)));
+        let url_checkout_semaphore = limits
+            .max_concurrent_url_checkouts
+            .map(|n| Arc::new(Semaphore::new(n)));
+
+        let reporter = self.reporter;
+
         let data = Arc::new(CommandDispatcherData {
             gateway,
             build_backend_metadata_cache,
             source_record_cache,
             build_cache,
-            root_dir,
             git_resolver,
             url_resolver,
             cache_dirs,
@@ -198,19 +213,67 @@ impl CommandDispatcherBuilder {
             build_backend_overrides: self.build_backend_overrides,
             glob_hash_cache: GlobHashCache::default(),
             discovery_cache: DiscoveryCache::default(),
-            limits: ResolvedLimits::from(self.limits),
+            limits,
             package_cache,
             tool_platform,
             execute_link_scripts: self.execute_link_scripts,
             executor: self.executor,
+            git_checkout_semaphore,
+            url_checkout_semaphore,
         });
 
-        let (sender, join_handle) = CommandDispatcherProcessor::spawn(data.clone(), self.reporter);
+        // Build the compute engine, populating its global data store with
+        // the individual shared resources that pixi-specific Keys read
+        // through the extension traits on DataStore (HasGateway,
+        // HasGitResolver, HasUrlResolver, HasCacheDirs, ...). Values are
+        // stored by `TypeId`, so tests can populate only the subset their
+        // Keys actually touch without constructing a full dispatcher. The
+        // spawn hook captures the calling task's
+        // `CURRENT_REPORTER_CONTEXT` task-local and scopes the spawned
+        // compute with it, so Keys can read their caller's reporter
+        // context even though the compute runs on a fresh tokio task.
+        let mut engine_builder = ComputeEngine::builder()
+            .sequential_branches(matches!(self.executor, Executor::Serial))
+            .with_data(data.gateway.clone())
+            .with_data(data.git_resolver.clone())
+            .with_data(data.url_resolver.clone())
+            .with_data(data.download_client.clone())
+            .with_data(data.cache_dirs.clone())
+            .with_data(RootDir(root_dir))
+            .with_spawn_hook(Arc::new(ReporterContextSpawnHook));
+        if let Some(reporter) = reporter.clone() {
+            engine_builder = engine_builder.with_data(reporter);
+        }
+        if let Some(sem) = data.git_checkout_semaphore.clone() {
+            engine_builder = engine_builder.with_data(GitCheckoutSemaphore(sem));
+        }
+        if let Some(sem) = data.url_checkout_semaphore.clone() {
+            engine_builder = engine_builder.with_data(UrlCheckoutSemaphore(sem));
+        }
+        let engine = engine_builder.build();
+
+        let (sender, join_handle) =
+            CommandDispatcherProcessor::spawn(data.clone(), engine.clone(), reporter);
         CommandDispatcher {
             channel: Some(CommandDispatcherChannel::Strong(sender)),
             context: None,
             data,
+            engine,
             processor_handle: Some(Arc::new(join_handle)),
         }
+    }
+}
+
+/// Snapshots [`CURRENT_REPORTER_CONTEXT`] on the calling task and
+/// re-installs it via `scope` on the spawned compute task. Lets
+/// compute-engine Keys read the caller's reporter context even though
+/// the compute runs on a fresh tokio task that would not otherwise
+/// inherit task-locals.
+pub struct ReporterContextSpawnHook;
+
+impl SpawnHook for ReporterContextSpawnHook {
+    fn wrap(&self, _data: &DataStore, fut: BoxFuture<'static, ()>) -> BoxFuture<'static, ()> {
+        let captured = CURRENT_REPORTER_CONTEXT.try_get().ok().flatten();
+        Box::pin(CURRENT_REPORTER_CONTEXT.scope(captured, fut))
     }
 }

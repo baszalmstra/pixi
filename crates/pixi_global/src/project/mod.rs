@@ -23,8 +23,9 @@ pub use parsed_manifest::{ExposedName, ParsedEnvironment, ParsedManifest};
 use pixi_build_discovery::EnabledProtocols;
 use pixi_build_frontend::BackendOverride;
 use pixi_command_dispatcher::{
-    BuildBackendMetadataSpec, BuildEnvironment, CommandDispatcher, InstallPixiEnvironmentSpec,
-    Limits, PixiEnvironmentSpec,
+    BuildBackendMetadataSpec, BuildEnvironment, CommandDispatcher, ComputeResultExt,
+    InstallPixiEnvironmentSpec, Limits, PixiEnvironmentSpec,
+    source_checkout::SourceCheckoutExt,
 };
 use pixi_config::{Config, RunPostLinkScripts, default_channel_config, pixi_home};
 use pixi_consts::consts::{self};
@@ -1410,8 +1411,10 @@ impl Project {
     ) -> Result<PackageName, InferPackageNameError> {
         let command_dispatcher = self.command_dispatcher()?;
         let checkout = command_dispatcher
-            .pin_and_checkout(source_spec.location)
+            .engine()
+            .with_ctx(async |ctx| ctx.pin_and_checkout(source_spec.location).await)
             .await
+            .map_err_into_dispatcher(std::convert::identity)
             .map_err(|e| InferPackageNameError::BuildBackendMetadata(Box::new(e)))?;
 
         let pinned_source_spec = checkout.pinned;

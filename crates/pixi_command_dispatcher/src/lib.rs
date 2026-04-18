@@ -39,6 +39,7 @@ mod cache;
 mod cache_dirs;
 mod command_dispatcher;
 mod command_dispatcher_processor;
+pub mod compute_data;
 mod dev_source_metadata;
 mod discover_backend_cache;
 pub mod executor;
@@ -46,12 +47,15 @@ mod input_hash;
 mod install_pixi;
 mod instantiate_tool_env;
 mod limits;
+mod path;
 pub mod reporter;
+mod reporter_context;
+mod reporter_lifecycle;
 mod solve_conda;
 mod solve_pixi;
 mod source_build;
 mod source_build_cache_status;
-mod source_checkout;
+pub mod source_checkout;
 mod source_metadata;
 mod source_record;
 
@@ -71,7 +75,8 @@ pub use cache::source_record::{SourceRecordCache, SourceRecordCacheEntry};
 pub use cache_dirs::CacheDirs;
 pub use command_dispatcher::{
     CommandDispatcher, CommandDispatcherBuilder, CommandDispatcherError,
-    CommandDispatcherErrorResultExt, InstantiateBackendError, InstantiateBackendSpec,
+    CommandDispatcherErrorResultExt, ComputeResultExt, InstantiateBackendError,
+    InstantiateBackendSpec, ReporterContextSpawnHook,
 };
 pub use dev_source_metadata::{
     DevSourceMetadata, DevSourceMetadataError, DevSourceMetadataSpec, PackageNotProvidedError,
@@ -81,7 +86,7 @@ pub use install_pixi::{
     InstallPixiEnvironmentError, InstallPixiEnvironmentResult, InstallPixiEnvironmentSpec,
 };
 pub use instantiate_tool_env::{InstantiateToolEnvironmentError, InstantiateToolEnvironmentSpec};
-pub use limits::Limits;
+pub use limits::{Limit, Limits};
 pub use reporter::{
     CondaSolveReporter, GitCheckoutReporter, PixiInstallReporter, PixiSolveReporter, Reporter,
     ReporterContext,
@@ -99,6 +104,9 @@ pub use source_metadata::{Cycle, SourceMetadata, SourceMetadataError, SourceMeta
 pub use source_record::{
     ResolvedSourceRecord, SourceRecordError, SourceRecordReuseKey, SourceRecordSpec,
 };
+
+// Re-export pixi_compute_engine types used by downstream crates.
+pub use pixi_compute_engine::{ComputeCtx, ComputeEngine, ComputeError, Key};
 
 /// A helper function to check if a value is the default value for its type.
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {

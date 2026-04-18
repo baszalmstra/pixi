@@ -51,10 +51,11 @@ impl CommandDispatcherProcessor {
         self.active_source_requests.insert(context, cycle_key);
 
         let dispatcher = self.create_task_command_dispatcher(context);
+        let work = self.scope_task(context, task.spec.request(dispatcher));
 
         self.pending_futures.push(
             cancellation_token
-                .run_until_cancelled_owned(task.spec.request(dispatcher))
+                .run_until_cancelled_owned(work)
                 .map(move |result| {
                     TaskResult::DevSourceMetadata(
                         id,

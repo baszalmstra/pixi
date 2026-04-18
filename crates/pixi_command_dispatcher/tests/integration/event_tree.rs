@@ -224,6 +224,13 @@ impl EventTree {
                     );
                 }
                 Event::InstantiateToolEnvFinished { .. } => {}
+                Event::UrlCheckoutQueued { .. }
+                | Event::UrlCheckoutStarted { .. }
+                | Event::UrlCheckoutFinished { .. } => {
+                    // URL checkouts don't participate in the tree
+                    // display used by these integration tests (they're
+                    // leaves attached to their parent task's context).
+                }
             }
         }
 

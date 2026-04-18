@@ -27,10 +27,10 @@ use crate::{
     BackendSourceBuildError, BackendSourceBuildMethod, BackendSourceBuildPrefix,
     BackendSourceBuildSpec, BackendSourceBuildV1Method, BuildEnvironment, BuildProfile,
     CachedBuildStatus, CommandDispatcher, CommandDispatcherError, CommandDispatcherErrorResultExt,
-    InstallPixiEnvironmentError, InstallPixiEnvironmentResult, InstallPixiEnvironmentSpec,
-    InstantiateBackendError, InstantiateBackendSpec, PixiEnvironmentSpec,
-    SolvePixiEnvironmentError, SourceBuildCacheStatusError, SourceBuildCacheStatusSpec,
-    SourceCheckoutError,
+    ComputeResultExt, InstallPixiEnvironmentError, InstallPixiEnvironmentResult,
+    InstallPixiEnvironmentSpec, InstantiateBackendError, InstantiateBackendSpec,
+    PixiEnvironmentSpec, SolvePixiEnvironmentError, SourceBuildCacheStatusError,
+    SourceBuildCacheStatusSpec, SourceCheckoutError,
     build::pin_compatible::PinCompatibleError,
     build::{
         BuildCacheError, BuildHostEnvironment, BuildHostPackage, CachedBuild,
@@ -38,6 +38,7 @@ use crate::{
         PinnedSourceCodeLocation, PixiRunExports, SourceRecordOrCheckout, WorkDirKey, move_file,
     },
     input_hash::{ConfigurationHash, ProjectModelHash},
+    source_checkout::SourceCheckoutExt,
 };
 
 /// Describes all parameters required to build a conda package from a pixi
@@ -239,10 +240,15 @@ impl SourceBuildSpec {
         };
 
         // Check out the source code.
+        let manifest_source_for_checkout = manifest_source.clone();
         let manifest_source_checkout = command_dispatcher
-            .checkout_pinned_source(manifest_source.clone())
+            .engine
+            .with_ctx(async |ctx| {
+                ctx.checkout_pinned_source(manifest_source_for_checkout)
+                    .await
+            })
             .await
-            .map_err_with(SourceBuildError::SourceCheckout)?;
+            .map_err_into_dispatcher(SourceBuildError::SourceCheckout)?;
 
         // Discover information about the build backend from the source code (cached by
         // path).
@@ -285,9 +291,13 @@ impl SourceBuildSpec {
         // 3. Manifest source. Just assume that source is located at the same directory as the manifest.
         let build_source_checkout = if let Some(pinned_build_source) = build_source {
             &command_dispatcher
-                .checkout_pinned_source(pinned_build_source.into_pinned())
+                .engine
+                .with_ctx(async |ctx| {
+                    ctx.checkout_pinned_source(pinned_build_source.into_pinned())
+                        .await
+                })
                 .await
-                .map_err_with(SourceBuildError::SourceCheckout)?
+                .map_err_into_dispatcher(SourceBuildError::SourceCheckout)?
         } else if let Some(manifest_build_source) =
             discovered_backend.init_params.build_source.clone()
         {
@@ -295,9 +305,10 @@ impl SourceBuildSpec {
                 SourceAnchor::from(SourceLocationSpec::from(manifest_source.clone()));
             let resolved_build_source = manifest_source_anchor.resolve(manifest_build_source);
             &command_dispatcher
-                .pin_and_checkout(resolved_build_source)
+                .engine
+                .with_ctx(async |ctx| ctx.pin_and_checkout(resolved_build_source).await)
                 .await
-                .map_err_with(SourceBuildError::SourceCheckout)?
+                .map_err_into_dispatcher(SourceBuildError::SourceCheckout)?
         } else {
             &manifest_source_checkout
         };

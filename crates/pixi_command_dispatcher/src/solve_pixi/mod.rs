@@ -20,11 +20,12 @@ use tracing::instrument;
 
 use crate::{
     BuildEnvironment, CommandDispatcher, CommandDispatcherError, CommandDispatcherErrorResultExt,
-    Cycle, SolveCondaEnvironmentSpec, SourceMetadataError,
+    ComputeResultExt, Cycle, SolveCondaEnvironmentSpec, SourceMetadataError,
     solve_conda::SolveCondaEnvironmentError,
     solve_pixi::source_metadata_collector::{
         CollectSourceMetadataError, CollectedSourceMetadata, SourceMetadataCollector,
     },
+    source_checkout::SourceCheckoutExt,
 };
 
 /// Contains all information that describes the input of a pixi environment.
@@ -285,9 +286,12 @@ impl PixiEnvironmentSpec {
             dev_source_futures.push(async move {
                 // Pin and checkout the source
                 let pinned_source = command_dispatcher
-                    .pin_and_checkout(dev_source_spec.source.location)
+                    .engine
+                    .with_ctx(async |ctx| {
+                        ctx.pin_and_checkout(dev_source_spec.source.location).await
+                    })
                     .await
-                    .map_err_with(SolvePixiEnvironmentError::SourceCheckoutError)?;
+                    .map_err_into_dispatcher(SolvePixiEnvironmentError::SourceCheckoutError)?;
 
                 // Create the spec for getting dev source metadata
                 let spec = DevSourceMetadataSpec {
