@@ -14,7 +14,6 @@
 //!
 //! ```
 //! use std::fmt;
-//! use futures::FutureExt;
 //! use pixi_compute_engine::{ComputeCtx, ComputeEngine, Key};
 //!
 //! #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -28,8 +27,7 @@
 //!
 //! impl Key for Fib {
 //!     // User errors live inside `Value`: here a `Result` carrying a
-//!     // static-str error. The `Result` shape also lets sub-computes be
-//!     // boxed directly with `.boxed()`, with no `async move` wrapping.
+//!     // static-str error.
 //!     type Value = Result<u64, &'static str>;
 //!
 //!     async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
@@ -42,8 +40,8 @@
 //!         }
 //!         let (a, b) = ctx
 //!             .compute2(
-//!                 |ctx| ctx.compute(&Fib(n - 1)).boxed(),
-//!                 |ctx| ctx.compute(&Fib(n - 2)).boxed(),
+//!                 async |ctx| ctx.compute(&Fib(n - 1)).await,
+//!                 async |ctx| ctx.compute(&Fib(n - 2)).await,
 //!             )
 //!             .await;
 //!         // `ctx.compute` returns the child's `Value` directly (no
@@ -127,7 +125,6 @@
 //!
 //! ```
 //! use std::fmt;
-//! use futures::FutureExt;
 //! use pixi_compute_engine::{ComputeCtx, ComputeEngine, Key};
 //!
 //! #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -150,9 +147,7 @@
 //!         // body sees the cycle as a normal `Err` and recovers.
 //!         let me = self.0;
 //!         match ctx
-//!             .with_cycle_guard(|ctx| {
-//!                 async move { ctx.compute(&Node(me)).await }.boxed()
-//!             })
+//!             .with_cycle_guard(async |ctx| ctx.compute(&Node(me)).await)
 //!             .await
 //!         {
 //!             Ok(inner) => inner,
