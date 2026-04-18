@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use crate::{
-    ComputeEngine, DataStore, cycle::active_edges::ActiveEdges,
+    ComputeEngine, DataStore,
+    cycle::active_edges::ActiveEdges,
     engine::{EngineInner, SpawnHook},
     key_graph::KeyGraph,
 };
