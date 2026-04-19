@@ -19,7 +19,6 @@ use pixi_command_dispatcher::{
     InstantiateToolEnvironmentSpec, PixiEnvironmentSpec, SourceBuildCacheStatusSpec,
     SourceCheckoutError, build::PinnedSourceCodeLocation, source_checkout::UrlSourceCheckoutExt,
 };
-use pixi_config::default_channel_config;
 use pixi_record::{PinnedPathSpec, PinnedSourceSpec};
 use pixi_spec::{
     GitReference, GitSpec, PathSpec, PixiSpec, ResolvedExcludeNewer, Subdirectory, UrlSpec,
@@ -189,7 +188,6 @@ pub async fn simple_test() {
             )]),
             channels: vec![channel_url.clone()],
             build_environment: build_env.clone(),
-            channel_config: default_channel_config(),
             ..PixiEnvironmentSpec::default()
         })
         .await
@@ -206,10 +204,8 @@ pub async fn simple_test() {
             force_reinstall: Default::default(),
             exclude_newer: None,
             channels: vec![channel_url],
-            channel_config: default_channel_config(),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: Default::default(),
         })
         .await
         .unwrap();
@@ -756,8 +752,6 @@ async fn source_build_cache_status_clear_works() {
         channels: Vec::<ChannelUrl>::new(),
         exclude_newer: None,
         build_environment: build_env,
-        channel_config: default_channel_config(),
-        enabled_protocols: Default::default(),
         variants: BTreeMap::new(),
     };
 
@@ -832,13 +826,11 @@ pub async fn test_dev_source_metadata() {
         package_name: PackageName::new_unchecked("test-package"),
         backend_metadata: BuildBackendMetadataSpec {
             manifest_source: pinned_source,
-            channel_config: default_channel_config(),
             exclude_newer: None,
             channels: vec![],
             build_environment: BuildEnvironment::simple(tool_platform, tool_virtual_packages),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: Default::default(),
             preferred_build_source: None,
         },
     };
@@ -924,13 +916,11 @@ pub async fn test_dev_source_metadata_package_not_provided() {
         package_name: PackageName::new_unchecked("non-existent-package"),
         backend_metadata: BuildBackendMetadataSpec {
             manifest_source: pinned_source,
-            channel_config: default_channel_config(),
             exclude_newer: None,
             channels: vec![],
             build_environment: BuildEnvironment::simple(tool_platform, tool_virtual_packages),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: Default::default(),
             preferred_build_source: None,
         },
     };
@@ -1000,13 +990,11 @@ pub async fn test_dev_source_metadata_with_variants() {
         package_name: PackageName::new_unchecked("variant-package"),
         backend_metadata: BuildBackendMetadataSpec {
             manifest_source: pinned_source,
-            channel_config: default_channel_config(),
             exclude_newer: None,
             channels: vec![],
             build_environment: BuildEnvironment::simple(tool_platform, tool_virtual_packages),
             variant_configuration: Some(variant_config),
             variant_files: None,
-            enabled_protocols: Default::default(),
             preferred_build_source: None,
         },
     };
@@ -1755,7 +1743,6 @@ pub async fn test_metadata_not_refetched_when_no_files_changed() {
         package_name: PackageName::new_unchecked("test-package"),
         backend_metadata: BuildBackendMetadataSpec {
             manifest_source: pinned_source,
-            channel_config: default_channel_config(),
             exclude_newer: None,
             channels: vec![],
             build_environment: BuildEnvironment::simple(
@@ -1764,7 +1751,6 @@ pub async fn test_metadata_not_refetched_when_no_files_changed() {
             ),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: Default::default(),
             preferred_build_source: None,
         },
     };
@@ -1856,7 +1842,6 @@ pub async fn test_metadata_refetched_when_source_file_modified() {
         package_name: PackageName::new_unchecked("package-b"),
         backend_metadata: BuildBackendMetadataSpec {
             manifest_source: pinned_source,
-            channel_config: default_channel_config(),
             exclude_newer: None,
             channels: vec![],
             build_environment: BuildEnvironment::simple(
@@ -1865,7 +1850,6 @@ pub async fn test_metadata_refetched_when_source_file_modified() {
             ),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: Default::default(),
             preferred_build_source: None,
         },
     };

@@ -8,7 +8,7 @@ use crate::{
 };
 use miette::Diagnostic;
 use ordermap::OrderMap;
-use pixi_build_discovery::{BackendSpec, CommandSpec, EnabledProtocols};
+use pixi_build_discovery::{BackendSpec, CommandSpec};
 use pixi_build_frontend::{
     Backend, BackendOverride, json_rpc,
     json_rpc::{CommunicationError, JsonRpcBackend},
@@ -19,7 +19,6 @@ use pixi_build_types::{
 };
 use pixi_path::{AbsPresumedDirPathBuf, AbsPresumedFilePathBuf};
 use pixi_spec::{ResolvedExcludeNewer, SpecConversionError};
-use rattler_conda_types::ChannelConfig;
 use rattler_shell::{
     activation::{ActivationError, ActivationVariables, Activator},
     shell::ShellEnum,
@@ -51,15 +50,8 @@ pub struct InstantiateBackendSpec {
     /// The source directory to use for the backend
     pub build_source_dir: AbsPresumedDirPathBuf,
 
-    /// The channel configuration to use for any source packages required by the
-    /// backend.
-    pub channel_config: ChannelConfig,
-
     /// Exclude packages newer than the configured cutoffs when solving backend environments.
     pub exclude_newer: Option<ResolvedExcludeNewer>,
-
-    /// The protocols that are enabled for discovering source packages
-    pub enabled_protocols: EnabledProtocols,
 }
 
 impl CommandDispatcher {
@@ -138,8 +130,6 @@ impl CommandDispatcher {
                         exclude_newer: spec.exclude_newer,
                         variant_configuration: None,
                         variant_files: None,
-                        channel_config: spec.channel_config,
-                        enabled_protocols: spec.enabled_protocols,
                     })
                     .await
                     .map_err_with(InstantiateBackendError::from)?;

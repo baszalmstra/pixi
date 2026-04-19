@@ -6,12 +6,9 @@ use std::{
 
 use futures::{FutureExt, StreamExt};
 use miette::Diagnostic;
-use pixi_build_discovery::EnabledProtocols;
 use pixi_record::{PinnedSourceSpec, VariantValue};
 use pixi_spec::{ResolvedExcludeNewer, SourceAnchor, SourceLocationSpec, SourceSpec};
-use rattler_conda_types::{
-    ChannelConfig, ChannelUrl, MatchSpec, PackageNameMatcher, ParseStrictness,
-};
+use rattler_conda_types::{ChannelUrl, MatchSpec, PackageNameMatcher, ParseStrictness};
 use thiserror::Error;
 
 use crate::{
@@ -27,11 +24,9 @@ use crate::{
 /// dependencies.
 pub struct SourceMetadataCollector {
     command_queue: CommandDispatcher,
-    channel_config: ChannelConfig,
     channels: Vec<ChannelUrl>,
     build_environment: BuildEnvironment,
     exclude_newer: Option<ResolvedExcludeNewer>,
-    enabled_protocols: EnabledProtocols,
     variant_configuration: Option<BTreeMap<String, Vec<VariantValue>>>,
     variant_files: Option<Vec<PathBuf>>,
     preferred_build_sources: BTreeMap<rattler_conda_types::PackageName, PinnedSourceSpec>,
@@ -74,12 +69,10 @@ impl SourceMetadataCollector {
     pub fn new(
         command_queue: CommandDispatcher,
         channel_urls: Vec<ChannelUrl>,
-        channel_config: ChannelConfig,
         build_environment: BuildEnvironment,
         exclude_newer: Option<ResolvedExcludeNewer>,
         variant_configuration: Option<BTreeMap<String, Vec<VariantValue>>>,
         variant_files: Option<Vec<PathBuf>>,
-        enabled_protocols: EnabledProtocols,
         preferred_build_sources: BTreeMap<rattler_conda_types::PackageName, PinnedSourceSpec>,
     ) -> Self {
         Self {
@@ -87,8 +80,6 @@ impl SourceMetadataCollector {
             channels: channel_urls,
             build_environment,
             exclude_newer,
-            enabled_protocols,
-            channel_config,
             variant_configuration,
             variant_files,
             preferred_build_sources,
@@ -213,13 +204,11 @@ impl SourceMetadataCollector {
                 backend_metadata: BuildBackendMetadataSpec {
                     manifest_source: manifest_source_checkout.pinned,
                     preferred_build_source,
-                    channel_config: self.channel_config.clone(),
                     channels: self.channels.clone(),
                     build_environment: self.build_environment.clone(),
                     exclude_newer: self.exclude_newer.clone(),
                     variant_configuration: self.variant_configuration.clone(),
                     variant_files: self.variant_files.clone(),
-                    enabled_protocols: self.enabled_protocols.clone(),
                 },
                 exclude_newer: self.exclude_newer.clone(),
             })

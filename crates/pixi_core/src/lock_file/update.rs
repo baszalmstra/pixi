@@ -2489,10 +2489,8 @@ async fn spawn_solve_conda_environment_task(
             strategy,
             channel_priority: channel_priority.into(),
             exclude_newer,
-            channel_config,
             variant_configuration: Some(variant_configuration),
             variant_files: Some(variant_files),
-            enabled_protocols: Default::default(),
             preferred_build_source: pin_overrides,
         })
         .await

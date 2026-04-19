@@ -9,7 +9,6 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD, prelude::BASE64_U
 use futures::TryFutureExt;
 use itertools::Itertools;
 use miette::Diagnostic;
-use pixi_build_discovery::EnabledProtocols;
 use pixi_build_types::{
     PIXI_BUILD_API_VERSION_NAME, PIXI_BUILD_API_VERSION_SPEC, PixiBuildApiVersion,
 };
@@ -17,9 +16,7 @@ use pixi_record::VariantValue;
 use pixi_spec::{BinarySpec, PixiSpec, ResolvedExcludeNewer};
 use pixi_spec_containers::DependencyMap;
 use pixi_utils::AsyncPrefixGuard;
-use rattler_conda_types::{
-    ChannelConfig, ChannelUrl, PackageName, VersionWithSource, prefix::Prefix,
-};
+use rattler_conda_types::{ChannelUrl, PackageName, VersionWithSource, prefix::Prefix};
 use rattler_solve::{ChannelPriority, SolveStrategy};
 use thiserror::Error;
 use xxhash_rust::xxh3::Xxh3;
@@ -56,18 +53,11 @@ pub struct InstantiateToolEnvironmentSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_newer: Option<ResolvedExcludeNewer>,
 
-    /// The channel configuration to use for this environment.
-    pub channel_config: ChannelConfig,
-
     /// Build variants
     pub variant_configuration: Option<BTreeMap<String, Vec<VariantValue>>>,
 
     /// Build variant file contents
     pub variant_files: Option<Vec<PathBuf>>,
-
-    /// The protocols that are enabled for source packages
-    #[serde(skip_serializing_if = "crate::is_default")]
-    pub enabled_protocols: EnabledProtocols,
 }
 
 #[derive(Debug, Clone)]
@@ -91,8 +81,6 @@ impl Hash for InstantiateToolEnvironmentSpec {
             build_environment,
             channels,
             exclude_newer,
-            channel_config,
-            enabled_protocols,
             variant_configuration: variants,
             variant_files,
         } = self;
@@ -115,8 +103,6 @@ impl Hash for InstantiateToolEnvironmentSpec {
         build_environment.hash(state);
         channels.hash(state);
         exclude_newer.hash(state);
-        channel_config.hash(state);
-        enabled_protocols.hash(state);
         variants.hash(state);
         variant_files.hash(state);
     }
@@ -136,8 +122,6 @@ impl InstantiateToolEnvironmentSpec {
             build_environment: BuildEnvironment::default(),
             channels,
             exclude_newer: None,
-            channel_config: ChannelConfig::default_with_root_dir(PathBuf::from(".")),
-            enabled_protocols: EnabledProtocols::default(),
             variant_configuration: None,
             variant_files: None,
         }
@@ -210,9 +194,7 @@ impl InstantiateToolEnvironmentSpec {
                 dev_sources: Default::default(),
                 build_environment: self.build_environment.clone(),
                 exclude_newer: self.exclude_newer.clone(),
-                channel_config: self.channel_config.clone(),
                 channels: self.channels.clone(),
-                enabled_protocols: self.enabled_protocols.clone(),
                 installed: Vec::new(), // Install from scratch
                 channel_priority: ChannelPriority::default(),
                 variant_configuration: self.variant_configuration.clone(),
@@ -277,10 +259,8 @@ impl InstantiateToolEnvironmentSpec {
                 force_reinstall: Default::default(),
                 exclude_newer: self.exclude_newer,
                 channels: self.channels,
-                channel_config: self.channel_config,
                 variant_configuration: self.variant_configuration,
                 variant_files: self.variant_files,
-                enabled_protocols: self.enabled_protocols,
             })
             .await
             .map_err_with(|e| InstantiateToolEnvironmentError::InstallEnvironment(Arc::new(e)))?;

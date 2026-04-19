@@ -68,7 +68,8 @@ impl CommandDispatcherProcessor {
             let context = CommandDispatcherContext::BackendSourceBuild(backend_source_build_id);
             self.store_cancellation_token(context, cancellation_token.clone());
 
-            let work = self.scope_task(context, spec.build(tx));
+            let dispatcher = self.create_task_command_dispatcher(context);
+            let work = self.scope_task(context, spec.build(dispatcher, tx));
 
             // Add the task to the list of pending futures.
             self.pending_futures.push(

@@ -20,12 +20,10 @@ pub use manifest::{ExposedType, Manifest, Mapping};
 use miette::{Context, Diagnostic, IntoDiagnostic};
 use once_cell::sync::OnceCell;
 pub use parsed_manifest::{ExposedName, ParsedEnvironment, ParsedManifest};
-use pixi_build_discovery::EnabledProtocols;
 use pixi_build_frontend::BackendOverride;
 use pixi_command_dispatcher::{
     BuildBackendMetadataSpec, BuildEnvironment, CommandDispatcher, ComputeResultExt,
-    InstallPixiEnvironmentSpec, Limits, PixiEnvironmentSpec,
-    source_checkout::SourceCheckoutExt,
+    InstallPixiEnvironmentSpec, Limits, PixiEnvironmentSpec, source_checkout::SourceCheckoutExt,
 };
 use pixi_config::{Config, RunPostLinkScripts, default_channel_config, pixi_home};
 use pixi_consts::consts::{self};
@@ -621,7 +619,6 @@ impl Project {
             dependencies: pixi_specs,
             build_environment: build_environment.clone(),
             channels: channels.clone(),
-            channel_config: self.config.global_channel_config().clone(),
             ..Default::default()
         };
 
@@ -650,8 +647,6 @@ impl Project {
                 build_environment,
                 exclude_newer: None,
                 channels,
-                channel_config: self.config.global_channel_config().clone(),
-                enabled_protocols: EnabledProtocols::default(),
                 installed: None,
                 ignore_packages: None,
                 force_reinstall: force_reinstall_packages,
@@ -1395,6 +1390,7 @@ impl Project {
                         .flatten()
                         .unwrap_or_default()
                 }))
+                .with_channel_config(self.global_channel_config().clone())
                 .execute_link_scripts(match self.config.run_post_link_scripts() {
                     RunPostLinkScripts::Insecure => true,
                     RunPostLinkScripts::False => false,
@@ -1423,7 +1419,6 @@ impl Project {
         let metadata_spec = BuildBackendMetadataSpec {
             manifest_source: pinned_source_spec,
             preferred_build_source: None,
-            channel_config: self.global_channel_config().clone(),
             exclude_newer: None,
             channels: self
                 .config()
@@ -1434,7 +1429,6 @@ impl Project {
             build_environment: pixi_command_dispatcher::BuildEnvironment::default(),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: Default::default(),
         };
 
         // Get the metadata using the command dispatcher

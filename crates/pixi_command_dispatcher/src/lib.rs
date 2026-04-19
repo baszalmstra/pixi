@@ -41,8 +41,9 @@ mod command_dispatcher;
 mod command_dispatcher_processor;
 pub mod compute_data;
 mod dev_source_metadata;
-mod discover_backend_cache;
+mod discovered_backend;
 pub mod executor;
+mod injected_config;
 mod input_hash;
 mod install_pixi;
 mod instantiate_tool_env;
@@ -81,7 +82,9 @@ pub use command_dispatcher::{
 pub use dev_source_metadata::{
     DevSourceMetadata, DevSourceMetadataError, DevSourceMetadataSpec, PackageNotProvidedError,
 };
+pub use discovered_backend::DiscoveredBackendKey;
 pub use executor::Executor;
+pub use injected_config::{ChannelConfigKey, EnabledProtocolsKey};
 pub use install_pixi::{
     InstallPixiEnvironmentError, InstallPixiEnvironmentResult, InstallPixiEnvironmentSpec,
 };

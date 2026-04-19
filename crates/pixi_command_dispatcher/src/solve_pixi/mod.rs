@@ -5,7 +5,6 @@ use std::{borrow::Borrow, collections::BTreeMap, path::PathBuf, sync::Arc, time:
 
 use indexmap::IndexMap;
 use miette::Diagnostic;
-use pixi_build_discovery::EnabledProtocols;
 use pixi_record::VariantValue;
 use pixi_record::{DevSourceRecord, PixiRecord};
 use pixi_spec::{BinarySpec, PixiSpec, ResolvedExcludeNewer, SpecConversionError};
@@ -80,18 +79,11 @@ pub struct PixiEnvironmentSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_newer: Option<ResolvedExcludeNewer>,
 
-    /// The channel configuration to use for this environment.
-    pub channel_config: ChannelConfig,
-
     /// Build variants to use during the solve
     pub variant_configuration: Option<BTreeMap<String, Vec<VariantValue>>>,
 
     /// Variant file paths to use during the solve
     pub variant_files: Option<Vec<PathBuf>>,
-
-    /// The protocols that are enabled for source packages
-    #[serde(skip_serializing_if = "crate::is_default")]
-    pub enabled_protocols: EnabledProtocols,
 
     /// Optional override for a specific packages: use this pinned
     /// source for checkout and as the `package_build_source` instead
@@ -114,10 +106,8 @@ impl Default for PixiEnvironmentSpec {
             strategy: SolveStrategy::default(),
             channel_priority: ChannelPriority::Strict,
             exclude_newer: None,
-            channel_config: ChannelConfig::default_with_root_dir(PathBuf::from(".")),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: EnabledProtocols::default(),
             preferred_build_source: BTreeMap::new(),
         }
     }
@@ -137,6 +127,8 @@ impl PixiEnvironmentSpec {
         command_queue: CommandDispatcher,
         gateway_reporter: Option<Box<dyn rattler_repodata_gateway::Reporter>>,
     ) -> Result<Vec<PixiRecord>, CommandDispatcherError<SolvePixiEnvironmentError>> {
+        let channel_config = command_queue.channel_config();
+
         // Process dev sources to get their metadata (before dependencies are moved)
         let dev_source_records = self.process_dev_sources(&command_queue).await?;
 
@@ -150,7 +142,7 @@ impl PixiEnvironmentSpec {
                 self.dependencies.into_specs(),
             );
 
-        Self::check_missing_channels(binary_specs.clone(), &self.channels, &self.channel_config)
+        Self::check_missing_channels(binary_specs.clone(), &self.channels, &channel_config)
             .map_err(|err| CommandDispatcherError::Failed(*err))?;
 
         // Determine a common cut-off date for excluding packages. This is established to ensure
@@ -167,12 +159,10 @@ impl PixiEnvironmentSpec {
         } = SourceMetadataCollector::new(
             command_queue.clone(),
             self.channels.clone(),
-            self.channel_config.clone(),
             self.build_environment.clone(),
             self.exclude_newer.clone(),
             self.variant_configuration.clone(),
             self.variant_files.clone(),
-            self.enabled_protocols.clone(),
             self.preferred_build_source.clone(),
         )
         .collect(
@@ -187,12 +177,12 @@ impl PixiEnvironmentSpec {
         // Convert the binary specs into match specs as well.
         let binary_match_specs = binary_specs
             .clone()
-            .into_match_specs(&self.channel_config)
+            .into_match_specs(&channel_config)
             .map_err(SolvePixiEnvironmentError::from)
             .map_err(CommandDispatcherError::Failed)?;
 
         let dev_source_binary_match_specs = dev_source_binary_specs
-            .into_match_specs(&self.channel_config)
+            .into_match_specs(&channel_config)
             .map_err(SolvePixiEnvironmentError::from)
             .map_err(CommandDispatcherError::Failed)?;
 
@@ -247,7 +237,6 @@ impl PixiEnvironmentSpec {
                 strategy: self.strategy,
                 channel_priority: self.channel_priority,
                 exclude_newer: Some(exclude_newer),
-                channel_config: self.channel_config,
             })
             .await
             .map_err_with(SolvePixiEnvironmentError::from)
@@ -275,13 +264,11 @@ impl PixiEnvironmentSpec {
             let command_dispatcher = command_dispatcher.clone();
             let package_name = package_name.clone();
             let dev_source_spec = dev_source_spec.clone();
-            let channel_config = self.channel_config.clone();
             let channels = self.channels.clone();
             let build_environment = self.build_environment.clone();
             let exclude_newer = self.exclude_newer.clone();
             let variant_configuration = self.variant_configuration.clone();
             let variant_files = self.variant_files.clone();
-            let enabled_protocols = self.enabled_protocols.clone();
 
             dev_source_futures.push(async move {
                 // Pin and checkout the source
@@ -302,13 +289,11 @@ impl PixiEnvironmentSpec {
                             .preferred_build_source
                             .get(&package_name)
                             .cloned(),
-                        channel_config,
                         channels,
                         build_environment,
                         exclude_newer,
                         variant_configuration,
                         variant_files,
-                        enabled_protocols,
                     },
                 };
 

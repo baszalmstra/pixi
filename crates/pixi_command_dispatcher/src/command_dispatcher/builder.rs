@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::cache::build_backend_metadata::BuildBackendMetadataCache;
 use crate::cache::source_record::SourceRecordCache;
-use crate::discover_backend_cache::DiscoveryCache;
+use crate::injected_config::{ChannelConfigKey, EnabledProtocolsKey};
 use crate::path::RootDir;
 use crate::reporter_context::CURRENT_REPORTER_CONTEXT;
 use crate::{
@@ -14,6 +14,7 @@ use crate::{
     source_checkout::{GitCheckoutSemaphore, UrlCheckoutSemaphore},
 };
 use futures::future::BoxFuture;
+use pixi_build_discovery::EnabledProtocols;
 use pixi_build_frontend::BackendOverride;
 use pixi_compute_engine::{ComputeEngine, DataStore, SpawnHook};
 use pixi_git::resolver::GitResolver;
@@ -21,7 +22,7 @@ use pixi_glob::GlobHashCache;
 use pixi_path::{AbsPathBuf, AbsPresumedDirPathBuf};
 use pixi_url::resolver::UrlResolver;
 use rattler::package_cache::PackageCache;
-use rattler_conda_types::{GenericVirtualPackage, Platform};
+use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, Platform};
 use rattler_networking::LazyClient;
 use rattler_repodata_gateway::{Gateway, MaxConcurrency};
 use rattler_virtual_packages::{VirtualPackageOverrides, VirtualPackages};
@@ -42,6 +43,8 @@ pub struct CommandDispatcherBuilder {
     executor: Executor,
     tool_platform: Option<(Platform, Vec<GenericVirtualPackage>)>,
     execute_link_scripts: bool,
+    channel_config: Option<ChannelConfig>,
+    enabled_protocols: Option<EnabledProtocols>,
 }
 
 impl CommandDispatcherBuilder {
@@ -149,6 +152,24 @@ impl CommandDispatcherBuilder {
         }
     }
 
+    /// Sets the channel configuration used to resolve channel names.
+    /// Injected into the compute engine as [`ChannelConfigKey`].
+    pub fn with_channel_config(self, channel_config: ChannelConfig) -> Self {
+        Self {
+            channel_config: Some(channel_config),
+            ..self
+        }
+    }
+
+    /// Sets the build-protocol discovery configuration. Injected into
+    /// the compute engine as [`EnabledProtocolsKey`].
+    pub fn with_enabled_protocols(self, enabled_protocols: EnabledProtocols) -> Self {
+        Self {
+            enabled_protocols: Some(enabled_protocols),
+            ..self
+        }
+    }
+
     /// Completes the builder and returns a new [`CommandDispatcher`].
     pub fn finish(self) -> CommandDispatcher {
         let root_dir = self.root_dir.unwrap_or_else(|| {
@@ -201,6 +222,12 @@ impl CommandDispatcherBuilder {
 
         let reporter = self.reporter;
 
+        let channel_config = self.channel_config.unwrap_or_else(|| {
+            let path: &std::path::Path = root_dir.as_ref();
+            ChannelConfig::default_with_root_dir(path.to_path_buf())
+        });
+        let enabled_protocols = self.enabled_protocols.unwrap_or_default();
+
         let data = Arc::new(CommandDispatcherData {
             gateway,
             build_backend_metadata_cache,
@@ -212,7 +239,6 @@ impl CommandDispatcherBuilder {
             download_client,
             build_backend_overrides: self.build_backend_overrides,
             glob_hash_cache: GlobHashCache::default(),
-            discovery_cache: DiscoveryCache::default(),
             limits,
             package_cache,
             tool_platform,
@@ -251,6 +277,11 @@ impl CommandDispatcherBuilder {
             engine_builder = engine_builder.with_data(UrlCheckoutSemaphore(sem));
         }
         let engine = engine_builder.build();
+
+        // Inject engine-wide configuration values that Keys read through
+        // `ctx.compute(&ChannelConfigKey)` / `ctx.compute(&EnabledProtocolsKey)`.
+        engine.inject(ChannelConfigKey, Arc::new(channel_config));
+        engine.inject(EnabledProtocolsKey, Arc::new(enabled_protocols));
 
         let (sender, join_handle) =
             CommandDispatcherProcessor::spawn(data.clone(), engine.clone(), reporter);

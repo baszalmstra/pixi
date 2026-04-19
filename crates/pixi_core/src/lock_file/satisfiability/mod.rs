@@ -17,7 +17,6 @@ use itertools::{Either, Itertools};
 use miette::Diagnostic;
 use once_cell::sync::OnceCell;
 use pep440_rs::VersionSpecifiers;
-use pixi_build_discovery::EnabledProtocols;
 use pixi_command_dispatcher::{
     BuildBackendMetadataSpec, BuildEnvironment, CommandDispatcher, CommandDispatcherError,
     CommandDispatcherErrorResultExt, ComputeResultExt, DevSourceMetadataError,
@@ -1334,13 +1333,11 @@ async fn resolve_unresolved_source_record(
                 .build_source()
                 .cloned()
                 .map(PinnedBuildSourceSpec::into_pinned),
-            channel_config: platform_setup.channel_config.clone(),
             exclude_newer: None,
             channels: platform_setup.channels.clone(),
             build_environment: platform_setup.build_environment.clone(),
             variant_configuration: Some(platform_setup.variant_configuration.clone()),
             variant_files: Some(platform_setup.variant_files.clone()),
-            enabled_protocols: EnabledProtocols::default(),
         },
         exclude_newer: None,
     };
@@ -1838,13 +1835,11 @@ async fn resolve_single_dev_dependency(
         backend_metadata: BuildBackendMetadataSpec {
             manifest_source: pinned_source.pinned,
             preferred_build_source: None,
-            channel_config: channel_config.clone(),
             exclude_newer: None,
             channels,
             build_environment,
             variant_configuration: Some(variants),
             variant_files: Some(variant_files),
-            enabled_protocols: Default::default(),
         },
     };
 

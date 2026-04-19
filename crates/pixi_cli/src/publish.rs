@@ -194,14 +194,12 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         manifest_source: manifest_source.clone(),
         preferred_build_source: None,
         channels: channels.clone(),
-        channel_config: channel_config.clone(),
         // When running `pixi publish`, the exclude_newer config will be ignored.
         // It will only be used when using the package as a source dependency.
         exclude_newer: None,
         build_environment: build_environment.clone(),
         variant_configuration: Some(variant_configuration.clone()),
         variant_files: Some(variant_files.clone()),
-        enabled_protocols: Default::default(),
     };
     let backend_metadata = command_dispatcher
         .build_backend_metadata(backend_metadata_spec.clone())
@@ -239,12 +237,10 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 // When running `pixi publish`, the exclude_newer config will be ignored.
                 // It will only be used when using the package as a source dependency.
                 exclude_newer: None,
-                channel_config: channel_config.clone(),
                 build_environment: build_environment.clone(),
                 variant_configuration: Some(variant_configuration.clone()),
                 variant_files: Some(variant_files.clone()),
                 variants: Default::default(),
-                enabled_protocols: Default::default(),
                 work_directory: None,
                 clean: args.clean,
                 force: false,

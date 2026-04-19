@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
     sync::Arc,
 };
 
@@ -9,7 +8,7 @@ use pixi_record::{PixiRecord, SourceRecord};
 use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceSpec};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::{
-    ChannelConfig, ChannelUrl, GenericVirtualPackage, MatchSpec, Platform, RepoDataRecord, Version,
+    ChannelUrl, GenericVirtualPackage, MatchSpec, Platform, RepoDataRecord, Version,
     package::{ArchiveIdentifier, CondaArchiveType, DistArchiveIdentifier},
 };
 use rattler_repodata_gateway::RepoData;
@@ -17,7 +16,7 @@ use rattler_solve::{ChannelPriority, SolveStrategy, SolverImpl};
 use tokio::task::JoinError;
 use url::Url;
 
-use crate::{CommandDispatcherError, SourceMetadata};
+use crate::{CommandDispatcher, CommandDispatcherError, SourceMetadata};
 
 /// Contains all information that describes the input of a conda environment.
 /// All information about both binary and source packages is stored in the
@@ -83,9 +82,6 @@ pub struct SolveCondaEnvironmentSpec {
     /// Exclude packages newer than the configured default and per-channel cutoffs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_newer: Option<ResolvedExcludeNewer>,
-
-    /// The channel configuration to use for this environment.
-    pub channel_config: ChannelConfig,
 }
 
 impl Default for SolveCondaEnvironmentSpec {
@@ -105,7 +101,6 @@ impl Default for SolveCondaEnvironmentSpec {
             strategy: SolveStrategy::default(),
             channel_priority: ChannelPriority::default(),
             exclude_newer: None,
-            channel_config: ChannelConfig::default_with_root_dir(PathBuf::from(".")),
         }
     }
 }
@@ -114,7 +109,9 @@ impl SolveCondaEnvironmentSpec {
     /// Solves this environment
     pub async fn solve(
         self,
+        command_dispatcher: CommandDispatcher,
     ) -> Result<Vec<PixiRecord>, CommandDispatcherError<SolveCondaEnvironmentError>> {
+        let channel_config = command_dispatcher.channel_config();
         // Solving is a CPU-intensive task, we spawn this on a background task to allow
         // for more concurrency.
         let solve_result = tokio::task::spawn_blocking(move || {
@@ -152,12 +149,12 @@ impl SolveCondaEnvironmentSpec {
 
             let binary_match_specs = self
                 .binary_specs
-                .into_match_specs(&self.channel_config)
+                .into_match_specs(&channel_config)
                 .map_err(SolveCondaEnvironmentError::SpecConversionError)?;
 
             let constrains_match_specs = self
                 .constraints
-                .into_match_specs(&self.channel_config)
+                .into_match_specs(&channel_config)
                 .map_err(SolveCondaEnvironmentError::SpecConversionError)?;
 
             // Create match specs for dev source packages themselves
@@ -233,7 +230,7 @@ impl SolveCondaEnvironmentSpec {
                             .map(|(name, spec)| {
                                 let nameless = spec
                                     .clone()
-                                    .try_into_nameless_match_spec_ref(&self.channel_config)
+                                    .try_into_nameless_match_spec_ref(&channel_config)
                                     .unwrap_or_default();
                                 MatchSpec::from_nameless(nameless, name.clone().into()).to_string()
                             })
@@ -245,7 +242,7 @@ impl SolveCondaEnvironmentSpec {
                             .filter_map(|(name, spec)| {
                                 let nameless = spec
                                     .clone()
-                                    .try_into_nameless_match_spec(&self.channel_config)
+                                    .try_into_nameless_match_spec(&channel_config)
                                     .ok()?;
                                 Some(
                                     MatchSpec::from_nameless(nameless, name.clone().into())

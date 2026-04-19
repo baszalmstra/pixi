@@ -152,7 +152,7 @@ impl SourceRecordSpec {
                 variants: self.variants.clone(),
                 channel_urls: self.backend_metadata.channels.clone(),
                 build_environment: self.backend_metadata.build_environment.clone(),
-                enabled_protocols: self.backend_metadata.enabled_protocols.clone(),
+                enabled_protocols: command_dispatcher.enabled_protocols().as_ref().clone(),
                 source: build_backend_metadata.source.clone().into(),
             };
             let cached_metadata = command_dispatcher
@@ -256,7 +256,7 @@ impl SourceRecordSpec {
                 variants: self.variants.clone(),
                 channel_urls: self.backend_metadata.channels.clone(),
                 build_environment: self.backend_metadata.build_environment.clone(),
-                enabled_protocols: self.backend_metadata.enabled_protocols.clone(),
+                enabled_protocols: command_dispatcher.enabled_protocols().as_ref().clone(),
                 source: build_backend_metadata.source.clone().into(),
             };
 
@@ -380,6 +380,7 @@ impl SourceRecordSpec {
         source: PinnedSourceCodeLocation,
         reporter: Option<Arc<dyn RunExportsReporter>>,
     ) -> Result<CachedSourceRecord, CommandDispatcherError<SourceRecordError>> {
+        let channel_config = command_dispatcher.channel_config();
         let manifest_source = source.manifest_source().clone();
         let source_anchor = SourceAnchor::from(SourceLocationSpec::from(manifest_source.clone()));
 
@@ -488,7 +489,7 @@ impl SourceRecordSpec {
             depends,
             constrains,
             mut sources,
-        } = PackageRecordDependencies::new(run_dependencies, &self.backend_metadata.channel_config)
+        } = PackageRecordDependencies::new(run_dependencies, &channel_config)
             .map_err(SourceRecordError::from)
             .map_err(CommandDispatcherError::Failed)?;
 
@@ -526,7 +527,7 @@ impl SourceRecordSpec {
                 }
                 Either::Right(binary) => {
                     let spec = binary
-                        .try_into_nameless_match_spec(&self.backend_metadata.channel_config)
+                        .try_into_nameless_match_spec(&channel_config)
                         .map_err(SourceRecordError::from)?;
                     Ok(MatchSpec::from_nameless(spec, name.clone().into()))
                 }
@@ -554,7 +555,7 @@ impl SourceRecordSpec {
                 .into_specs()
                 .map(|(name, spec)| {
                     let nameless_spec = spec
-                        .try_into_nameless_match_spec(&self.backend_metadata.channel_config)
+                        .try_into_nameless_match_spec(&channel_config)
                         .map_err(SourceRecordError::from)?;
                     Ok(MatchSpec::from_nameless(nameless_spec, name.into()).to_string())
                 })
@@ -662,10 +663,8 @@ impl SourceRecordSpec {
                 strategy: Default::default(),
                 channel_priority: Default::default(),
                 exclude_newer: Some(exclude_newer),
-                channel_config: self.backend_metadata.channel_config.clone(),
                 variant_configuration: self.backend_metadata.variant_configuration.clone(),
                 variant_files: self.backend_metadata.variant_files.clone(),
-                enabled_protocols: self.backend_metadata.enabled_protocols.clone(),
                 preferred_build_source,
             })
             .await

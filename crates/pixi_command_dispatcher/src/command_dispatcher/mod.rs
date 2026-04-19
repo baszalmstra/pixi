@@ -11,7 +11,6 @@ use std::sync::Arc;
 pub use builder::{CommandDispatcherBuilder, ReporterContextSpawnHook};
 pub use error::{CommandDispatcherError, CommandDispatcherErrorResultExt, ComputeResultExt};
 pub use instantiate_backend::{InstantiateBackendError, InstantiateBackendSpec};
-use pixi_build_discovery::{DiscoveredBackend, EnabledProtocols};
 use pixi_build_frontend::BackendOverride;
 use pixi_compute_engine::ComputeEngine;
 use pixi_git::resolver::GitResolver;
@@ -19,7 +18,7 @@ use pixi_glob::GlobHashCache;
 use pixi_record::PixiRecord;
 use pixi_url::UrlResolver;
 use rattler::package_cache::PackageCache;
-use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, Platform};
+use rattler_conda_types::{GenericVirtualPackage, Platform};
 use rattler_networking::LazyClient;
 use rattler_repodata_gateway::Gateway;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -35,7 +34,6 @@ use crate::{
     build::BuildCache,
     cache::{build_backend_metadata::BuildBackendMetadataCache, source_record::SourceRecordCache},
     cache_dirs::CacheDirs,
-    discover_backend_cache::DiscoveryCache,
     install_pixi::{
         InstallPixiEnvironmentError, InstallPixiEnvironmentResult, InstallPixiEnvironmentSpec,
     },
@@ -130,9 +128,6 @@ pub(crate) struct CommandDispatcherData {
 
     /// A cache for glob hashes.
     pub glob_hash_cache: GlobHashCache,
-
-    /// Cache for discovered build backends keyed by source checkout path.
-    pub discovery_cache: DiscoveryCache,
 
     /// The resolved limits for the command dispatcher.
     pub limits: ResolvedLimits,
@@ -408,9 +403,39 @@ impl CommandDispatcher {
         &self.data.glob_hash_cache
     }
 
-    /// Returns the discovery cache for build backends.
-    pub fn discovery_cache(&self) -> &DiscoveryCache {
-        &self.data.discovery_cache
+    /// Returns the channel configuration injected into the compute
+    /// engine at construction. Panics if no value was injected, matching
+    /// the [`pixi_compute_engine::InjectedKey`] contract.
+    pub fn channel_config(&self) -> Arc<rattler_conda_types::ChannelConfig> {
+        self.engine
+            .read(&crate::ChannelConfigKey)
+            .expect("ChannelConfig must be injected on the compute engine")
+    }
+
+    /// Returns the build-protocol discovery configuration injected into
+    /// the compute engine at construction.
+    pub fn enabled_protocols(&self) -> Arc<pixi_build_discovery::EnabledProtocols> {
+        self.engine
+            .read(&crate::EnabledProtocolsKey)
+            .expect("EnabledProtocols must be injected on the compute engine")
+    }
+
+    /// Discovers the build backend for a source path via the compute
+    /// engine. Deduplicated and cached by `DiscoveredBackendKey`; the
+    /// channel configuration and enabled protocols come from the
+    /// engine-wide injected values.
+    pub async fn discovered_backend(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<
+        Arc<pixi_build_discovery::DiscoveredBackend>,
+        CommandDispatcherError<Arc<pixi_build_discovery::DiscoveryError>>,
+    > {
+        let key = crate::DiscoveredBackendKey::new(path);
+        self.engine
+            .with_ctx(async |ctx| ctx.compute(&key).await)
+            .await
+            .map_err_into_dispatcher(std::convert::identity)
     }
 
     /// Clears in-memory caches whose correctness depends on the filesystem.
@@ -640,20 +665,6 @@ impl CommandDispatcher {
         CommandDispatcherError<InstantiateToolEnvironmentError>,
     > {
         self.execute_task(spec).await
-    }
-
-    /// Discovers the build backend at a specific path on disk and caches it by
-    /// path.
-    pub async fn discover_backend(
-        &self,
-        source_path: &std::path::Path,
-        channel_config: ChannelConfig,
-        enabled_protocols: EnabledProtocols,
-    ) -> Result<Arc<DiscoveredBackend>, CommandDispatcherError<pixi_build_discovery::DiscoveryError>>
-    {
-        self.discovery_cache()
-            .get_or_discover(source_path, &channel_config, &enabled_protocols)
-            .await
     }
 }
 

@@ -58,7 +58,7 @@ pub struct SourceRecordCacheKey {
     /// The build environment
     pub build_environment: BuildEnvironment,
 
-    /// The protocols that are enabled for source packages
+    /// The protocols that were enabled for backend discovery.
     pub enabled_protocols: EnabledProtocols,
 
     /// The pinned source location

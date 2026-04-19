@@ -1,6 +1,5 @@
 use futures::{SinkExt, channel::mpsc::UnboundedSender};
 use miette::Diagnostic;
-use pixi_build_discovery::EnabledProtocols;
 use pixi_build_frontend::Backend;
 use pixi_build_types::procedures::conda_outputs::CondaOutputsParams;
 use pixi_path::AbsPath;
@@ -8,8 +7,8 @@ use pixi_record::{PinnedBuildSourceSpec, PinnedSourceSpec, PixiRecord, VariantVa
 use pixi_spec::{ResolvedExcludeNewer, SourceAnchor, SourceLocationSpec};
 use pixi_variant::VariantSelector;
 use rattler_conda_types::{
-    ChannelConfig, ChannelUrl, ConvertSubdirError, InvalidPackageNameError, PackageName,
-    PackageRecord, Platform, RepoDataRecord, package::DistArchiveIdentifier, prefix::Prefix,
+    ChannelUrl, ConvertSubdirError, InvalidPackageNameError, PackageName, PackageRecord, Platform,
+    RepoDataRecord, package::DistArchiveIdentifier, prefix::Prefix,
 };
 use rattler_digest::Sha256Hash;
 use rattler_repodata_gateway::{RunExportExtractorError, RunExportsReporter};
@@ -57,9 +56,6 @@ pub struct SourceBuildSpec {
     /// The manifest and optional build source location.
     pub source: PinnedSourceCodeLocation,
 
-    /// The channel configuration to use when resolving metadata
-    pub channel_config: ChannelConfig,
-
     /// The channels to use for solving.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<ChannelUrl>,
@@ -100,10 +96,6 @@ pub struct SourceBuildSpec {
 
     /// Whether the build directory should be cleared before building.
     pub clean: bool,
-
-    /// The protocols that are enabled for this source
-    #[serde(skip_serializing_if = "crate::is_default")]
-    pub enabled_protocols: EnabledProtocols,
 
     /// Force rebuild even if the build cache is up to date.
     pub force: bool,
@@ -162,8 +154,6 @@ impl SourceBuildSpec {
                     source: self.source.clone(),
                     channels: self.channels.clone(),
                     exclude_newer: self.exclude_newer.clone(),
-                    channel_config: self.channel_config.clone(),
-                    enabled_protocols: self.enabled_protocols.clone(),
                     variants: self.variants.clone(),
                 })
                 .await
@@ -250,16 +240,12 @@ impl SourceBuildSpec {
             .await
             .map_err_into_dispatcher(SourceBuildError::SourceCheckout)?;
 
-        // Discover information about the build backend from the source code (cached by
-        // path).
+        // Discover information about the build backend from the source code.
+        // Deduplicated and cached by the compute engine via `DiscoveredBackendKey`.
         let discovered_backend = command_dispatcher
-            .discover_backend(
-                manifest_source_checkout.path.as_std_path(),
-                self.channel_config.clone(),
-                self.enabled_protocols.clone(),
-            )
+            .discovered_backend(manifest_source_checkout.path.as_std_path())
             .await
-            .map_err_with(|e| SourceBuildError::Discovery(Arc::new(e)))?;
+            .map_err_with(SourceBuildError::Discovery)?;
 
         // Compute the hashes for caching purposes.
         let project_model_hash = discovered_backend
@@ -326,9 +312,7 @@ impl SourceBuildSpec {
                     .path
                     .as_dir_or_file_parent()
                     .to_path_buf(),
-                channel_config: self.channel_config.clone(),
                 exclude_newer: self.exclude_newer.clone(),
-                enabled_protocols: self.enabled_protocols.clone(),
                 workspace_root: AbsPath::new(&discovered_backend.init_params.workspace_root)
                     .expect("workspace root is not absolute")
                     .assume_dir()
@@ -745,10 +729,8 @@ impl SourceBuildSpec {
                         force_reinstall: Default::default(),
                         exclude_newer: Some(exclude_newer.clone()),
                         channels: self.channels.clone(),
-                        channel_config: self.channel_config.clone(),
                         variant_configuration: self.variant_configuration.clone(),
                         variant_files: self.variant_files.clone(),
-                        enabled_protocols: self.enabled_protocols.clone(),
                     })
                     .await
                     .map_err_with(|e| SourceBuildError::InstallBuildEnvironment(Arc::new(e)))?,
@@ -776,10 +758,8 @@ impl SourceBuildSpec {
                         force_reinstall: Default::default(),
                         exclude_newer: Some(exclude_newer),
                         channels: self.channels.clone(),
-                        channel_config: self.channel_config.clone(),
                         variant_configuration: self.variant_configuration,
                         variant_files: self.variant_files,
-                        enabled_protocols: self.enabled_protocols,
                     })
                     .await
                     .map_err_with(|e| SourceBuildError::InstallHostEnvironment(Arc::new(e)))?,
@@ -852,7 +832,6 @@ impl SourceBuildSpec {
                 source_dir,
                 work_directory,
                 channels: self.channels,
-                channel_config: self.channel_config,
             })
             .await
             .map_err_with(SourceBuildError::from)?;
@@ -905,10 +884,8 @@ impl SourceBuildSpec {
                 strategy: Default::default(),
                 channel_priority: Default::default(),
                 exclude_newer: Some(exclude_newer.clone()),
-                channel_config: self.channel_config.clone(),
                 variant_configuration: self.variant_configuration.clone(),
                 variant_files: self.variant_files.clone(),
-                enabled_protocols: self.enabled_protocols.clone(),
                 preferred_build_source: BTreeMap::new(),
             })
             .await

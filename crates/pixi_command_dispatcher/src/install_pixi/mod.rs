@@ -11,7 +11,6 @@ use std::{
 use futures::StreamExt;
 use miette::Diagnostic;
 
-use pixi_build_discovery::EnabledProtocols;
 use pixi_record::{
     FullSourceRecordData, PartialSourceRecordData, SourceRecordData, UnresolvedPixiRecord,
     UnresolvedSourceRecord, VariantValue,
@@ -21,9 +20,7 @@ use rattler::install::{
     InstallationResultRecord, Installer, InstallerError, Transaction,
     link_script::{LinkScriptError, PrePostLinkResult},
 };
-use rattler_conda_types::{
-    ChannelConfig, ChannelUrl, PackageName, PrefixRecord, RepoDataRecord, prefix::Prefix,
-};
+use rattler_conda_types::{ChannelUrl, PackageName, PrefixRecord, RepoDataRecord, prefix::Prefix};
 use thiserror::Error;
 
 use crate::{
@@ -73,18 +70,11 @@ pub struct InstallPixiEnvironmentSpec {
     /// The channels to use when building source packages.
     pub channels: Vec<ChannelUrl>,
 
-    /// The channel configuration to use for this environment.
-    pub channel_config: ChannelConfig,
-
     /// Build variants to use during the solve
     pub variant_configuration: Option<BTreeMap<String, Vec<VariantValue>>>,
 
     /// Build variant file contents to use during the solve
     pub variant_files: Option<Vec<PathBuf>>,
-
-    /// The protocols that are enabled for source packages
-    #[serde(skip_serializing_if = "crate::is_default")]
-    pub enabled_protocols: EnabledProtocols,
 }
 
 /// The result of installing a Pixi environment.
@@ -128,10 +118,8 @@ impl InstallPixiEnvironmentSpec {
             force_reinstall: HashSet::new(),
             exclude_newer: None,
             channels: Vec::new(),
-            channel_config: ChannelConfig::default_with_root_dir(PathBuf::from(".")),
             variant_configuration: None,
             variant_files: None,
-            enabled_protocols: EnabledProtocols::default(),
         }
     }
 
@@ -257,14 +245,12 @@ impl InstallPixiEnvironmentSpec {
             .source_build(SourceBuildSpec {
                 source: PinnedSourceCodeLocation::new(manifest_source, build_source),
                 name,
-                channel_config: self.channel_config.clone(),
                 channels: self.channels.clone(),
                 build_environment: self.build_environment.clone(),
                 variant_configuration: self.variant_configuration.clone(),
                 variant_files: self.variant_files.clone(),
                 variants,
                 exclude_newer: self.exclude_newer.clone(),
-                enabled_protocols: self.enabled_protocols.clone(),
                 output_directory: None,
                 work_directory: None,
                 clean: false,

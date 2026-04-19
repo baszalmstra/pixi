@@ -1,10 +1,9 @@
 use itertools::chain;
 use miette::Diagnostic;
-use pixi_build_discovery::EnabledProtocols;
 use pixi_glob::GlobSet;
 use pixi_record::{CanonicalSourceLocation, PinnedSourceSpec, VariantValue};
 use pixi_spec::ResolvedExcludeNewer;
-use rattler_conda_types::{ChannelConfig, ChannelUrl};
+use rattler_conda_types::ChannelUrl;
 use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::instrument;
@@ -45,12 +44,6 @@ pub struct SourceBuildCacheStatusSpec {
 
     /// The build environment used to build the package.
     pub build_environment: BuildEnvironment,
-
-    /// The channel configuration to use when building the package.
-    pub channel_config: ChannelConfig,
-
-    /// The protocols that are enabled when discovering the build backend.
-    pub enabled_protocols: EnabledProtocols,
 
     /// The specific variant values for this build. Different variants result
     /// in different cache keys to ensure they are cached separately.
@@ -289,8 +282,6 @@ impl SourceBuildCacheStatusSpec {
                     channels: self.channels.clone(),
                     exclude_newer: self.exclude_newer.clone(),
                     build_environment: self.build_environment.clone(),
-                    channel_config: self.channel_config.clone(),
-                    enabled_protocols: self.enabled_protocols.clone(),
                     variants: self.variants.clone(),
                 })
                 .await
@@ -365,14 +356,11 @@ impl SourceBuildCacheStatusSpec {
             .map_err_into_dispatcher(SourceBuildCacheStatusError::SourceCheckout)?;
 
         // Determine the backend parameters for the package.
+        // Deduplicated and cached by the compute engine via `DiscoveredBackendKey`.
         let backend = command_dispatcher
-            .discover_backend(
-                source_checkout.path.as_std_path(),
-                self.channel_config.clone(),
-                self.enabled_protocols.clone(),
-            )
+            .discovered_backend(source_checkout.path.as_std_path())
             .await
-            .map_err_with(|e| SourceBuildCacheStatusError::Discovery(Arc::new(e)))?;
+            .map_err_with(SourceBuildCacheStatusError::Discovery)?;
 
         // Compute hashes of the package configuration.
         let project_model_hash = backend

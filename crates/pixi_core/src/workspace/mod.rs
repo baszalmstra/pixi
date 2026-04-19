@@ -653,6 +653,7 @@ impl Workspace {
                     .or_else(|| BackendOverride::from_env().ok().flatten())
                     .unwrap_or_default(),
             )
+            .with_channel_config(self.channel_config())
             .execute_link_scripts(match self.config.run_post_link_scripts() {
                 RunPostLinkScripts::Insecure => true,
                 RunPostLinkScripts::False => false,

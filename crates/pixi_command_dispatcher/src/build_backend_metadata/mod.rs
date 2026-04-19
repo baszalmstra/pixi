@@ -1,13 +1,13 @@
 use futures::{SinkExt, channel::mpsc::UnboundedSender};
 use miette::Diagnostic;
 use once_cell::sync::Lazy;
-use pixi_build_discovery::{CommandSpec, EnabledProtocols};
+use pixi_build_discovery::CommandSpec;
 use pixi_build_frontend::Backend;
 use pixi_build_types::procedures::conda_outputs::CondaOutputsParams;
 use pixi_glob::GlobSet;
 use pixi_record::{CanonicalSourceLocation, PinnedBuildSourceSpec, PinnedSourceSpec, VariantValue};
 use pixi_spec::{ResolvedExcludeNewer, SourceAnchor, SourceLocationSpec};
-use rattler_conda_types::{ChannelConfig, ChannelUrl};
+use rattler_conda_types::ChannelUrl;
 use std::time::SystemTime;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -70,9 +70,6 @@ pub struct BuildBackendMetadataSpec {
     /// See [`PinnedSourceSpec::matches_source_spec`] how the matching is done.
     pub preferred_build_source: Option<PinnedSourceSpec>,
 
-    /// The channel configuration to use for the build backend.
-    pub channel_config: ChannelConfig,
-
     /// Exclude packages newer than the configured cutoffs when solving backend environments.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_newer: Option<ResolvedExcludeNewer>,
@@ -89,10 +86,6 @@ pub struct BuildBackendMetadataSpec {
 
     /// Variant file paths provided by the workspace.
     pub variant_files: Option<Vec<PathBuf>>,
-
-    /// The protocols that are enabled for this source
-    #[serde(skip_serializing_if = "crate::is_default")]
-    pub enabled_protocols: EnabledProtocols,
 }
 
 /// The metadata of a source checkout.
@@ -138,15 +131,12 @@ impl BuildBackendMetadataSpec {
             .await
             .map_err_into_dispatcher(BuildBackendMetadataError::SourceCheckout)?;
 
-        // Discover information about the build backend from the source code (cached by path).
+        // Discover information about the build backend from the source code.
+        // Deduplicated and cached by the compute engine via `DiscoveredBackendKey`.
         let discovered_backend = command_dispatcher
-            .discover_backend(
-                manifest_source_checkout.path.as_std_path(),
-                self.channel_config.clone(),
-                self.enabled_protocols.clone(),
-            )
+            .discovered_backend(manifest_source_checkout.path.as_std_path())
             .await
-            .map_err_with(|e| BuildBackendMetadataError::Discovery(Arc::new(e)))?;
+            .map_err_with(BuildBackendMetadataError::Discovery)?;
 
         // Determine the location of the source to build from.
         let manifest_source_anchor =
@@ -225,7 +215,7 @@ impl BuildBackendMetadataSpec {
             channel_urls: self.channels.clone(),
             build_environment: self.build_environment.clone(),
             exclude_newer: self.exclude_newer.clone(),
-            enabled_protocols: self.enabled_protocols.clone(),
+            enabled_protocols: command_dispatcher.enabled_protocols().as_ref().clone(),
             source: manifest_source_location.clone().into(),
         };
         let cache_read_result = command_dispatcher
@@ -288,9 +278,7 @@ impl BuildBackendMetadataSpec {
                     .path
                     .as_dir_or_file_parent()
                     .to_path_buf(),
-                channel_config: self.channel_config.clone(),
                 exclude_newer: self.exclude_newer.clone(),
-                enabled_protocols: self.enabled_protocols.clone(),
                 workspace_root: AbsPath::new(&discovered_backend.init_params.workspace_root)
                     .expect("workspace root is not absolute")
                     .assume_dir()

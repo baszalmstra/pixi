@@ -28,7 +28,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    CommandDispatcherError,
+    CommandDispatcher, CommandDispatcherError,
     build::{Dependencies, DependencySource, PixiRunExports, WithSource},
 };
 
@@ -65,9 +65,6 @@ pub struct BackendSourceBuildSpec {
 
     /// The channels to use for solving.
     pub channels: Vec<ChannelUrl>,
-
-    /// The channel configuration to use to convert channel urls.
-    pub channel_config: ChannelConfig,
 
     /// The working directory to use for the build.
     pub work_directory: PathBuf,
@@ -137,8 +134,10 @@ pub struct BackendBuiltSource {
 impl BackendSourceBuildSpec {
     pub async fn build(
         self,
+        command_dispatcher: CommandDispatcher,
         log_sink: UnboundedSender<String>,
     ) -> Result<BackendBuiltSource, CommandDispatcherError<BackendSourceBuildError>> {
+        let channel_config = command_dispatcher.channel_config();
         match self.method {
             BackendSourceBuildMethod::BuildV1(params) => {
                 Self::build_v1(
@@ -151,7 +150,7 @@ impl BackendSourceBuildSpec {
                     self.source_dir,
                     self.work_directory,
                     self.channels,
-                    self.channel_config,
+                    channel_config,
                     log_sink,
                 )
                 .await
@@ -170,7 +169,7 @@ impl BackendSourceBuildSpec {
         source_dir: PathBuf,
         work_directory: PathBuf,
         channels: Vec<ChannelUrl>,
-        channel_config: ChannelConfig,
+        channel_config: Arc<ChannelConfig>,
         mut log_sink: UnboundedSender<String>,
     ) -> Result<BackendBuiltSource, CommandDispatcherError<BackendSourceBuildError>> {
         let built_package = backend
