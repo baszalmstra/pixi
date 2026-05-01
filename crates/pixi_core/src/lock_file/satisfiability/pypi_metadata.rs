@@ -4,12 +4,10 @@
 //! 1. Read metadata from local pyproject.toml files
 //! 2. Compare locked metadata against current source tree metadata
 use std::collections::BTreeSet;
-use std::str::FromStr;
 
 use pep440_rs::{Version, VersionSpecifiers};
 use pep508_rs::Requirement;
 use pixi_install_pypi::LockedPypiRecord;
-use thiserror::Error;
 
 /// Metadata extracted from a local package source tree.
 #[derive(Debug, Clone)]
@@ -21,14 +19,6 @@ pub struct LocalPackageMetadata {
     pub requires_dist: Vec<Requirement>,
     /// The Python version requirement.
     pub requires_python: Option<VersionSpecifiers>,
-}
-
-/// Error that can occur when reading metadata from a source tree.
-#[derive(Debug, Error)]
-pub enum MetadataReadError {
-    /// Failed to parse the pyproject.toml file.
-    #[error("failed to parse pyproject.toml: {0}")]
-    ParseError(String),
 }
 
 /// The result of comparing locked metadata against current metadata.
@@ -129,46 +119,6 @@ fn normalize_requirement(req: &Requirement) -> String {
     // Use the canonical string representation
     // The pep508_rs library already normalizes package names and versions
     req.to_string()
-}
-
-/// Convert UV metadata to LocalPackageMetadata for comparison.
-///
-/// This is used when we build metadata using UV's DistributionDatabase
-/// for packages with dynamic metadata.
-pub fn from_uv_metadata(
-    metadata: &uv_distribution::Metadata,
-) -> Result<LocalPackageMetadata, MetadataReadError> {
-    // Convert version
-    let version = pep440_rs::Version::from_str(&metadata.version.to_string())
-        .map_err(|e| MetadataReadError::ParseError(format!("invalid version: {e}")))?;
-
-    // Convert requires_dist
-    let requires_dist: Vec<Requirement> = metadata
-        .requires_dist
-        .iter()
-        .map(|req| {
-            let req_str = req.to_string();
-            req_str
-                .parse::<Requirement>()
-                .map_err(|e| MetadataReadError::ParseError(format!("invalid requirement: {e}")))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Convert requires_python
-    let requires_python = metadata
-        .requires_python
-        .as_ref()
-        .map(|rp| {
-            pep440_rs::VersionSpecifiers::from_str(&rp.to_string())
-                .map_err(|e| MetadataReadError::ParseError(format!("invalid requires-python: {e}")))
-        })
-        .transpose()?;
-
-    Ok(LocalPackageMetadata {
-        version: Some(version),
-        requires_dist,
-        requires_python,
-    })
 }
 
 #[cfg(test)]
