@@ -4,6 +4,7 @@
 //! work units it composes. Source-record assembly is inlined into the
 //! orchestrator rather than promoted to its own Key, so the graph stays flat.
 
+pub(crate) mod prev_build_output;
 pub mod resolve_source_package;
 pub(crate) mod resolve_source_record;
 pub mod solve_conda;

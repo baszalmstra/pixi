@@ -24,6 +24,7 @@ use url::Url;
 pub use crate::cache::{ArtifactCache, WorkspaceCache};
 use crate::cache::{ArtifactCacheError, compute_artifact_cache_key, compute_workspace_key};
 use crate::compute_data::HasCacheDirs;
+use crate::keys::prev_build_output::PrevBuildOutput;
 use crate::{
     BackendSourceBuildError, BackendSourceBuildExt, BackendSourceBuildMethod,
     BackendSourceBuildPrefix, BackendSourceBuildSpec, BackendSourceBuildV1Method, BuildEnvironment,
@@ -239,6 +240,22 @@ async fn compute_inner(
     // install_prefix recurses into source entries via SourceBuildKey,
     // so build_records / host_records are all binaries on disk.
     let directories = Directories::new(&work_directory, spec.build_environment.host_platform);
+
+    // Workspace dirs are reused across builds so backend incremental
+    // state survives. The flip side is that whatever the previous
+    // backend run installed into the host prefix (the package being
+    // built; e.g. pip's `*.dist-info/`) is still sitting there. Those
+    // files aren't tracked by any conda-meta record, so neither the
+    // rattler installer below nor the backend's own pre/post diffing
+    // knows to evict them — and a version bump between builds ends up
+    // shipping both the old and new `dist-info` in the new artifact
+    // (prefix-dev/pixi#6036). Wipe them now using the manifest the
+    // previous successful build wrote alongside the workspace.
+    if let Some(prev) = PrevBuildOutput::read(&work_directory) {
+        prev.cleanup_host_prefix(&directories.host_prefix)
+            .map_err(|err| SourceBuildError::CleanupHostPrefix(Arc::new(err)))?;
+    }
+
     let (build_records, _build_install_result) = install_prefix(
         ctx,
         &spec,
@@ -341,12 +358,29 @@ async fn compute_inner(
             build: output.metadata.build.clone(),
             subdir: output.metadata.subdir.to_string(),
             source_dir: source_dir.clone(),
-            work_directory,
+            work_directory: work_directory.clone(),
             channels: spec.channels.clone(),
         })
         .await
         .map_err_with(SourceBuildError::from)
         .map_err(unwrap_dispatcher_err)?;
+
+    // Persist the list of files the backend just packaged so the
+    // next build (which will reuse this same workspace dir) can wipe
+    // them off the host prefix before re-running. Errors are
+    // surfaced: a build that succeeds but can't write the manifest
+    // would silently regress to the old failure mode on the next
+    // run, which is worse than failing fast here.
+    let archive_path = built.output_file.clone();
+    let prev_output = tokio::task::spawn_blocking(move || {
+        PrevBuildOutput::from_built_archive(&archive_path)
+    })
+    .await
+    .expect("read paths.json task panicked")
+    .map_err(|err| SourceBuildError::ReadIndexJson(Arc::new(err)))?;
+    prev_output
+        .write(&work_directory)
+        .map_err(|err| SourceBuildError::WritePrevBuildOutput(Arc::new(err)))?;
 
     // Synthesize a RepoDataRecord from the built .conda so the cache
     // can persist it alongside the artifact.

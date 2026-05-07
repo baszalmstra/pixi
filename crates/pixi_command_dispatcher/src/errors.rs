@@ -81,6 +81,14 @@ pub enum SourceBuildError {
 
     #[error(transparent)]
     GlobSet(Arc<pixi_glob::GlobSetError>),
+
+    #[error(
+        "failed to clean up files left in the host prefix by the previous source build"
+    )]
+    CleanupHostPrefix(#[source] Arc<std::io::Error>),
+
+    #[error("failed to record the files packaged by this build for cleanup on the next build")]
+    WritePrevBuildOutput(#[source] Arc<std::io::Error>),
 }
 
 impl From<InvalidPackageNameError> for SourceBuildError {
