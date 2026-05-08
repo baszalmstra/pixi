@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use indexmap::IndexMap;
 use pep440_rs::{Version, VersionSpecifiers};
-use pep508_rs::{PackageName, Requirement};
+use pep508_rs::{PackageName, Requirement, VersionOrUrl};
 use pixi_install_pypi::LockedPypiRecord;
 use uv_normalize::ExtraName;
 
@@ -116,12 +116,48 @@ pub fn compare_metadata(
 
 /// Normalize a requirement for comparison purposes.
 ///
-/// This ensures that semantically equivalent requirements compare equal,
-/// regardless of formatting differences (e.g., whitespace, order of extras).
+/// Mirrors `rattler_lock`'s lock-file serialization (which uses
+/// `VerbatimUrl::given()` for path/URL requirements) so that a requirement
+/// round-tripped through the lock file compares equal to the same
+/// requirement freshly extracted by `to_requirements()`. Plain
+/// `Requirement::Display` would emit the resolved `file:///...` URL on the
+/// fresh side and the lock-file's `given` form on the deserialized side
+/// (resolved against the workspace root, not the parent package), causing
+/// transitive path deps like `b @ ../b` to spuriously diff (#6047).
 fn normalize_requirement(req: &Requirement) -> String {
-    // Use the canonical string representation
-    // The pep508_rs library already normalizes package names and versions
-    req.to_string()
+    let extras = if req.extras.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            req.extras
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let version_or_url = req
+        .version_or_url
+        .as_ref()
+        .map(|vou| match vou {
+            VersionOrUrl::VersionSpecifier(specifier) => specifier
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            VersionOrUrl::Url(url) => match url.given() {
+                Some(given) => format!(" @ {given}"),
+                None => format!(" @ {url}"),
+            },
+        })
+        .unwrap_or_default();
+    let marker = req
+        .marker
+        .contents()
+        .map(|c| format!(" ; {c}"))
+        .unwrap_or_default();
+    format!("{}{extras}{version_or_url}{marker}", req.name)
 }
 
 /// Replace each `pkg[group]` self-reference with the raw entries of
@@ -205,6 +241,29 @@ mod tests {
         // The important thing is we consistently compare them
         assert_eq!(normalize_requirement(&req1), normalize_requirement(&req1));
         let _ = req2; // silence unused warning
+    }
+
+    /// #6047: a transitive path requirement `b @ ../b` declared in a nested
+    /// package's metadata is parsed against the workspace root by uv on
+    /// every refresh, while the lock file faithfully stores the original
+    /// `given` spelling. `Requirement::Display` only renders the resolved
+    /// `file:///` URL, so a naive `req.to_string()` comparison oscillated
+    /// between locked and fresh representations even when nothing changed.
+    /// Normalize via `given()` so both sides round-trip to `b @ ../b`.
+    #[test]
+    fn test_normalize_requirement_path_uses_given() {
+        let workspace = std::path::PathBuf::from("/workspace");
+        let parent = std::path::PathBuf::from("/workspace/sub/c");
+        // The two parses produce different absolute resolved URLs for
+        // `../b` but share the same verbatim `given` spelling — that's
+        // exactly the locked-vs-fresh situation in #6047.
+        let from_workspace = Requirement::parse("b @ ../b", &workspace).unwrap();
+        let from_parent = Requirement::parse("b @ ../b", &parent).unwrap();
+        assert_eq!(
+            normalize_requirement(&from_workspace),
+            normalize_requirement(&from_parent),
+        );
+        assert_eq!(normalize_requirement(&from_workspace), "b @ ../b");
     }
 
     #[test]

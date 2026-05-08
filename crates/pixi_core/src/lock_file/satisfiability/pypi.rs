@@ -19,7 +19,7 @@ use pixi_spec::Subdirectory;
 use pixi_uv_context::UvResolutionContext;
 use pixi_uv_conversions::{
     configure_insecure_hosts_for_tls_bypass, into_pixi_reference, pypi_options_to_build_options,
-    pypi_options_to_index_locations, to_index_strategy,
+    pypi_options_to_index_locations, to_index_strategy, to_requirements,
 };
 use pypi_modifiers::pypi_marker_env::determine_marker_environment;
 use pypi_modifiers::pypi_tags::{get_pypi_tags, is_python_record};
@@ -351,6 +351,18 @@ pub(crate) fn pypi_satisfies_requirement(
                     project_root.join(locked_path.to_path()).normalize()
                 };
                 if locked_path.to_path() != install_path {
+                    // Transitive path requirements come from a parent
+                    // package's metadata (e.g. `b @ ../b` in `sub/c`'s
+                    // `[tool.uv.sources]`). uv resolves that path against
+                    // the workspace root rather than the parent package,
+                    // so the spec's `install_path` may point outside the
+                    // workspace even though the lock file holds the
+                    // correct workspace-relative location. Trust the lock
+                    // for transitives — drift is caught by the metadata
+                    // comparison in `compare_metadata` (#6047).
+                    if origin == RequirementOrigin::RequiresDist {
+                        return Ok(());
+                    }
                     return Err(PlatformUnsat::LockedPyPIPathMismatch {
                         name: spec.name.clone().to_string(),
                         install_path: install_path.to_string(),
@@ -746,22 +758,19 @@ async fn read_local_package_metadata(
         }
     };
 
-    // A round-trip failure here would be a uv bug, not "static doesn't
-    // apply", so propagate rather than swallow as `Ok(None)`.
-    let requires_dist_vec: Vec<pep508_rs::Requirement> = requires_dist
-        .requires_dist
-        .iter()
-        .map(|req| {
-            req.to_string()
-                .parse::<pep508_rs::Requirement>()
-                .map_err(|e| {
-                    PlatformUnsat::FailedToReadLocalMetadata(
-                        package_name.clone(),
-                        format!("Invalid requirement: {e}"),
-                    )
-                })
-        })
-        .collect::<Result<_, _>>()?;
+    // Use the same verbatim-preserving converter as the lock-time path
+    // (`resolve::pypi`). A bare `req.to_string().parse()` here drops the
+    // verbatim spelling for path/directory requirements (e.g. `b @ ../b`
+    // declared from a nested package) and bakes in an absolute `file:///`
+    // URL, causing a spurious "dependencies changed - added/removed" diff
+    // against the lock file on every subsequent `pixi lock` (#6047).
+    let requires_dist_vec: Vec<pep508_rs::Requirement> =
+        to_requirements(requires_dist.requires_dist.iter()).map_err(|e| {
+            PlatformUnsat::FailedToReadLocalMetadata(
+                package_name.clone(),
+                format!("Invalid requirement: {e}"),
+            )
+        })?;
 
     // Match the wheel METADATA shape used at lock time.
     let empty_optional_deps = IndexMap::new();

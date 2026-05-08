@@ -1227,17 +1227,13 @@ async fn lock_pypi_packages(
                                 process_uv_path_url(&dir.url, &dir.install_path, abs_project_root)
                                     .into_diagnostic()?;
 
-                            // Create the url for the lock file. This is based on the passed in URL
-                            // instead of from the source path to copy the path that was passed in
-                            // from the requirement.
-                            let location = if let Some(given) = dir.url.given() {
-                                Verbatim::new_with_given(
-                                    UrlOrPath::Path(install_path),
-                                    given.to_string(),
-                                )
-                            } else {
-                                Verbatim::new(UrlOrPath::Path(install_path))
-                            };
+                            // Always serialize the workspace-relative path computed by
+                            // `process_uv_path_url`. We deliberately drop UV's verbatim `given`:
+                            // for a transitively-discovered directory dep (e.g. `b @ ../b`
+                            // declared inside `sub/c/pyproject.toml`), the given is relative
+                            // to the parent package, not the lockfile, and storing it verbatim
+                            // would point outside the workspace.
+                            let location = Verbatim::new(UrlOrPath::Path(install_path));
                             let locked_version =
                                 pep440_rs::Version::from_str(&metadata.version.to_string())
                                     .into_diagnostic()
