@@ -8,7 +8,7 @@ use pixi_compute_reporters::OperationId;
 use pixi_git::resolver::RepositoryReference;
 use pixi_spec::{PixiSpec, ResolvedExcludeNewer};
 use pixi_variant::VariantValue;
-use rattler_conda_types::PackageName;
+use rattler_conda_types::{ChannelUrl, PackageName, Platform};
 use serde::Serialize;
 use url::Url;
 
@@ -130,6 +130,33 @@ pub trait SourceMetadataReporter: Send + Sync {
     fn on_queued(&self, spec: &SourceMetadataReporterSpec) -> OperationId;
     fn on_started(&self, id: OperationId);
     fn on_finished(&self, id: OperationId);
+}
+
+/// Reporter-facing view of one repodata gateway query.
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayQuerySpec {
+    pub channels: Vec<ChannelUrl>,
+    pub platforms: Vec<Platform>,
+}
+
+/// Per-query reporter for repodata fetches issued through the rattler
+/// gateway. `on_queued` returns both the freshly-allocated
+/// [`OperationId`] and (optionally) the per-query
+/// [`rattler_repodata_gateway::Reporter`] that the gateway will call
+/// for download start/progress/complete events. Returning the reporter
+/// alongside the id lets implementations bake the id directly into the
+/// rattler reporter, so download callbacks can attribute themselves to
+/// this query without relying on task-local scope.
+pub trait GatewayReporter: Send + Sync {
+    fn on_queued(
+        &self,
+        spec: &GatewayQuerySpec,
+    ) -> (
+        OperationId,
+        Option<Box<dyn rattler_repodata_gateway::Reporter>>,
+    );
+    fn on_started(&self, query_id: OperationId);
+    fn on_finished(&self, query_id: OperationId);
 }
 
 pub trait BackendSourceBuildReporter: Send + Sync {

@@ -11,8 +11,8 @@ use crate::injected_config::{
 };
 use crate::reporter::{
     BackendSourceBuildReporter, BuildBackendMetadataReporter, CondaSolveReporter,
-    GitCheckoutReporter, InstantiateBackendReporter, PixiInstallReporter, PixiSolveReporter,
-    SourceMetadataReporter, SourceRecordReporter, UrlCheckoutReporter,
+    GatewayReporter, GitCheckoutReporter, InstantiateBackendReporter, PixiInstallReporter,
+    PixiSolveReporter, SourceMetadataReporter, SourceRecordReporter, UrlCheckoutReporter,
 };
 use crate::util::limits::ResolvedLimits;
 use crate::util::path::RootDir;
@@ -72,6 +72,7 @@ pub struct CommandDispatcherBuilder {
     source_metadata_reporter: Option<Arc<dyn SourceMetadataReporter>>,
     source_record_reporter: Option<Arc<dyn SourceRecordReporter>>,
     backend_source_build_reporter: Option<Arc<dyn BackendSourceBuildReporter>>,
+    gateway_reporter: Option<Arc<dyn GatewayReporter>>,
 }
 
 impl CommandDispatcherBuilder {
@@ -199,6 +200,15 @@ impl CommandDispatcherBuilder {
     ) -> Self {
         Self {
             backend_source_build_reporter: Some(reporter),
+            ..self
+        }
+    }
+
+    /// Register the per-query [`GatewayReporter`] used by repodata
+    /// gateway queries.
+    pub fn with_gateway_reporter(self, reporter: Arc<dyn GatewayReporter>) -> Self {
+        Self {
+            gateway_reporter: Some(reporter),
             ..self
         }
     }
@@ -468,6 +478,9 @@ impl CommandDispatcherBuilder {
             engine_builder = engine_builder.with_data(r);
         }
         if let Some(r) = self.backend_source_build_reporter.clone() {
+            engine_builder = engine_builder.with_data(r);
+        }
+        if let Some(r) = self.gateway_reporter.clone() {
             engine_builder = engine_builder.with_data(r);
         }
         if let Some(sem) = data.git_checkout_semaphore.clone() {

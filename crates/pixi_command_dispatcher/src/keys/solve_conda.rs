@@ -29,8 +29,10 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    SolveCondaEnvironmentSpec, SourceMetadata, compute_data::HasGateway,
-    solve_binary::SolveCondaExt, solve_conda::SolveCondaEnvironmentError,
+    GatewayQuerySpec, SolveCondaEnvironmentSpec, SourceMetadata,
+    compute_data::{BoxedGatewayReporter, HasGateway, HasGatewayReporter},
+    solve_binary::SolveCondaExt,
+    solve_conda::SolveCondaEnvironmentError,
 };
 
 /// Input to [`SolveCondaKey`]. All fields participate in the Key's
@@ -234,18 +236,39 @@ impl Key for SolveCondaKey {
         // Clone the gateway handle so we don't hold an immutable
         // borrow on `ctx` across the subsequent mutable-borrow solve.
         let gateway = ctx.global_data().gateway().clone();
-        let binary_repodata = gateway
-            .query(
-                spec.channels.iter().cloned().map(Channel::from_url),
-                [spec.platform, Platform::NoArch],
-                binary_match_specs
-                    .into_iter()
-                    .chain(constraint_match_specs)
-                    .chain(source_repodata_fetch_specs)
-                    .chain(dev_source_fetch_specs),
-            )
-            .recursive(true)
-            .await?;
+        let gateway_reporter = ctx.global_data().gateway_reporter().cloned();
+        let query_spec = GatewayQuerySpec {
+            channels: spec.channels.clone(),
+            platforms: vec![spec.platform, Platform::NoArch],
+        };
+        let (query_id, inner_reporter) = match gateway_reporter.as_deref() {
+            Some(r) => {
+                let (id, rep) = r.on_queued(&query_spec);
+                r.on_started(id);
+                (Some(id), rep)
+            }
+            None => (None, None),
+        };
+        let mut query = gateway.query(
+            spec.channels.iter().cloned().map(Channel::from_url),
+            [spec.platform, Platform::NoArch],
+            binary_match_specs
+                .into_iter()
+                .chain(constraint_match_specs)
+                .chain(source_repodata_fetch_specs)
+                .chain(dev_source_fetch_specs),
+        );
+        if let Some(r) = inner_reporter {
+            query = query.with_reporter(BoxedGatewayReporter(r));
+        }
+        let work = async move { query.recursive(true).await };
+        let binary_repodata = match query_id {
+            Some(id) => id.scope_active(work).await?,
+            None => work.await?,
+        };
+        if let (Some(r), Some(id)) = (gateway_reporter.as_deref(), query_id) {
+            r.on_finished(id);
+        }
 
         // Build the full solve spec and hand off to ctx.solve_conda
         // (semaphore + reporter lifecycle).

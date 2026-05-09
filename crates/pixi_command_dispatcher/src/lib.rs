@@ -117,9 +117,10 @@ pub use instantiate_tool_env::{InstantiateToolEnvironmentError, InstantiateToolE
 pub use keys::SourceMetadata;
 pub use reporter::{
     BackendSourceBuildReporter, BuildBackendMetadataReporter, CondaSolveReporter,
-    GitCheckoutReporter, InstantiateBackendReporter, PixiInstallReporter, PixiSolveEnvironmentSpec,
-    PixiSolveReporter, SourceMetadataReporter, SourceMetadataReporterSpec, SourceRecordReporter,
-    SourceRecordReporterSpec, UrlCheckoutReporter,
+    GatewayQuerySpec, GatewayReporter, GitCheckoutReporter, InstantiateBackendReporter,
+    PixiInstallReporter, PixiSolveEnvironmentSpec, PixiSolveReporter, SourceMetadataReporter,
+    SourceMetadataReporterSpec, SourceRecordReporter, SourceRecordReporterSpec,
+    UrlCheckoutReporter,
 };
 pub use resolved_backend_command::{ResolvedBackendCommand, ResolvedBackendCommandKey};
 use serde::Serialize;

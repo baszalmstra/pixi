@@ -1,0 +1,10 @@
+---
+source: crates/pixi_reporters/src/events/event.rs
+expression: "lines.join(\"\\n\")"
+---
+{"seq":0,"ts_unix_ns":1,"kind":"stream_header","schema_version":1,"started_at_unix_ns":1,"pixi_version":"0.0.0-test"}
+{"seq":1,"ts_unix_ns":2,"kind":"pixi_solve_queued","id":1,"parent":null,"environment":"default","platform":"linux-64","has_direct_conda_dependency":true}
+{"seq":2,"ts_unix_ns":3,"kind":"conda_solve_queued","id":2,"parent":1,"environment":"default","platform":"linux-64"}
+{"seq":3,"ts_unix_ns":4,"kind":"install_transaction_started","id":3,"operations":[{"kind":"install","name":"numpy","from_version":null,"to_version":"1.26.4","size_bytes":7500000,"build":"py312h7d4b309_0","channel":"https://conda.anaconda.org/conda-forge/","subdir":"linux-64"}]}
+{"seq":4,"ts_unix_ns":5,"kind":"install_download_progress","id":4,"bytes":1024,"total":2048}
+{"seq":5,"ts_unix_ns":6,"kind":"log","id":1,"level":"info","target":"pixi::solve","message":"starting solve"}

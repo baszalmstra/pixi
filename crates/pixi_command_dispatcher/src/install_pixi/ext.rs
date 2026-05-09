@@ -52,11 +52,18 @@ impl InstallPixiEnvironmentExt for ComputeCtx {
             r.on_started(id);
         }
 
-        // Build the rattler install reporter; it nests under the
-        // currently-active reporter context.
-        let install_reporter = pixi_install_reporter
-            .as_deref()
-            .and_then(PixiInstallReporter::create_install_reporter);
+        // Build the rattler install reporter inside the install's scope
+        // so reporter implementations can read OperationId::current().
+        let install_reporter = match reporter_id {
+            Some(id) => id.sync_scope_active(|| {
+                pixi_install_reporter
+                    .as_deref()
+                    .and_then(PixiInstallReporter::create_install_reporter)
+            }),
+            None => pixi_install_reporter
+                .as_deref()
+                .and_then(PixiInstallReporter::create_install_reporter),
+        };
 
         // Scope source builds fanned out below under this install's id.
         let work = install_inner(self, spec, install_reporter);

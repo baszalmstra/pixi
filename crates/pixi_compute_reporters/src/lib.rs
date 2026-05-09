@@ -12,11 +12,11 @@ use std::{
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use pixi_compute_engine::{DataStore, SpawnHook};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Globally-unique id for one reporter event. Allocated by
 /// [`OperationRegistry::allocate`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct OperationId(pub u64);
 
@@ -37,6 +37,11 @@ impl OperationId {
     /// scopes restore the previous id when they exit.
     pub async fn scope_active<F: Future>(self, fut: F) -> F::Output {
         CURRENT_OPERATION_ID.scope(Some(self), fut).await
+    }
+
+    /// Synchronous variant of [`Self::scope_active`].
+    pub fn sync_scope_active<R>(self, f: impl FnOnce() -> R) -> R {
+        CURRENT_OPERATION_ID.sync_scope(Some(self), f)
     }
 }
 

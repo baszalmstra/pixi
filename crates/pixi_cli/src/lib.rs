@@ -341,9 +341,11 @@ fn setup_logging(args: &Args, use_colors: bool) -> miette::Result<()> {
         .with_writer(IndicatifWriter::new(pixi_progress::global_multi_progress()))
         .without_time();
 
+    let event_stream_layer = pixi_reporters::events::event_stream_layer();
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt_layer)
+        .with(event_stream_layer)
         .init();
     Ok(())
 }

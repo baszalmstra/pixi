@@ -255,24 +255,42 @@ async fn compute_inner(
 
     // install_prefix recurses into source entries via SourceBuildKey,
     // so build_records / host_records are all binaries on disk.
+    //
+    // Build and host prefixes are independent: each takes a pre-resolved
+    // record list, writes to its own directory, and neither feeds the
+    // other's input (the `pin_compatible` resolution below uses the
+    // returned records but does not need them in any particular order).
+    // Run them concurrently on the compute engine.
     let directories = Directories::new(&work_directory, spec.build_environment.host_platform);
-    let (build_records, _build_install_result) = install_prefix(
-        ctx,
-        &spec,
-        InstallTarget::Build,
-        directories.build_prefix.clone(),
-        spec.record.build_packages.clone(),
-    )
-    .await?;
-
-    let (host_records, _host_install_result) = install_prefix(
-        ctx,
-        &spec,
-        InstallTarget::Host,
-        directories.host_prefix.clone(),
-        spec.record.host_packages.clone(),
-    )
-    .await?;
+    let mut parallel = ctx.parallel();
+    let build_spec = spec.clone();
+    let build_prefix_path = directories.build_prefix.clone();
+    let build_packages = spec.record.build_packages.clone();
+    let build_fut = parallel.compute(async move |ctx| {
+        install_prefix(
+            ctx,
+            &build_spec,
+            InstallTarget::Build,
+            build_prefix_path,
+            build_packages,
+        )
+        .await
+    });
+    let host_spec = spec.clone();
+    let host_prefix_path = directories.host_prefix.clone();
+    let host_packages = spec.record.host_packages.clone();
+    let host_fut = parallel.compute(async move |ctx| {
+        install_prefix(
+            ctx,
+            &host_spec,
+            InstallTarget::Host,
+            host_prefix_path,
+            host_packages,
+        )
+        .await
+    });
+    let ((build_records, _build_install_result), (host_records, _host_install_result)) =
+        futures::try_join!(build_fut, host_fut)?;
 
     // Resolve `pin_compatible` markers against the build/host records we
     // just produced. Visibility ordering:

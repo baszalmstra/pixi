@@ -1,4 +1,5 @@
 mod download_verify_reporter;
+pub mod events;
 mod git;
 mod main_progress_bar;
 mod release_notes;
@@ -11,13 +12,19 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use events::{
+    NoopSink, SinkHandle, StreamingBackendSourceBuildReporter,
+    StreamingCondaSolveReporter, StreamingGatewayReporter,
+    StreamingInstantiateBackendReporter, StreamingPixiInstallReporter,
+    StreamingPixiSolveReporter,
+};
 use git::GitCheckoutProgress;
 use indicatif::{MultiProgress, ProgressBar};
 use main_progress_bar::MainProgressBar;
 use parking_lot::Mutex;
 use pixi_command_dispatcher::{
-    CommandDispatcherBuilder, InstallPixiEnvironmentSpec, PixiSolveEnvironmentSpec,
-    SolveCondaEnvironmentSpec,
+    CommandDispatcherBuilder, GatewayQuerySpec, InstallPixiEnvironmentSpec,
+    PixiSolveEnvironmentSpec, SolveCondaEnvironmentSpec,
 };
 use pixi_compute_reporters::{OperationId, OperationRegistry};
 pub use release_notes::format_release_notes;
@@ -26,6 +33,9 @@ use sync_reporter::SyncReporter;
 use uv_configuration::RAYON_INITIALIZE;
 // Re-export the uv_reporter types for external use
 pub use uv_reporter::{UvReporter, UvReporterOptions};
+
+// Re-export for back-compat at the crate root.
+pub use events::EVENT_STREAM_ENV_VAR;
 
 /// Top-level progress reporter for `pixi`'s CLI. Use
 /// [`Self::register_with`] to wire it into a [`CommandDispatcherBuilder`];
@@ -42,18 +52,21 @@ pub struct TopLevelProgress {
     // bar is effectively a placeholder for future wiring.
     repodata_reporter: RepodataReporter,
     sync_reporter: SyncReporter,
+    event_sink: SinkHandle,
 }
 
 impl TopLevelProgress {
     /// Build an `Arc<Self>` anchored on the global multi-progress with
-    /// a fresh [`OperationRegistry`].
+    /// a fresh [`OperationRegistry`]. Reads [`EVENT_STREAM_ENV_VAR`] to
+    /// decide whether to enable JSONL event recording.
     pub fn from_global() -> Arc<Self> {
         let multi_progress = pixi_progress::global_multi_progress();
         let anchor_pb = multi_progress.add(ProgressBar::hidden());
-        Arc::new(Self::new(
+        Arc::new(Self::new_with_sink(
             OperationRegistry::new(),
             multi_progress,
             anchor_pb,
+            events::shared_sink(),
         ))
     }
 
@@ -69,6 +82,22 @@ impl TopLevelProgress {
         registry: Arc<OperationRegistry>,
         multi_progress: MultiProgress,
         anchor_pb: ProgressBar,
+    ) -> Self {
+        Self::new_with_sink(
+            registry,
+            multi_progress,
+            anchor_pb,
+            Arc::new(NoopSink) as SinkHandle,
+        )
+    }
+
+    /// Same as [`Self::new`] but lets the caller supply the event sink
+    /// directly (skipping the env-var lookup).
+    pub fn new_with_sink(
+        registry: Arc<OperationRegistry>,
+        multi_progress: MultiProgress,
+        anchor_pb: ProgressBar,
+        event_sink: SinkHandle,
     ) -> Self {
         let repodata_reporter = RepodataReporter::new(
             multi_progress.clone(),
@@ -97,26 +126,72 @@ impl TopLevelProgress {
             solve_bars: Mutex::new(HashMap::new()),
             repodata_reporter,
             sync_reporter: install_reporter,
+            event_sink,
         }
     }
 
     /// Register every sub-reporter this instance owns into the
     /// dispatcher builder. The git-checkout slot gets its inner
-    /// progress Arc directly; the rest go through `self`.
+    /// progress Arc directly; the rest go through `self`. When the
+    /// event sink is enabled, each reporter is wrapped in its
+    /// `Streaming*` decorator so events are emitted alongside the
+    /// indicatif output.
     pub fn register_with(
         self: Arc<Self>,
         builder: CommandDispatcherBuilder,
     ) -> CommandDispatcherBuilder {
-        let backend_source_build_reporter: Arc<
+        let registry = self.registry.clone();
+        let sink = self.event_sink.clone();
+        let backend_source_build_inner: Arc<
             dyn pixi_command_dispatcher::BackendSourceBuildReporter,
         > = Arc::new(self.sync_reporter.clone());
+        let backend_source_build_reporter: Arc<
+            dyn pixi_command_dispatcher::BackendSourceBuildReporter,
+        > = Arc::new(StreamingBackendSourceBuildReporter {
+            inner: backend_source_build_inner,
+            sink: sink.clone(),
+            registry: registry.clone(),
+        });
+
+        let pixi_solve: Arc<dyn pixi_command_dispatcher::PixiSolveReporter> =
+            Arc::new(StreamingPixiSolveReporter {
+                inner: self.clone(),
+                sink: sink.clone(),
+                registry: registry.clone(),
+            });
+        let conda_solve: Arc<dyn pixi_command_dispatcher::CondaSolveReporter> =
+            Arc::new(StreamingCondaSolveReporter {
+                inner: self.clone(),
+                sink: sink.clone(),
+                registry: registry.clone(),
+            });
+        let pixi_install: Arc<dyn pixi_command_dispatcher::PixiInstallReporter> =
+            Arc::new(StreamingPixiInstallReporter {
+                inner: self.clone(),
+                sink: sink.clone(),
+                registry: registry.clone(),
+            });
+        let instantiate_backend: Arc<dyn pixi_command_dispatcher::InstantiateBackendReporter> =
+            Arc::new(StreamingInstantiateBackendReporter {
+                inner: self.clone(),
+                sink: sink.clone(),
+                registry: registry.clone(),
+            });
+        let gateway: Arc<dyn pixi_command_dispatcher::GatewayReporter> =
+            Arc::new(StreamingGatewayReporter {
+                inner: self.clone(),
+                sink: sink.clone(),
+                registry: registry.clone(),
+            });
+
         builder
-            .with_pixi_solve_reporter(self.clone())
-            .with_conda_solve_reporter(self.clone())
-            .with_pixi_install_reporter(self.clone())
-            .with_instantiate_backend_reporter(self.clone())
+            .with_pixi_solve_reporter(pixi_solve)
+            .with_conda_solve_reporter(conda_solve)
+            .with_pixi_install_reporter(pixi_install)
+            .with_instantiate_backend_reporter(instantiate_backend)
             .with_git_checkout_reporter(self.source_checkout_reporter.clone())
             .with_backend_source_build_reporter(backend_source_build_reporter)
+            .with_gateway_reporter(gateway)
     }
 
     /// Clear the current progress bars without tearing down the reporter.
@@ -134,6 +209,7 @@ impl TopLevelProgress {
         self.solve_bars.lock().get(&id).copied()
     }
 }
+
 
 impl pixi_command_dispatcher::PixiInstallReporter for TopLevelProgress {
     fn on_queued(&self, _env: &InstallPixiEnvironmentSpec) -> OperationId {
@@ -185,6 +261,28 @@ impl pixi_command_dispatcher::PixiSolveReporter for TopLevelProgress {
     fn on_finished(&self, solve_id: OperationId) {
         self.solve_bars.lock().remove(&solve_id);
     }
+}
+
+impl pixi_command_dispatcher::GatewayReporter for TopLevelProgress {
+    fn on_queued(
+        &self,
+        _spec: &GatewayQuerySpec,
+    ) -> (
+        OperationId,
+        Option<Box<dyn rattler_repodata_gateway::Reporter>>,
+    ) {
+        let id = self.alloc();
+        // Hand back the long-lived RepodataReporter so the indicatif
+        // "fetching repodata" bar finally tracks downloads. It's
+        // shared across queries by design (one bar, all downloads).
+        let rep: Box<dyn rattler_repodata_gateway::Reporter> =
+            Box::new(self.repodata_reporter.clone());
+        (id, Some(rep))
+    }
+
+    fn on_started(&self, _id: OperationId) {}
+
+    fn on_finished(&self, _id: OperationId) {}
 }
 
 impl pixi_command_dispatcher::CondaSolveReporter for TopLevelProgress {

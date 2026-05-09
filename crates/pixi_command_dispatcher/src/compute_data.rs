@@ -21,8 +21,8 @@ use tokio::sync::Semaphore;
 use crate::cache::{BuildBackendMetadataCache, CacheDirs};
 use crate::reporter::{
     BackendSourceBuildReporter, BuildBackendMetadataReporter, CondaSolveReporter,
-    GitCheckoutReporter, InstantiateBackendReporter, PixiInstallReporter, PixiSolveReporter,
-    SourceMetadataReporter, SourceRecordReporter, UrlCheckoutReporter,
+    GatewayReporter, GitCheckoutReporter, InstantiateBackendReporter, PixiInstallReporter,
+    PixiSolveReporter, SourceMetadataReporter, SourceRecordReporter, UrlCheckoutReporter,
 };
 
 /// Access the conda repodata gateway from global data.
@@ -198,6 +198,32 @@ pub trait HasBackendSourceBuildReporter {
 impl HasBackendSourceBuildReporter for DataStore {
     fn backend_source_build_reporter(&self) -> Option<&Arc<dyn BackendSourceBuildReporter>> {
         self.try_get::<Arc<dyn BackendSourceBuildReporter>>()
+    }
+}
+
+/// Access the per-key gateway reporter.
+pub trait HasGatewayReporter {
+    fn gateway_reporter(&self) -> Option<&Arc<dyn GatewayReporter>>;
+}
+
+impl HasGatewayReporter for DataStore {
+    fn gateway_reporter(&self) -> Option<&Arc<dyn GatewayReporter>> {
+        self.try_get::<Arc<dyn GatewayReporter>>()
+    }
+}
+
+/// Adapter that lets `query.with_reporter(...)` accept a
+/// `Box<dyn rattler_repodata_gateway::Reporter>` returned from
+/// [`GatewayReporter::create_reporter`]. Rattler's API takes `impl
+/// Reporter + 'static` but doesn't auto-impl `Reporter` for the boxed
+/// trait object.
+pub struct BoxedGatewayReporter(pub Box<dyn rattler_repodata_gateway::Reporter>);
+
+impl rattler_repodata_gateway::Reporter for BoxedGatewayReporter {
+    fn download_reporter(
+        &self,
+    ) -> Option<&dyn rattler_repodata_gateway::DownloadReporter> {
+        self.0.download_reporter()
     }
 }
 

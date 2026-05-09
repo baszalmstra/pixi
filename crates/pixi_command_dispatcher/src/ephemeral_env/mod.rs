@@ -36,7 +36,11 @@ use thiserror::Error;
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::SolveCondaEnvironmentSpec;
-use crate::compute_data::{HasCacheDirs, HasGateway, HasInstantiateBackendReporter};
+use crate::compute_data::{
+    BoxedGatewayReporter, HasCacheDirs, HasGateway, HasGatewayReporter,
+    HasInstantiateBackendReporter,
+};
+use crate::reporter::GatewayQuerySpec;
 use crate::injected_config::{ChannelConfigKey, ToolBuildEnvironmentKey};
 use crate::install_binary::install_binary_records;
 use crate::reporter::InstantiateBackendReporter;
@@ -429,15 +433,36 @@ async fn fetch_binary_repodata(
         .into_match_specs(&channel_config)
         .map_err(|e| EphemeralEnvError::SpecConversion(Arc::new(e)))?;
 
-    gateway
-        .query(
-            spec.channels.iter().cloned().map(Channel::from_url),
-            [build_env.host_platform, Platform::NoArch],
-            match_specs.into_iter().chain(constraint_specs),
-        )
-        .recursive(true)
-        .await
-        .map_err(|e| EphemeralEnvError::Gateway(Arc::new(e)))
+    let gateway_reporter = ctx.global_data().gateway_reporter().cloned();
+    let query_spec = GatewayQuerySpec {
+        channels: spec.channels.clone(),
+        platforms: vec![build_env.host_platform, Platform::NoArch],
+    };
+    let (query_id, inner_reporter) = match gateway_reporter.as_deref() {
+        Some(r) => {
+            let (id, rep) = r.on_queued(&query_spec);
+            r.on_started(id);
+            (Some(id), rep)
+        }
+        None => (None, None),
+    };
+    let mut query = gateway.query(
+        spec.channels.iter().cloned().map(Channel::from_url),
+        [build_env.host_platform, Platform::NoArch],
+        match_specs.into_iter().chain(constraint_specs),
+    );
+    if let Some(r) = inner_reporter {
+        query = query.with_reporter(BoxedGatewayReporter(r));
+    }
+    let work = async move { query.recursive(true).await };
+    let result = match query_id {
+        Some(id) => id.scope_active(work).await,
+        None => work.await,
+    };
+    if let (Some(r), Some(id)) = (gateway_reporter.as_deref(), query_id) {
+        r.on_finished(id);
+    }
+    result.map_err(|e| EphemeralEnvError::Gateway(Arc::new(e)))
 }
 
 /// Validate that every dependency resolves to a [`BinarySpec`] and

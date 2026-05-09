@@ -25,7 +25,10 @@ indicatif = { workspace = true }
 # Utilities
 human_bytes = { workspace = true }
 regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # Pixi ecosystem
 pixi_build_discovery = { workspace = true }
@@ -49,4 +52,6 @@ uv-redacted = { workspace = true }
 uv-resolver = { workspace = true }
 
 [dev-dependencies]
-# Add test dependencies if needed
+insta = { workspace = true, features = ["json"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-util"] }
