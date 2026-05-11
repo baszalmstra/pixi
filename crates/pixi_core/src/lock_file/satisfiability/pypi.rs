@@ -340,37 +340,57 @@ pub(crate) fn pypi_satisfies_requirement(
         RequirementSource::Path { install_path, .. }
         | RequirementSource::Directory { install_path, .. } => {
             if let UrlOrPath::Path(locked_path) = &**locked_data.location() {
-                let install_path =
+                let install_path_typed =
                     Utf8TypedPathBuf::from(install_path.to_string_lossy().to_string());
-                let project_root =
+                let project_root_typed =
                     Utf8TypedPathBuf::from(project_root.to_string_lossy().to_string());
                 // Join relative paths with the project root
-                let locked_path = if locked_path.is_absolute() {
+                let locked_path_typed = if locked_path.is_absolute() {
                     locked_path.clone()
                 } else {
-                    project_root.join(locked_path.to_path()).normalize()
+                    project_root_typed.join(locked_path.to_path()).normalize()
                 };
-                if locked_path.to_path() != install_path {
-                    // Transitive path requirements come from a parent
-                    // package's metadata (e.g. `b @ ../b` in `sub/c`'s
-                    // `[tool.uv.sources]`). uv resolves that path against
-                    // the workspace root rather than the parent package,
-                    // so the spec's `install_path` may point outside the
-                    // workspace even though the lock file holds the
-                    // correct workspace-relative location. Trust the lock
-                    // for transitives — drift is caught by the metadata
-                    // comparison in `compare_metadata` (#6047).
-                    if origin == RequirementOrigin::RequiresDist {
-                        return Ok(());
-                    }
-                    return Err(PlatformUnsat::LockedPyPIPathMismatch {
-                        name: spec.name.clone().to_string(),
-                        install_path: install_path.to_string(),
-                        locked_path: locked_path.to_string(),
-                    }
-                    .into());
+                if locked_path_typed.to_path() == install_path_typed {
+                    return Ok(());
                 }
-                return Ok(());
+
+                // Compare via filesystem canonicalization: handles
+                // symlinks, mixed `./`/`..` segments, and Windows case
+                // differences uniformly.
+                let locked_canonical = dunce::canonicalize(Path::new(
+                    locked_path_typed.to_path().as_str(),
+                ))
+                .ok();
+                let install_canonical = dunce::canonicalize(install_path).ok();
+                if let (Some(a), Some(b)) = (&locked_canonical, &install_canonical)
+                    && a == b
+                {
+                    return Ok(());
+                }
+
+                // uv lowers a transitive path requirement (e.g.
+                // `b @ ../b` declared in `sub/c/pyproject.toml`) against
+                // the workspace root rather than the parent package, so
+                // the spec's `install_path` ends up outside the workspace
+                // and doesn't exist on disk. The lock-file holds the
+                // correct location, and metadata drift for the package
+                // is caught separately by `compare_metadata`. Trust the
+                // lock only when (a) this is a transitive requirement
+                // and (b) uv's `install_path` can't be canonicalized,
+                // i.e. it doesn't refer to a real directory (#6047).
+                if origin == RequirementOrigin::RequiresDist
+                    && install_canonical.is_none()
+                    && locked_canonical.is_some()
+                {
+                    return Ok(());
+                }
+
+                return Err(PlatformUnsat::LockedPyPIPathMismatch {
+                    name: spec.name.clone().to_string(),
+                    install_path: install_path_typed.to_string(),
+                    locked_path: locked_path_typed.to_string(),
+                }
+                .into());
             }
             Err(PlatformUnsat::LockedPyPIRequiresPath(spec.name.to_string()).into())
         }

@@ -202,6 +202,30 @@ fn process_uv_path_url(
     })
 }
 
+/// Whether `given` (as written by the user, e.g. `./sub/c` or `../b`),
+/// interpreted relative to the workspace root, resolves to the same
+/// directory as uv's resolved `install_path`. Used to decide whether the
+/// verbatim spelling can be safely round-tripped into the lock file.
+fn verbatim_resolves_to_install_path(
+    given: &str,
+    install_path: &Path,
+    project_root: &Path,
+) -> bool {
+    let given_path = PathBuf::from(given);
+    let candidate = if given_path.is_absolute() {
+        given_path
+    } else {
+        project_root.join(given_path)
+    };
+    match (
+        dunce::canonicalize(&candidate),
+        dunce::canonicalize(install_path),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 type CondaPythonPackages = HashMap<uv_normalize::PackageName, (PixiRecord, PypiPackageIdentifier)>;
 
 /// Prints the number of overridden uv PyPI package requests
@@ -1227,13 +1251,30 @@ async fn lock_pypi_packages(
                                 process_uv_path_url(&dir.url, &dir.install_path, abs_project_root)
                                     .into_diagnostic()?;
 
-                            // Always serialize the workspace-relative path computed by
-                            // `process_uv_path_url`. We deliberately drop UV's verbatim `given`:
-                            // for a transitively-discovered directory dep (e.g. `b @ ../b`
-                            // declared inside `sub/c/pyproject.toml`), the given is relative
-                            // to the parent package, not the lockfile, and storing it verbatim
-                            // would point outside the workspace.
-                            let location = Verbatim::new(UrlOrPath::Path(install_path));
+                            // Preserve the user's verbatim spelling only when it actually
+                            // resolves to `dir.install_path` from the workspace root. For
+                            // directly-declared deps (e.g. `c = { path = "sub/c" }` in the
+                            // workspace pyproject) it does, and we keep `sub/c` in the
+                            // lock. For transitively-discovered deps the given is relative
+                            // to the parent package (e.g. `b @ ../b` from `sub/c`), not the
+                            // workspace, so storing it verbatim would point outside the
+                            // workspace. In that case fall back to the workspace-relative
+                            // path computed by `process_uv_path_url`.
+                            let location = match dir.url.given() {
+                                Some(given)
+                                    if verbatim_resolves_to_install_path(
+                                        given,
+                                        &dir.install_path,
+                                        abs_project_root,
+                                    ) =>
+                                {
+                                    Verbatim::new_with_given(
+                                        UrlOrPath::Path(install_path),
+                                        given.to_string(),
+                                    )
+                                }
+                                _ => Verbatim::new(UrlOrPath::Path(install_path)),
+                            };
                             let locked_version =
                                 pep440_rs::Version::from_str(&metadata.version.to_string())
                                     .into_diagnostic()

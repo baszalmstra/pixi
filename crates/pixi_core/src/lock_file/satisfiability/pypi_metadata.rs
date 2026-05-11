@@ -3,12 +3,12 @@
 //! This module provides functionality to:
 //! 1. Read metadata from local pyproject.toml files
 //! 2. Compare locked metadata against current source tree metadata
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use indexmap::IndexMap;
 use pep440_rs::{Version, VersionSpecifiers};
-use pep508_rs::{PackageName, Requirement, VersionOrUrl};
+use pep508_rs::{PackageName, Requirement, VerbatimUrl, VersionOrUrl};
 use pixi_install_pypi::LockedPypiRecord;
 use uv_normalize::ExtraName;
 
@@ -56,36 +56,21 @@ pub fn compare_metadata(
     current: &LocalPackageMetadata,
 ) -> Option<MetadataMismatch> {
     let locked = &locked_record.data;
+    let locked_deps = locked.requires_dist();
+    let current_deps = current.requires_dist.as_slice();
 
-    // Compare requires_dist (as normalized sets)
-    let locked_deps: BTreeSet<String> = locked
-        .requires_dist()
+    let added: Vec<Requirement> = current_deps
         .iter()
-        .map(normalize_requirement)
+        .filter(|c| !locked_deps.iter().any(|l| requirements_equivalent(l, c)))
+        .cloned()
+        .collect();
+    let removed: Vec<Requirement> = locked_deps
+        .iter()
+        .filter(|l| !current_deps.iter().any(|c| requirements_equivalent(l, c)))
+        .cloned()
         .collect();
 
-    let current_deps: BTreeSet<String> = current
-        .requires_dist
-        .iter()
-        .map(normalize_requirement)
-        .collect();
-
-    if locked_deps != current_deps {
-        // Calculate the diff
-        let added: Vec<Requirement> = current
-            .requires_dist
-            .iter()
-            .filter(|r| !locked_deps.contains(&normalize_requirement(r)))
-            .cloned()
-            .collect();
-
-        let removed: Vec<Requirement> = locked
-            .requires_dist()
-            .iter()
-            .filter(|r| !current_deps.contains(&normalize_requirement(r)))
-            .cloned()
-            .collect();
-
+    if !added.is_empty() || !removed.is_empty() {
         return Some(MetadataMismatch::RequiresDist(RequiresDistDiff {
             added,
             removed,
@@ -114,50 +99,40 @@ pub fn compare_metadata(
     None
 }
 
-/// Normalize a requirement for comparison purposes.
+/// Whether two `requires_dist` entries refer to the same requirement.
 ///
-/// Mirrors `rattler_lock`'s lock-file serialization (which uses
-/// `VerbatimUrl::given()` for path/URL requirements) so that a requirement
-/// round-tripped through the lock file compares equal to the same
-/// requirement freshly extracted by `to_requirements()`. Plain
-/// `Requirement::Display` would emit the resolved `file:///...` URL on the
-/// fresh side and the lock-file's `given` form on the deserialized side
-/// (resolved against the workspace root, not the parent package), causing
-/// transitive path deps like `b @ ../b` to spuriously diff (#6047).
-fn normalize_requirement(req: &Requirement) -> String {
-    let extras = if req.extras.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "[{}]",
-            req.extras
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    };
-    let version_or_url = req
-        .version_or_url
-        .as_ref()
-        .map(|vou| match vou {
-            VersionOrUrl::VersionSpecifier(specifier) => specifier
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            VersionOrUrl::Url(url) => match url.given() {
-                Some(given) => format!(" @ {given}"),
-                None => format!(" @ {url}"),
-            },
-        })
-        .unwrap_or_default();
-    let marker = req
-        .marker
-        .contents()
-        .map(|c| format!(" ; {c}"))
-        .unwrap_or_default();
-    format!("{}{extras}{version_or_url}{marker}", req.name)
+/// Compares the structure directly (avoiding any string-format coupling
+/// with `rattler_lock`'s lock-file serialization). The non-trivial bit is
+/// URL/path requirements: `pep508_rs::PartialEq` for `VerbatimUrl` only
+/// compares the parsed `Url`, but the parsed URL of a transitive
+/// `b @ ../b` is resolution-context-dependent — the lock side reparses it
+/// against the workspace root, while the fresh side lowers it against
+/// the parent package. Prefer the verbatim spelling (`given`) when both
+/// sides have one, which is base-directory-independent (#6047).
+fn requirements_equivalent(a: &Requirement, b: &Requirement) -> bool {
+    a.name == b.name
+        && a.extras == b.extras
+        && a.marker == b.marker
+        && version_or_urls_equivalent(a.version_or_url.as_ref(), b.version_or_url.as_ref())
+}
+
+fn version_or_urls_equivalent(a: Option<&VersionOrUrl>, b: Option<&VersionOrUrl>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(VersionOrUrl::VersionSpecifier(x)), Some(VersionOrUrl::VersionSpecifier(y))) => {
+            x == y
+        }
+        (Some(VersionOrUrl::Url(x)), Some(VersionOrUrl::Url(y))) => verbatim_urls_equivalent(x, y),
+        _ => false,
+    }
+}
+
+fn verbatim_urls_equivalent(a: &VerbatimUrl, b: &VerbatimUrl) -> bool {
+    match (a.given(), b.given()) {
+        (Some(ga), Some(gb)) => ga == gb,
+        // Fall back to pep508_rs's `PartialEq`, which compares the parsed `Url`.
+        _ => a == b,
+    }
 }
 
 /// Replace each `pkg[group]` self-reference with the raw entries of
@@ -234,36 +209,35 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_requirement() {
-        let req1: Requirement = "numpy>=1.0".parse().unwrap();
-        let req2: Requirement = "numpy >= 1.0".parse().unwrap();
-        // Note: These may or may not be equal depending on pep508_rs normalization
-        // The important thing is we consistently compare them
-        assert_eq!(normalize_requirement(&req1), normalize_requirement(&req1));
-        let _ = req2; // silence unused warning
+    fn test_requirements_equivalent_basic() {
+        let r: Requirement = "numpy>=1.0".parse().unwrap();
+        assert!(requirements_equivalent(&r, &r));
+        let other: Requirement = "numpy>=2.0".parse().unwrap();
+        assert!(!requirements_equivalent(&r, &other));
     }
 
     /// #6047: a transitive path requirement `b @ ../b` declared in a nested
     /// package's metadata is parsed against the workspace root by uv on
-    /// every refresh, while the lock file faithfully stores the original
-    /// `given` spelling. `Requirement::Display` only renders the resolved
-    /// `file:///` URL, so a naive `req.to_string()` comparison oscillated
-    /// between locked and fresh representations even when nothing changed.
-    /// Normalize via `given()` so both sides round-trip to `b @ ../b`.
+    /// every refresh (producing one absolute `file:///` URL), while the
+    /// fresh side lowers it against the parent package's directory
+    /// (producing a different absolute URL). `pep508_rs::PartialEq` for
+    /// `VerbatimUrl` compares the parsed URLs, so the structures
+    /// disagree — but both sides preserve the same verbatim `given`
+    /// spelling, and that's what we compare on.
     #[test]
-    fn test_normalize_requirement_path_uses_given() {
+    fn test_requirements_equivalent_path_uses_given() {
         let workspace = std::path::PathBuf::from("/workspace");
         let parent = std::path::PathBuf::from("/workspace/sub/c");
-        // The two parses produce different absolute resolved URLs for
-        // `../b` but share the same verbatim `given` spelling — that's
-        // exactly the locked-vs-fresh situation in #6047.
         let from_workspace = Requirement::parse("b @ ../b", &workspace).unwrap();
         let from_parent = Requirement::parse("b @ ../b", &parent).unwrap();
-        assert_eq!(
-            normalize_requirement(&from_workspace),
-            normalize_requirement(&from_parent),
+        // Sanity-check that `pep508_rs`'s built-in equality disagrees —
+        // otherwise this test isn't actually exercising the verbatim
+        // fallback.
+        assert_ne!(
+            from_workspace, from_parent,
+            "pep508_rs PartialEq should differ when URL bases differ; the test has no value otherwise"
         );
-        assert_eq!(normalize_requirement(&from_workspace), "b @ ../b");
+        assert!(requirements_equivalent(&from_workspace, &from_parent));
     }
 
     #[test]
