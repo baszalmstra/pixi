@@ -208,9 +208,19 @@ mod tests {
     }
 
     #[test]
-    fn debug_git_url_at_sha_roundtrip() {
-        // Investigate where `@<40-hex>` gets rewritten to `#<40-hex>`.
-        // Try several scheme variants.
+    fn git_url_with_full_sha_ref_roundtrips_through_pep508() {
+        // Sanity check for the hypothesis in pixi#6062 that pep508_rs +
+        // url::Url rewrite `@<40-hex>` into `#<40-hex>` on Display round-trip.
+        // It doesn't: across schemes (ssh, ssh-with-userinfo, https) and
+        // across ref shapes (full sha, tag, branch), Requirement::from_str
+        // followed by Display preserves the original string verbatim.
+        //
+        // Whatever flips `@<sha>` → `#<sha>` on the lock-write side is NOT
+        // this pep508_rs round-trip, so investigation needs to focus on the
+        // uv producer (e.g. how `database.get_or_build_wheel_metadata` and
+        // `database.requires_dist` materialise the git URL on their
+        // respective sides) and on `rattler_lock`'s YAML serializer for
+        // `requires_dist`.
         let cases = [
             "pkg @ git+ssh://host/repo@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "pkg @ git+ssh://git@host/repo@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -220,11 +230,53 @@ mod tests {
         ];
         for input in cases {
             let req: Requirement = input.parse().unwrap();
-            let out = req.to_string();
-            eprintln!("INPUT:  {input}");
-            eprintln!("OUTPUT: {out}");
-            eprintln!("---");
+            assert_eq!(req.to_string(), input, "round-trip changed `{input}`");
         }
+    }
+
+    #[test]
+    fn pixi_to_requirements_and_uv_display_match_for_full_sha() {
+        // Two paths produce the `requires_dist` strings compared in
+        // `compare_metadata`:
+        //   • lock side: pixi's `to_requirements()` over the uv requirement,
+        //     stored as `pep508_rs::Requirement`, serialised to YAML via its
+        //     `Display`, and parsed back on read.
+        //   • live side: `req.to_string()` on the uv requirement returned by
+        //     `database.requires_dist`, then parsed into `pep508_rs::Requirement`.
+        //
+        // For pixi#6062 to manifest the way the reporter describes, these
+        // two paths would have to diverge on `rev = <full-sha>` git deps.
+        // This test pins down that with the uv requirement pixi itself
+        // builds via `as_uv_req`, both paths produce the same string and
+        // the round-trip survives pep508 re-parse. The bug therefore must
+        // originate in a different uv-side requirement (e.g. one produced
+        // by `database.requires_dist` over a wheel METADATA file), not in
+        // the conversion layer.
+        use pixi_pypi_spec::PixiPypiSpec;
+        use pixi_uv_conversions::{as_uv_req, to_requirements};
+
+        let pep_req = pep508_rs::Requirement::from_str(
+            "dacite @ git+ssh://git@github.com/konradhalas/dacite.git@9898ccbb783e7e6a35ae165e7deb9fa84edfe21c",
+        )
+        .unwrap();
+        let pixi_spec = PixiPypiSpec::try_from(pep_req).unwrap();
+        let uv_req = as_uv_req(&pixi_spec, "dacite", std::path::Path::new("/")).unwrap();
+
+        let live_string = uv_req.to_string();
+        let pep_reqs = to_requirements(std::iter::once(&uv_req)).unwrap();
+        let lock_string = pep_reqs[0].to_string();
+        let reparsed: pep508_rs::Requirement = lock_string.parse().unwrap();
+
+        assert_eq!(live_string, lock_string);
+        assert_eq!(lock_string, reparsed.to_string());
+        assert!(
+            live_string.contains("@9898ccbb783e7e6a35ae165e7deb9fa84edfe21c"),
+            "expected `@<sha>` form, got `{live_string}`"
+        );
+        assert!(
+            !live_string.contains("#9898ccbb783e7e6a35ae165e7deb9fa84edfe21c"),
+            "expected no `#<sha>` form, got `{live_string}`"
+        );
     }
 
     #[test]
