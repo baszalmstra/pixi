@@ -340,48 +340,25 @@ pub(crate) fn pypi_satisfies_requirement(
         RequirementSource::Path { install_path, .. }
         | RequirementSource::Directory { install_path, .. } => {
             if let UrlOrPath::Path(locked_path) = &**locked_data.location() {
+                // Lexically normalize both sides (collapse `.`/`..`,
+                // join relative locked paths onto the project root).
+                // The caller is expected to have rebased relative-path
+                // URLs in transitive `requires_dist` against the
+                // declaring package's directory (see
+                // `rebase_relative_path_requirement`), so
+                // `install_path` here is reliable.
                 let install_path_typed =
-                    Utf8TypedPathBuf::from(install_path.to_string_lossy().to_string());
+                    Utf8TypedPathBuf::from(install_path.to_string_lossy().to_string())
+                        .normalize();
                 let project_root_typed =
                     Utf8TypedPathBuf::from(project_root.to_string_lossy().to_string());
-                // Join relative paths with the project root
                 let locked_path_typed = if locked_path.is_absolute() {
-                    locked_path.clone()
+                    locked_path.clone().normalize()
                 } else {
                     project_root_typed.join(locked_path.to_path()).normalize()
                 };
-                if locked_path_typed.to_path() == install_path_typed {
-                    return Ok(());
-                }
 
-                // Compare via filesystem canonicalization: handles
-                // symlinks, mixed `./`/`..` segments, and Windows case
-                // differences uniformly.
-                let locked_canonical = dunce::canonicalize(Path::new(
-                    locked_path_typed.to_path().as_str(),
-                ))
-                .ok();
-                let install_canonical = dunce::canonicalize(install_path).ok();
-                if let (Some(a), Some(b)) = (&locked_canonical, &install_canonical)
-                    && a == b
-                {
-                    return Ok(());
-                }
-
-                // uv lowers a transitive path requirement (e.g.
-                // `b @ ../b` declared in `sub/c/pyproject.toml`) against
-                // the workspace root rather than the parent package, so
-                // the spec's `install_path` ends up outside the workspace
-                // and doesn't exist on disk. The lock-file holds the
-                // correct location, and metadata drift for the package
-                // is caught separately by `compare_metadata`. Trust the
-                // lock only when (a) this is a transitive requirement
-                // and (b) uv's `install_path` can't be canonicalized,
-                // i.e. it doesn't refer to a real directory (#6047).
-                if origin == RequirementOrigin::RequiresDist
-                    && install_canonical.is_none()
-                    && locked_canonical.is_some()
-                {
+                if locked_path_typed == install_path_typed {
                     return Ok(());
                 }
 
@@ -394,6 +371,53 @@ pub(crate) fn pypi_satisfies_requirement(
             }
             Err(PlatformUnsat::LockedPyPIRequiresPath(spec.name.to_string()).into())
         }
+    }
+}
+
+/// Re-resolve a relative-path URL in a requirement against the directory
+/// where the requirement was originally declared.
+///
+/// At lock-write time, uv's full resolver lowers a transitive
+/// `b @ ../b` declared in `sub/c/pyproject.toml` against `sub/c`'s
+/// directory, producing the correct `install_path = <workspace>/sub/b`.
+/// At satisfiability time we re-hydrate the same requirement from the
+/// locked record's `requires_dist`, but `rattler_lock`'s deserializer
+/// parses it with `base_dir = workspace_root`, leaving the resolved URL
+/// pointing at `<workspace>/../b` — outside the workspace.
+///
+/// Calling this with `declaring_dir = <workspace>/sub/c` rewrites the
+/// requirement's URL to use the same base uv used at lock-write, so the
+/// downstream `install_path` matches the locked location exactly. The
+/// verbatim `given` ("../b") is preserved.
+///
+/// No filesystem access — pure path arithmetic via
+/// `pep508_rs::VerbatimUrl::from_path`.
+pub(crate) fn rebase_relative_path_requirement(
+    req: pep508_rs::Requirement,
+    declaring_dir: &Path,
+) -> pep508_rs::Requirement {
+    let Some(pep508_rs::VersionOrUrl::Url(url)) = &req.version_or_url else {
+        return req;
+    };
+    let Some(given) = url.given() else {
+        return req;
+    };
+    // Skip absolute paths and anything that already has a URL scheme —
+    // those are resolution-context-independent.
+    if given.contains("://") {
+        return req;
+    }
+    let given_path = std::path::PathBuf::from(given);
+    if given_path.is_absolute() {
+        return req;
+    }
+    let Ok(rebased) = pep508_rs::VerbatimUrl::from_path(&given_path, declaring_dir) else {
+        return req;
+    };
+    let rebased = rebased.with_given(given.to_string());
+    pep508_rs::Requirement {
+        version_or_url: Some(pep508_rs::VersionOrUrl::Url(rebased)),
+        ..req
     }
 }
 

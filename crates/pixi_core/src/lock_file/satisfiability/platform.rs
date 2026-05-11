@@ -36,7 +36,10 @@ use uv_distribution_types::{RequirementSource, RequiresPython};
 
 use super::errors::{LocalMetadataMismatch, PlatformUnsat, SolveGroupUnsat};
 use super::legacy;
-use super::pypi::{lock_pypi_packages, pypi_satisfies_editable, pypi_satisfies_requirement};
+use super::pypi::{
+    lock_pypi_packages, pypi_satisfies_editable, pypi_satisfies_requirement,
+    rebase_relative_path_requirement,
+};
 use super::pypi_metadata;
 use super::source_record::{
     verify_build_source_matches_manifest, verify_partial_source_record_against_backend,
@@ -945,8 +948,11 @@ async fn verify_package_platform_satisfiability(
                         };
                         if let Some(current_metadata) =
                             ctx.static_metadata_cache.get(&absolute_path)
-                            && let Some(mismatch) =
-                                pypi_metadata::compare_metadata(record, &current_metadata)
+                            && let Some(mismatch) = pypi_metadata::compare_metadata(
+                                record,
+                                &current_metadata,
+                                &absolute_path,
+                            )
                         {
                             let local_mismatch = match mismatch {
                                 pypi_metadata::MetadataMismatch::RequiresDist(diff) => {
@@ -1001,17 +1007,41 @@ async fn verify_package_platform_satisfiability(
                 }
 
                 // Add all the requirements of the package to the queue.
+                //
+                // Relative-path URLs in a package's `requires_dist` were
+                // written in that package's own `pyproject.toml`, so they
+                // are relative to *its* directory. `rattler_lock`'s
+                // deserializer parses them with `base_dir = workspace
+                // root`, which is wrong for transitives (e.g. `b @ ../b`
+                // declared in `sub/c/pyproject.toml` resolves to outside
+                // the workspace). Rebase against the declaring package's
+                // directory so the resulting `install_path` matches what
+                // uv's full resolver produced at lock-write time (#6047).
+                let declaring_dir: Option<PathBuf> = match &**pkg.location() {
+                    UrlOrPath::Path(p) if p.is_absolute() => {
+                        Some(PathBuf::from(p.as_str()))
+                    }
+                    UrlOrPath::Path(p) => Some(ctx.project_root.join(p.as_str())),
+                    UrlOrPath::Url(_) => None,
+                };
+
                 for requirement in pkg.requires_dist() {
-                    let requirement =
-                        match pep508_requirement_to_uv_requirement(requirement.clone()) {
-                            Ok(requirement) => requirement,
-                            Err(err) => {
-                                delayed_pypi_error.get_or_insert_with(|| {
-                                    Box::new(ConversionError::NameConversion(err).into())
-                                });
-                                continue;
-                            }
-                        };
+                    let requirement = match &declaring_dir {
+                        Some(dir) => {
+                            rebase_relative_path_requirement(requirement.clone(), dir)
+                        }
+                        None => requirement.clone(),
+                    };
+                    let requirement = match pep508_requirement_to_uv_requirement(requirement)
+                    {
+                        Ok(requirement) => requirement,
+                        Err(err) => {
+                            delayed_pypi_error.get_or_insert_with(|| {
+                                Box::new(ConversionError::NameConversion(err).into())
+                            });
+                            continue;
+                        }
+                    };
 
                     // Skip this requirement if it does not apply.
                     if !requirement.evaluate_markers(Some(marker_environment), &extras) {

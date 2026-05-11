@@ -205,7 +205,13 @@ fn process_uv_path_url(
 /// Whether `given` (as written by the user, e.g. `./sub/c` or `../b`),
 /// interpreted relative to the workspace root, resolves to the same
 /// directory as uv's resolved `install_path`. Used to decide whether the
-/// verbatim spelling can be safely round-tripped into the lock file.
+/// verbatim spelling can be safely round-tripped into the lock file: if
+/// the `given` was relative to a *parent package* (transitive
+/// `tool.uv.sources` entry) it points outside the workspace and would
+/// break installation.
+///
+/// Pure lexical comparison — no filesystem access — so the same logic
+/// can be (and is) applied at satisfiability time.
 fn verbatim_resolves_to_install_path(
     given: &str,
     install_path: &Path,
@@ -217,13 +223,24 @@ fn verbatim_resolves_to_install_path(
     } else {
         project_root.join(given_path)
     };
-    match (
-        dunce::canonicalize(&candidate),
-        dunce::canonicalize(install_path),
-    ) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
+    lexical_normalize(&candidate) == lexical_normalize(install_path)
+}
+
+/// Collapse `.`/`..` segments lexically. Unlike `std::fs::canonicalize`
+/// or `dunce::canonicalize` this never touches the filesystem and so
+/// produces the same answer regardless of whether the path exists.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
     }
+    out
 }
 
 type CondaPythonPackages = HashMap<uv_normalize::PackageName, (PixiRecord, PypiPackageIdentifier)>;
