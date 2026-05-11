@@ -752,6 +752,8 @@ async fn read_local_package_metadata(
         .requires_dist
         .iter()
         .map(|req| {
+            // DEBUG pixi#6062: dump live-side requires_dist strings
+            eprintln!("[6062-live] uv req for {}: {}", package_name, req);
             req.to_string()
                 .parse::<pep508_rs::Requirement>()
                 .map_err(|e| {

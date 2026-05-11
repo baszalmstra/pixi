@@ -61,12 +61,14 @@ pub fn compare_metadata(
     let locked_deps: BTreeSet<String> = locked
         .requires_dist()
         .iter()
+        .inspect(|r| eprintln!("[6062-locked] requires_dist: {}", r))
         .map(normalize_requirement)
         .collect();
 
     let current_deps: BTreeSet<String> = current
         .requires_dist
         .iter()
+        .inspect(|r| eprintln!("[6062-current] requires_dist: {}", r))
         .map(normalize_requirement)
         .collect();
 
