@@ -61,14 +61,12 @@ pub fn compare_metadata(
     let locked_deps: BTreeSet<String> = locked
         .requires_dist()
         .iter()
-        .inspect(|r| eprintln!("[6062-locked] requires_dist: {}", r))
         .map(normalize_requirement)
         .collect();
 
     let current_deps: BTreeSet<String> = current
         .requires_dist
         .iter()
-        .inspect(|r| eprintln!("[6062-current] requires_dist: {}", r))
         .map(normalize_requirement)
         .collect();
 
@@ -233,6 +231,44 @@ mod tests {
         for input in cases {
             let req: Requirement = input.parse().unwrap();
             assert_eq!(req.to_string(), input, "round-trip changed `{input}`");
+        }
+    }
+
+    #[test]
+    fn ssh_full_sha_paths_preserve_at_ref_form() {
+        // The reporter's pyproject.toml uses
+        //   git = "ssh://github.com/Z3ZEL/dep-test", rev = "<full-sha>"
+        // and the issue says the lock-file writer ends up with `#<sha>`
+        // form. This test pins down that with the ssh scheme — both with
+        // and without a `git@` userinfo — every conversion path pixi has
+        // produces `@<sha>` form, never `#<sha>`. The `#<sha>` form
+        // therefore cannot originate inside pixi's lock-write path on
+        // HEAD; it can only enter `requires_dist` via an externally
+        // produced lock file (older pixi version, hand-edit, or a
+        // different tool).
+        use pixi_pypi_spec::PixiPypiSpec;
+        use pixi_uv_conversions::{as_uv_req, to_requirements};
+
+        let sha = "84063a63c794e0ec1f37e5d895523b5bd31c3406";
+        for input in [
+            format!("dep-a @ git+ssh://github.com/Z3ZEL/dep-test@{sha}"),
+            format!("dep-a @ git+ssh://git@github.com/Z3ZEL/dep-test@{sha}"),
+        ] {
+            let pep_req = pep508_rs::Requirement::from_str(&input).unwrap();
+            let pixi_spec = PixiPypiSpec::try_from(pep_req).unwrap();
+            let uv_req = as_uv_req(&pixi_spec, "dep-a", std::path::Path::new("/")).unwrap();
+            let pep_reqs = to_requirements(std::iter::once(&uv_req)).unwrap();
+            let live = uv_req.to_string();
+            let lock = pep_reqs[0].to_string();
+
+            assert!(
+                live.contains(&format!("@{sha}")) && !live.contains(&format!("#{sha}")),
+                "uv Display produced `#<sha>` for `{input}`: {live}"
+            );
+            assert!(
+                lock.contains(&format!("@{sha}")) && !lock.contains(&format!("#{sha}")),
+                "pixi to_requirements produced `#<sha>` for `{input}`: {lock}"
+            );
         }
     }
 

@@ -1242,22 +1242,6 @@ async fn lock_pypi_packages(
                                 pep440_rs::Version::from_str(&metadata.version.to_string())
                                     .into_diagnostic()
                                     .context("cannot convert version")?;
-                            // DEBUG pixi#6062: dump lock-write-side metadata requires_dist
-                            for r in metadata.requires_dist.iter() {
-                                eprintln!(
-                                    "[6062-lockwrite-uv] {}: {}",
-                                    metadata.name, r
-                                );
-                            }
-                            let converted_requires_dist =
-                                to_requirements(metadata.requires_dist.iter())
-                                    .into_diagnostic()?;
-                            for r in converted_requires_dist.iter() {
-                                eprintln!(
-                                    "[6062-lockwrite-pep508] {}: {}",
-                                    metadata.name, r
-                                );
-                            }
                             locked_packages.push(
                                 UnresolvedPypiRecord::from(PypiPackageData::Source(Box::new(
                                     PypiSourceData {
@@ -1272,7 +1256,10 @@ async fn lock_pypi_packages(
                                             .map(|r| to_version_specifiers(&r))
                                             .transpose()
                                             .into_diagnostic()?,
-                                        requires_dist: converted_requires_dist,
+                                        requires_dist: to_requirements(
+                                            metadata.requires_dist.iter(),
+                                        )
+                                        .into_diagnostic()?,
                                         source_data: SourceData::default(),
                                     },
                                 )))
