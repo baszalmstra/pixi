@@ -208,6 +208,26 @@ mod tests {
     }
 
     #[test]
+    fn debug_git_url_at_sha_roundtrip() {
+        // Investigate where `@<40-hex>` gets rewritten to `#<40-hex>`.
+        // Try several scheme variants.
+        let cases = [
+            "pkg @ git+ssh://host/repo@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pkg @ git+ssh://git@host/repo@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pkg @ git+https://github.com/foo/bar@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pkg @ git+https://github.com/foo/bar@v1.0",
+            "pkg @ git+https://github.com/foo/bar@main",
+        ];
+        for input in cases {
+            let req: Requirement = input.parse().unwrap();
+            let out = req.to_string();
+            eprintln!("INPUT:  {input}");
+            eprintln!("OUTPUT: {out}");
+            eprintln!("---");
+        }
+    }
+
+    #[test]
     fn test_compare_metadata_same() {
         let locked = lock_for_test(PypiPackageData::Distribution(Box::new(
             PypiDistributionData {
