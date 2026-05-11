@@ -259,7 +259,15 @@ impl GenerateRecipe for PythonGenerator {
             host_platform
         };
 
-        // Map PyPI dependencies from pyproject.toml to conda dependencies
+        // Map PyPI dependencies from pyproject.toml to conda dependencies.
+        //
+        // When the same package is also declared in `[package.run-dependencies]`
+        // / `[package.host-dependencies]`, we still emit the pyproject.toml
+        // constraint alongside the Pixi one rather than silently dropping it.
+        // The conda solver intersects them, so the stricter constraint wins.
+        // This means a `textual >=8.2.5,<9` bump in `pyproject.toml` no longer
+        // gets shadowed by an older `textual >=8.0.2,<9` left in `pixi.toml`
+        // (see prefix-dev/pixi#6067).
         if !config.ignore_pypi_mapping() {
             if let Some(pypi_deps) = pyproject_metadata_provider.project_dependencies()? {
                 let mapped_deps = map_requirements_with_channels(
@@ -271,14 +279,11 @@ impl GenerateRecipe for PythonGenerator {
                 )
                 .await;
 
-                let skip_packages: HashSet<pixi_build_types::SourcePackageName> =
-                    model_dependencies
-                        .run
-                        .keys()
-                        .map(|k| (*k).clone())
-                        .collect();
-
-                for match_spec in filter_mapped_pypi_deps(&mapped_deps, &skip_packages) {
+                for match_spec in filter_mapped_pypi_deps(
+                    &mapped_deps,
+                    &model_dependencies.run,
+                    "[package.run-dependencies]",
+                ) {
                     requirements
                         .run
                         .push(matchspec_item(&match_spec.to_string()).into_diagnostic()?);
@@ -296,14 +301,11 @@ impl GenerateRecipe for PythonGenerator {
                 )
                 .await;
 
-                let skip_packages: HashSet<pixi_build_types::SourcePackageName> =
-                    model_dependencies
-                        .host
-                        .keys()
-                        .map(|k| (*k).clone())
-                        .collect();
-
-                for match_spec in filter_mapped_pypi_deps(&mapped_deps, &skip_packages) {
+                for match_spec in filter_mapped_pypi_deps(
+                    &mapped_deps,
+                    &model_dependencies.host,
+                    "[package.host-dependencies]",
+                ) {
                     requirements
                         .host
                         .push(matchspec_item(&match_spec.to_string()).into_diagnostic()?);

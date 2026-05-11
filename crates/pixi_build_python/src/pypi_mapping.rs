@@ -479,23 +479,42 @@ impl PyPiToCondaMapper {
     }
 }
 
-/// Filter mapped PyPI dependencies, returning only those not already specified
-/// in Pixi's run dependencies.
+/// Return mapped PyPI dependencies as conda `MatchSpec`s, ready to merge with
+/// the Pixi-declared dependencies of the package being built.
 ///
-/// This implements the merging behavior where Pixi dependencies take precedence
-/// over inferred pyproject.toml dependencies. Dependencies not specified in
-/// `skip_packages` are returned as MatchSpecs ready to be added to requirements.
+/// Previously this dropped any mapped PyPI dependency whose conda name also
+/// appeared in the corresponding Pixi dependency map. That silently shadowed
+/// stricter `pyproject.toml` constraints — a constraint bump in
+/// `pyproject.toml` had no effect when Pixi already listed the package (see
+/// prefix-dev/pixi#6067).
+///
+/// Now we always emit every mapped PyPI dependency. When the same package is
+/// declared in `pixi_dependencies` we just log it: the recipe ends up with
+/// both constraints and the conda solver intersects them, so the stricter of
+/// the two wins.
 pub fn filter_mapped_pypi_deps(
     mapped_deps: &[MappedCondaDependency],
-    skip_packages: &HashSet<pixi_build_types::SourcePackageName>,
+    pixi_dependencies: &IndexMap<&pixi_build_types::SourcePackageName, &pixi_build_types::PackageSpec>,
+    section_label: &str,
 ) -> Vec<MatchSpec> {
+    let pixi_names: HashSet<&str> = pixi_dependencies
+        .keys()
+        .map(|name| (*name).as_str())
+        .collect();
+
     mapped_deps
         .iter()
-        .filter(|dep| {
-            let pkg_name = pixi_build_types::SourcePackageName::from(dep.name.clone());
-            !skip_packages.contains(&pkg_name)
+        .map(|dep| {
+            if pixi_names.contains(dep.name.as_normalized()) {
+                tracing::info!(
+                    "`{name}` is declared in both `pyproject.toml` and `{section}`; \
+                     both constraints will be intersected by the conda solver",
+                    name = dep.name.as_normalized(),
+                    section = section_label,
+                );
+            }
+            dep.to_match_spec()
         })
-        .map(|dep| dep.to_match_spec())
         .collect()
 }
 
@@ -706,6 +725,21 @@ mod tests {
         }
     }
 
+    /// Build an `IndexMap` of Pixi dependencies the way `Dependencies::run` /
+    /// `Dependencies::host` look when handed to `filter_mapped_pypi_deps`.
+    /// The actual `PackageSpec` values are irrelevant for the filter logic;
+    /// only the set of names matters.
+    fn pixi_deps_map<'a>(
+        names: &'a [pixi_build_types::SourcePackageName],
+        spec: &'a pixi_build_types::PackageSpec,
+    ) -> IndexMap<&'a pixi_build_types::SourcePackageName, &'a pixi_build_types::PackageSpec> {
+        names.iter().map(|name| (name, spec)).collect()
+    }
+
+    fn any_spec() -> pixi_build_types::PackageSpec {
+        pixi_build_types::PackageSpec::Binary(pixi_build_types::BinaryPackageSpec::default())
+    }
+
     #[test]
     fn test_filter_mapped_pypi_deps_without_pixi_deps() {
         // When no Pixi deps are specified, all mapped deps should pass through
@@ -714,9 +748,10 @@ mod tests {
             make_mapped_dep("flask", None),
         ];
 
-        let skip_packages: HashSet<pixi_build_types::SourcePackageName> = HashSet::new();
+        let spec = any_spec();
+        let pixi_deps = pixi_deps_map(&[], &spec);
 
-        let result = filter_mapped_pypi_deps(&mapped_deps, &skip_packages);
+        let result = filter_mapped_pypi_deps(&mapped_deps, &pixi_deps, "[run-dependencies]");
 
         assert_eq!(result.len(), 2);
         assert!(result.iter().any(|r| r.to_string().contains("requests")));
@@ -724,47 +759,54 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_mapped_pypi_deps_override_but_others_preserved() {
-        // When Pixi specifies some deps, those should be filtered out
-        // but other deps should still pass through
+    fn test_filter_mapped_pypi_deps_emits_pyproject_alongside_pixi() {
+        // When Pixi declares some of the same deps, those mapped deps must still
+        // be returned so the conda solver can intersect both constraints.
+        // Previously the function dropped the duplicates which caused
+        // prefix-dev/pixi#6067.
         let mapped_deps = vec![
             make_mapped_dep("requests", Some(">=2.0")),
             make_mapped_dep("flask", Some(">=1.0")),
             make_mapped_dep("numpy", None),
         ];
 
-        // Pixi specifies "requests" - it should be filtered out
-        let skip_packages: HashSet<pixi_build_types::SourcePackageName> =
-            HashSet::from([pixi_build_types::SourcePackageName::from(
-                PackageName::new_unchecked("requests"),
-            )]);
+        let names = [pixi_build_types::SourcePackageName::from(
+            PackageName::new_unchecked("requests"),
+        )];
+        let spec = any_spec();
+        let pixi_deps = pixi_deps_map(&names, &spec);
 
-        let result = filter_mapped_pypi_deps(&mapped_deps, &skip_packages);
+        let result = filter_mapped_pypi_deps(&mapped_deps, &pixi_deps, "[run-dependencies]");
 
-        // requests should NOT be in result (filtered by Pixi override)
-        // flask and numpy should be in result
-        assert_eq!(result.len(), 2);
-        assert!(!result.iter().any(|r| r.to_string().contains("requests")));
+        // All three are returned; requests is no longer dropped just because
+        // Pixi also lists it.
+        assert_eq!(result.len(), 3);
+        assert!(result.iter().any(|r| r.to_string().contains("requests")));
         assert!(result.iter().any(|r| r.to_string().contains("flask")));
         assert!(result.iter().any(|r| r.to_string().contains("numpy")));
     }
 
     #[test]
-    fn test_filter_mapped_pypi_deps_all_filtered_when_all_in_pixi() {
-        // When all mapped deps are already in Pixi, nothing should pass through
+    fn test_filter_mapped_pypi_deps_keeps_all_when_all_in_pixi() {
+        // Same package present in both files: the mapped constraint must still
+        // flow through so the conda solver can intersect with the Pixi spec.
         let mapped_deps = vec![
             make_mapped_dep("requests", Some(">=2.0")),
             make_mapped_dep("flask", None),
         ];
 
-        let skip_packages: HashSet<pixi_build_types::SourcePackageName> = HashSet::from([
+        let names = [
             pixi_build_types::SourcePackageName::from(PackageName::new_unchecked("requests")),
             pixi_build_types::SourcePackageName::from(PackageName::new_unchecked("flask")),
-        ]);
+        ];
+        let spec = any_spec();
+        let pixi_deps = pixi_deps_map(&names, &spec);
 
-        let result = filter_mapped_pypi_deps(&mapped_deps, &skip_packages);
+        let result = filter_mapped_pypi_deps(&mapped_deps, &pixi_deps, "[run-dependencies]");
 
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|r| r.to_string().contains("requests")));
+        assert!(result.iter().any(|r| r.to_string().contains("flask")));
     }
 
     #[test]
