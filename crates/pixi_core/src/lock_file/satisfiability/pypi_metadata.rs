@@ -235,6 +235,64 @@ mod tests {
     }
 
     #[test]
+    fn given_url_with_hash_separator_survives_to_string() {
+        // The rattler_lock v7 writer at requires_dist time picks the
+        // verbatim `given` string of a VerbatimUrl over the parsed URL's
+        // Display:
+        //
+        //   if let Some(g) = url.given() { format!(" @ {g}") }
+        //   else                          { format!(" @ {url}") }
+        //
+        // So if anything constructs a `pep508_rs::Requirement` whose
+        // verbatim URL has `given = "git+url#<sha>"`, that exact `#<sha>`
+        // form lands in the lock file regardless of what `Display` would
+        // have produced from the parsed URL. The live read then re-derives
+        // the requirement via `uv → req.to_string() → pep508_rs::from_str`
+        // — no `given` carried — and rattler's write path emits `@<sha>`
+        // form on the next round. That is exactly the comparison mismatch
+        // in pixi#6062.
+        let sha = "84063a63c794e0ec1f37e5d895523b5bd31c3406";
+        let parsed_url: url::Url =
+            format!("git+ssh://github.com/Z3ZEL/dep-test@{sha}")
+                .parse()
+                .unwrap();
+        let verbatim_with_hash_given = pep508_rs::VerbatimUrl::from_url(parsed_url)
+            .with_given(format!("git+ssh://github.com/Z3ZEL/dep-test#{sha}"));
+
+        // Display (used by `to_requirements`-side path) reads parsed url:
+        assert_eq!(
+            format!("{}", verbatim_with_hash_given),
+            format!("git+ssh://github.com/Z3ZEL/dep-test@{sha}")
+        );
+        // The `given()` accessor (used by rattler_lock's
+        // `requirement_to_string`) reads the verbatim string:
+        assert_eq!(
+            verbatim_with_hash_given.given(),
+            Some(format!("git+ssh://github.com/Z3ZEL/dep-test#{sha}").as_str())
+        );
+    }
+
+    #[test]
+    fn pep508_from_str_preserves_given_for_hash_form() {
+        // When rattler_lock reads the lock file and parses each
+        // `requires_dist` line via `pep508_rs::Requirement::from_str`, does
+        // it preserve the raw input as `given`? If yes, then a lock file
+        // that contains `dep-a @ git+url#<sha>` deserialises into a
+        // Requirement whose `given` is `git+url#<sha>` — which then writes
+        // back to the lock file in the same `#<sha>` form on every save.
+        // That's the self-perpetuating channel for pixi#6062.
+        let sha = "84063a63c794e0ec1f37e5d895523b5bd31c3406";
+        let input = format!("dep-a @ git+ssh://github.com/Z3ZEL/dep-test#{sha}");
+        let req: pep508_rs::Requirement = input.parse().unwrap();
+        let Some(pep508_rs::VersionOrUrl::Url(url)) = req.version_or_url.as_ref() else {
+            panic!("expected URL");
+        };
+        eprintln!("parsed given:    {:?}", url.given());
+        eprintln!("parsed Display:  {}", url);
+        eprintln!("rattler form:    {}", req);
+    }
+
+    #[test]
     fn ssh_full_sha_paths_preserve_at_ref_form() {
         // The reporter's pyproject.toml uses
         //   git = "ssh://github.com/Z3ZEL/dep-test", rev = "<full-sha>"
@@ -243,9 +301,9 @@ mod tests {
         // and without a `git@` userinfo — every conversion path pixi has
         // produces `@<sha>` form, never `#<sha>`. The `#<sha>` form
         // therefore cannot originate inside pixi's lock-write path on
-        // HEAD; it can only enter `requires_dist` via an externally
-        // produced lock file (older pixi version, hand-edit, or a
-        // different tool).
+        // HEAD via `to_requirements`; it must enter `requires_dist` via
+        // the `given` channel exercised by `convert_uv_requirements_to_pep508`
+        // and persisted by rattler_lock's `requirement_to_string`.
         use pixi_pypi_spec::PixiPypiSpec;
         use pixi_uv_conversions::{as_uv_req, to_requirements};
 
