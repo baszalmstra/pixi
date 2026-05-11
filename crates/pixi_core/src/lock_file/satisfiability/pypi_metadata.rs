@@ -4,16 +4,13 @@
 //! 1. Read metadata from local pyproject.toml files
 //! 2. Compare locked metadata against current source tree metadata
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::str::FromStr;
 
 use indexmap::IndexMap;
 use pep440_rs::{Version, VersionSpecifiers};
-use pep508_rs::{PackageName, Requirement};
+use pep508_rs::{PackageName, Requirement, VerbatimUrl, VersionOrUrl};
 use pixi_install_pypi::LockedPypiRecord;
 use uv_normalize::ExtraName;
-
-use super::pypi::rebase_relative_path_requirement;
 
 /// Metadata extracted from a local package source tree.
 #[derive(Debug, Clone)]
@@ -54,38 +51,22 @@ pub struct RequiresDistDiff {
 ///
 /// Returns `None` if the metadata matches, or `Some(MetadataMismatch)`
 /// describing what changed.
-///
-/// `declaring_dir` is the absolute path to the package whose metadata is
-/// being compared (i.e. the directory of its `pyproject.toml`). The
-/// locked `requires_dist` is parsed by `rattler_lock` with
-/// `base_dir = workspace_root`, which interprets relative paths against
-/// the wrong directory for transitives like `b @ ../b` declared inside a
-/// nested package. Rebasing the locked side against `declaring_dir`
-/// puts both the locked and the freshly-extracted requirements in the
-/// same resolution context that uv used at lock-write time, so plain
-/// `PartialEq` does the right thing here (#6047).
 pub fn compare_metadata(
     locked_record: &LockedPypiRecord,
     current: &LocalPackageMetadata,
-    declaring_dir: &Path,
 ) -> Option<MetadataMismatch> {
     let locked = &locked_record.data;
-    let locked_deps: Vec<Requirement> = locked
-        .requires_dist()
-        .iter()
-        .cloned()
-        .map(|req| rebase_relative_path_requirement(req, declaring_dir))
-        .collect();
+    let locked_deps = locked.requires_dist();
     let current_deps = current.requires_dist.as_slice();
 
     let added: Vec<Requirement> = current_deps
         .iter()
-        .filter(|c| !locked_deps.iter().any(|l| l == *c))
+        .filter(|c| !locked_deps.iter().any(|l| requirements_equivalent(l, c)))
         .cloned()
         .collect();
     let removed: Vec<Requirement> = locked_deps
         .iter()
-        .filter(|l| !current_deps.iter().any(|c| l == &c))
+        .filter(|l| !current_deps.iter().any(|c| requirements_equivalent(l, c)))
         .cloned()
         .collect();
 
@@ -116,6 +97,41 @@ pub fn compare_metadata(
     }
 
     None
+}
+
+/// Whether two `requires_dist` entries refer to the same requirement.
+///
+/// `pep508_rs::PartialEq` for `VerbatimUrl` compares the parsed `Url`,
+/// but a path requirement's parsed URL is resolution-context-dependent:
+/// the locked side was parsed by `rattler_lock` against the workspace
+/// root, while the fresh side comes from uv's static metadata
+/// extraction lowered against the parent package. Compare on the
+/// verbatim `given` when both sides have one — it's the user-supplied
+/// spelling, base-directory-independent (#6047). Fall back to
+/// `PartialEq` otherwise.
+fn requirements_equivalent(a: &Requirement, b: &Requirement) -> bool {
+    a.name == b.name
+        && a.extras == b.extras
+        && a.marker == b.marker
+        && version_or_urls_equivalent(a.version_or_url.as_ref(), b.version_or_url.as_ref())
+}
+
+fn version_or_urls_equivalent(a: Option<&VersionOrUrl>, b: Option<&VersionOrUrl>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(VersionOrUrl::VersionSpecifier(x)), Some(VersionOrUrl::VersionSpecifier(y))) => {
+            x == y
+        }
+        (Some(VersionOrUrl::Url(x)), Some(VersionOrUrl::Url(y))) => verbatim_urls_equivalent(x, y),
+        _ => false,
+    }
+}
+
+fn verbatim_urls_equivalent(a: &VerbatimUrl, b: &VerbatimUrl) -> bool {
+    match (a.given(), b.given()) {
+        (Some(ga), Some(gb)) => ga == gb,
+        _ => a == b,
+    }
 }
 
 /// Replace each `pkg[group]` self-reference with the raw entries of
@@ -191,11 +207,30 @@ mod tests {
         UnresolvedPypiRecord::from(data).lock(version)
     }
 
-    /// Stand-in for the satisfiability-time absolute path of the
-    /// package whose metadata is being compared. Tests that don't
-    /// exercise relative-path rebasing can pass anything reasonable.
-    fn dummy_declaring_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from("/workspace")
+    #[test]
+    fn test_requirements_equivalent_basic() {
+        let r: Requirement = "numpy>=1.0".parse().unwrap();
+        assert!(requirements_equivalent(&r, &r));
+        let other: Requirement = "numpy>=2.0".parse().unwrap();
+        assert!(!requirements_equivalent(&r, &other));
+    }
+
+    /// #6047: the locked side of a transitive `b @ ../b` is parsed
+    /// against the workspace root by `rattler_lock`; the fresh side
+    /// (uv static metadata) is lowered against the parent package.
+    /// `pep508_rs::PartialEq` sees the resolved URLs as different —
+    /// `requirements_equivalent` falls back to the verbatim `given`,
+    /// which is base-directory-independent.
+    #[test]
+    fn test_requirements_equivalent_path_uses_given() {
+        let workspace = std::path::PathBuf::from("/workspace");
+        let parent = std::path::PathBuf::from("/workspace/sub/c");
+        let from_workspace = Requirement::parse("b @ ../b", &workspace).unwrap();
+        let from_parent = Requirement::parse("b @ ../b", &parent).unwrap();
+        // Sanity-check that the structures actually disagree —
+        // otherwise this test isn't exercising the verbatim fallback.
+        assert_ne!(from_workspace, from_parent);
+        assert!(requirements_equivalent(&from_workspace, &from_parent));
     }
 
     #[test]
@@ -219,7 +254,7 @@ mod tests {
             requires_python: Some(VersionSpecifiers::from_str(">=3.8").unwrap()),
         };
 
-        assert!(compare_metadata(&locked, &current, &dummy_declaring_dir()).is_none());
+        assert!(compare_metadata(&locked, &current).is_none());
     }
 
     #[test]
@@ -243,49 +278,8 @@ mod tests {
             requires_python: None,
         };
 
-        let mismatch = compare_metadata(&locked, &current, &dummy_declaring_dir());
+        let mismatch = compare_metadata(&locked, &current);
         assert!(matches!(mismatch, Some(MetadataMismatch::RequiresDist(_))));
-    }
-
-    /// #6047: regression. The lock file stored `c.requires_dist = [b @ ../b]`
-    /// where `../b` is relative to `sub/c`. `rattler_lock` parses every
-    /// `requires_dist` entry against the workspace root, so the locked
-    /// `b @ ../b` ends up with a resolved URL pointing outside the
-    /// workspace. The fresh side (from uv's static metadata extraction)
-    /// resolves `../b` correctly against `sub/c`. `pep508_rs::PartialEq`
-    /// sees these as different. `compare_metadata` must rebase the
-    /// locked side against the declaring package's directory so the two
-    /// agree without filesystem access.
-    #[test]
-    fn test_compare_metadata_rebases_transitive_path() {
-        let workspace = std::path::PathBuf::from("/workspace");
-        let declaring_dir = workspace.join("sub/c");
-
-        // Mimic the locked side: `rattler_lock` parses `b @ ../b` with
-        // `base_dir = workspace`.
-        let locked_req = Requirement::parse("b @ ../b", &workspace).unwrap();
-        // Mimic the fresh side: uv lowered `b @ ../b` against c's
-        // directory at static-metadata-extraction time.
-        let current_req = Requirement::parse("b @ ../b", &declaring_dir).unwrap();
-        // Sanity-check that without rebasing these would disagree.
-        assert_ne!(locked_req, current_req);
-
-        let locked = lock_for_test(make_wheel_package_with(
-            "c",
-            "1.0.0",
-            rattler_lock::UrlOrPath::Path("./sub/c".into()).into(),
-            None,
-            None,
-            vec![locked_req],
-            None,
-        ));
-        let current = LocalPackageMetadata {
-            version: Some(Version::from_str("1.0.0").unwrap()),
-            requires_dist: vec![current_req],
-            requires_python: None,
-        };
-
-        assert!(compare_metadata(&locked, &current, &declaring_dir).is_none());
     }
 
     fn pkg_name(s: &str) -> PackageName {

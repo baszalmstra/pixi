@@ -374,53 +374,6 @@ pub(crate) fn pypi_satisfies_requirement(
     }
 }
 
-/// Re-resolve a relative-path URL in a requirement against the directory
-/// where the requirement was originally declared.
-///
-/// At lock-write time, uv's full resolver lowers a transitive
-/// `b @ ../b` declared in `sub/c/pyproject.toml` against `sub/c`'s
-/// directory, producing the correct `install_path = <workspace>/sub/b`.
-/// At satisfiability time we re-hydrate the same requirement from the
-/// locked record's `requires_dist`, but `rattler_lock`'s deserializer
-/// parses it with `base_dir = workspace_root`, leaving the resolved URL
-/// pointing at `<workspace>/../b` — outside the workspace.
-///
-/// Calling this with `declaring_dir = <workspace>/sub/c` rewrites the
-/// requirement's URL to use the same base uv used at lock-write, so the
-/// downstream `install_path` matches the locked location exactly. The
-/// verbatim `given` ("../b") is preserved.
-///
-/// No filesystem access — pure path arithmetic via
-/// `pep508_rs::VerbatimUrl::from_path`.
-pub(crate) fn rebase_relative_path_requirement(
-    req: pep508_rs::Requirement,
-    declaring_dir: &Path,
-) -> pep508_rs::Requirement {
-    let Some(pep508_rs::VersionOrUrl::Url(url)) = &req.version_or_url else {
-        return req;
-    };
-    let Some(given) = url.given() else {
-        return req;
-    };
-    // Skip absolute paths and anything that already has a URL scheme —
-    // those are resolution-context-independent.
-    if given.contains("://") {
-        return req;
-    }
-    let given_path = std::path::PathBuf::from(given);
-    if given_path.is_absolute() {
-        return req;
-    }
-    let Ok(rebased) = pep508_rs::VerbatimUrl::from_path(&given_path, declaring_dir) else {
-        return req;
-    };
-    let rebased = rebased.with_given(given.to_string());
-    pep508_rs::Requirement {
-        version_or_url: Some(pep508_rs::VersionOrUrl::Url(rebased)),
-        ..req
-    }
-}
-
 // Resolve metadata for all path-based pypi source packages upfront, then
 // lock every pypi record with a concrete version.  Wheels already carry
 // their version; source packages get it from the source tree metadata.

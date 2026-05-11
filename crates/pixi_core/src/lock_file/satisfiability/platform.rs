@@ -24,7 +24,8 @@ use pixi_record::{
 use pixi_spec::{PixiSpec, SourceAnchor, SourceLocationSpec, SourceSpec, SpecConversionError};
 use pixi_uv_context::UvResolutionContext;
 use pixi_uv_conversions::{
-    as_uv_req, pep508_requirement_to_uv_requirement, to_normalize, to_uv_specifiers, to_uv_version,
+    as_uv_req, pep508_requirement_to_uv_requirement_at, to_normalize, to_uv_specifiers,
+    to_uv_version,
 };
 use pypi_modifiers::pypi_marker_env::determine_marker_environment;
 use rattler_conda_types::{
@@ -36,10 +37,7 @@ use uv_distribution_types::{RequirementSource, RequiresPython};
 
 use super::errors::{LocalMetadataMismatch, PlatformUnsat, SolveGroupUnsat};
 use super::legacy;
-use super::pypi::{
-    lock_pypi_packages, pypi_satisfies_editable, pypi_satisfies_requirement,
-    rebase_relative_path_requirement,
-};
+use super::pypi::{lock_pypi_packages, pypi_satisfies_editable, pypi_satisfies_requirement};
 use super::pypi_metadata;
 use super::source_record::{
     verify_build_source_matches_manifest, verify_partial_source_record_against_backend,
@@ -948,11 +946,8 @@ async fn verify_package_platform_satisfiability(
                         };
                         if let Some(current_metadata) =
                             ctx.static_metadata_cache.get(&absolute_path)
-                            && let Some(mismatch) = pypi_metadata::compare_metadata(
-                                record,
-                                &current_metadata,
-                                &absolute_path,
-                            )
+                            && let Some(mismatch) =
+                                pypi_metadata::compare_metadata(record, &current_metadata)
                         {
                             let local_mismatch = match mismatch {
                                 pypi_metadata::MetadataMismatch::RequiresDist(diff) => {
@@ -1014,9 +1009,10 @@ async fn verify_package_platform_satisfiability(
                 // deserializer parses them with `base_dir = workspace
                 // root`, which is wrong for transitives (e.g. `b @ ../b`
                 // declared in `sub/c/pyproject.toml` resolves to outside
-                // the workspace). Rebase against the declaring package's
-                // directory so the resulting `install_path` matches what
-                // uv's full resolver produced at lock-write time (#6047).
+                // the workspace). Tell `pep508_requirement_to_uv_requirement`
+                // to interpret relative spellings against the declaring
+                // package's directory, matching uv's lock-time resolution
+                // (#6047).
                 let declaring_dir: Option<PathBuf> = match &**pkg.location() {
                     UrlOrPath::Path(p) if p.is_absolute() => {
                         Some(PathBuf::from(p.as_str()))
@@ -1026,14 +1022,10 @@ async fn verify_package_platform_satisfiability(
                 };
 
                 for requirement in pkg.requires_dist() {
-                    let requirement = match &declaring_dir {
-                        Some(dir) => {
-                            rebase_relative_path_requirement(requirement.clone(), dir)
-                        }
-                        None => requirement.clone(),
-                    };
-                    let requirement = match pep508_requirement_to_uv_requirement(requirement)
-                    {
+                    let requirement = match pep508_requirement_to_uv_requirement_at(
+                        requirement.clone(),
+                        declaring_dir.as_deref(),
+                    ) {
                         Ok(requirement) => requirement,
                         Err(err) => {
                             delayed_pypi_error.get_or_insert_with(|| {

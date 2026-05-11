@@ -231,9 +231,30 @@ pub fn as_uv_req(
     })
 }
 
-/// Convert a [`pep508_rs::Requirement`] into a [`uv_distribution_types::Requirement`]
+/// Convert a [`pep508_rs::Requirement`] into a [`uv_distribution_types::Requirement`].
 pub fn pep508_requirement_to_uv_requirement(
     requirement: pep508_rs::Requirement,
+) -> Result<uv_distribution_types::Requirement, ConversionError> {
+    pep508_requirement_to_uv_requirement_at(requirement, None)
+}
+
+/// Like [`pep508_requirement_to_uv_requirement`], but resolves any
+/// relative-path URL spelling in the requirement against the supplied
+/// `declaring_dir` rather than against whatever base `pep508_rs` used at
+/// parse time.
+///
+/// This is needed when the same requirement is consumed in a different
+/// resolution context from where it was parsed. `rattler_lock`
+/// deserializes every `requires_dist` entry with `base_dir = workspace
+/// root`, so a transitive `b @ ../b` declared inside
+/// `sub/c/pyproject.toml` ends up with a parsed URL pointing outside
+/// the workspace. Passing `declaring_dir = <workspace>/sub/c` here
+/// gives the same `install_path` uv's full resolver produces at
+/// lock-write time (#6047). Pure path arithmetic — no filesystem
+/// access, no string reparsing.
+pub fn pep508_requirement_to_uv_requirement_at(
+    requirement: pep508_rs::Requirement,
+    declaring_dir: Option<&Path>,
 ) -> Result<uv_distribution_types::Requirement, ConversionError> {
     let parsed_url = if let Some(version_or_url) = requirement.version_or_url {
         match version_or_url {
@@ -243,6 +264,13 @@ pub fn pep508_requirement_to_uv_requirement(
             ),
             // We need to convert the URL
             pep508_rs::VersionOrUrl::Url(verbatim_url) => {
+                // If the verbatim spelling was a relative path and the
+                // caller told us which directory it was declared in,
+                // rebase to that directory. Otherwise fall through and
+                // use whatever `pep508_rs` resolved at parse time.
+                let install_path_override = declaring_dir
+                    .and_then(|dir| resolve_relative_given_path(&verbatim_url, dir));
+
                 // Figure out if the Url is a URL or a path
                 let url_or_path =
                     UrlOrPath::from_str(verbatim_url.as_str()).expect("should be convertible");
@@ -250,30 +278,38 @@ pub fn pep508_requirement_to_uv_requirement(
                 let url = match url_or_path {
                     // It is actually a path
                     UrlOrPath::Path(path) => {
+                        let install_path: PathBuf = install_path_override
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from(path.as_str()));
+                        let install_url: Url = install_path_override
+                            .as_ref()
+                            .and_then(|p| Url::from_file_path(p).ok())
+                            .unwrap_or_else(|| verbatim_url.to_url());
+
                         // Try to parse as a packaged wheel or sdist, otherwise treat as directory
-                        let parsed_url = match DistExtension::from_path(Path::new(path.as_str())) {
+                        let parsed_url = match DistExtension::from_path(&install_path) {
                             Ok(ext) => ParsedUrl::Path(ParsedPathUrl::from_source(
-                                PathBuf::from(path.as_str()).into_boxed_path(),
+                                install_path.into_boxed_path(),
                                 ext,
-                                verbatim_url.to_url().into(),
+                                install_url.clone().into(),
                             )),
                             Err(_) => {
                                 // If no extension, treat as a directory
                                 ParsedUrl::Directory(ParsedDirectoryUrl::from_source(
-                                    PathBuf::from(path.as_str()).into_boxed_path(),
+                                    install_path.into_boxed_path(),
                                     Some(false), // Set editable to false, might require post-processing on the result
                                     Some(false), // we do not support virtual packages yet
-                                    DisplaySafeUrl::from(verbatim_url.to_url()),
+                                    DisplaySafeUrl::from(install_url.clone()),
                                 ))
                             }
                         };
 
                         VerbatimParsedUrl {
                             parsed_url,
-                            verbatim: uv_pep508::VerbatimUrl::from_url(
-                                verbatim_url.raw().clone().into(),
-                            )
-                            .with_given(verbatim_url.given().expect("should have given string")),
+                            verbatim: uv_pep508::VerbatimUrl::from_url(install_url.into())
+                                .with_given(
+                                    verbatim_url.given().expect("should have given string"),
+                                ),
                         }
                     }
                     // It is a URL
@@ -309,6 +345,40 @@ pub fn pep508_requirement_to_uv_requirement(
     };
 
     Ok(converted.into())
+}
+
+/// If `verbatim_url`'s user-supplied spelling is a relative path,
+/// return its absolute, lexically-normalized form interpreted against
+/// `declaring_dir`. Returns `None` for absolute paths and URLs with
+/// schemes, where rebasing is meaningless.
+fn resolve_relative_given_path(
+    verbatim_url: &pep508_rs::VerbatimUrl,
+    declaring_dir: &Path,
+) -> Option<PathBuf> {
+    let given = verbatim_url.given()?;
+    if given.contains("://") {
+        return None;
+    }
+    let given_path = PathBuf::from(given);
+    if given_path.is_absolute() {
+        return None;
+    }
+    Some(lexical_normalize_path(&declaring_dir.join(given_path)))
+}
+
+/// Collapse `.`/`..` segments lexically. Filesystem-free.
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
