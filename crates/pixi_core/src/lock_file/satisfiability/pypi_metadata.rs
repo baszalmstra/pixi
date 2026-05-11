@@ -235,6 +235,62 @@ mod tests {
     }
 
     #[test]
+    fn rattler_pr_2421_would_help_iff_given_diverges_from_display() {
+        // rattler#2421 changes the lock-write path from
+        //
+        //   if Some(given) { write!(given) } else { write!(Display) }
+        //
+        // to
+        //
+        //   match (scheme, given) { ("file", Some(g)) => g, _ => Display }
+        //
+        // i.e. for non-file URLs the writer ALWAYS uses the parsed URL's
+        // Display, regardless of `given`. So pixi#6062 would be fixed by
+        // that rattler change ONLY when there exists a Requirement on
+        // pixi's lock-write side whose `given` and `Display(parsed_url)`
+        // produce different strings for the same git URL.
+        //
+        // This test pins down the two relevant cases:
+        //
+        //   (a) given and Display agree on `#<sha>` form (input came from
+        //       a string parse): rattler#2421 changes nothing — the lock
+        //       is still written with `#<sha>`, comparison still mismatches.
+        //
+        //   (b) given carries `#<sha>` but Display(parsed_url) is `@<sha>`
+        //       (programmatic with_given on a constructed URL): rattler#2421
+        //       fixes this — the lock is written with `@<sha>`, matching
+        //       the live side.
+        let sha = "84063a63c794e0ec1f37e5d895523b5bd31c3406";
+
+        // (a) Parsed string in `#<sha>` form. given == Display.
+        let parsed_url_hash: url::Url =
+            format!("git+ssh://github.com/Z3ZEL/dep-test#{sha}").parse().unwrap();
+        let verbatim_a = pep508_rs::VerbatimUrl::from_url(parsed_url_hash.clone())
+            .with_given(format!("git+ssh://github.com/Z3ZEL/dep-test#{sha}"));
+        // Old rattler write path uses given:
+        let old_a = verbatim_a.given().unwrap().to_string();
+        // New rattler write path (PR #2421) uses Display for non-file:
+        let new_a = format!("{}", verbatim_a);
+        assert_eq!(old_a, new_a, "case (a): given == Display, PR doesn't change output");
+
+        // (b) parsed in `@<sha>` form, given in `#<sha>` form — divergence.
+        let parsed_url_at: url::Url =
+            format!("git+ssh://github.com/Z3ZEL/dep-test@{sha}").parse().unwrap();
+        let verbatim_b = pep508_rs::VerbatimUrl::from_url(parsed_url_at.clone())
+            .with_given(format!("git+ssh://github.com/Z3ZEL/dep-test#{sha}"));
+        let old_b = verbatim_b.given().unwrap().to_string();
+        let new_b = format!("{}", verbatim_b);
+        assert!(
+            old_b.contains(&format!("#{sha}")) && !old_b.contains(&format!("@{sha}")),
+            "case (b) old uses given: {old_b}"
+        );
+        assert!(
+            new_b.contains(&format!("@{sha}")) && !new_b.contains(&format!("#{sha}")),
+            "case (b) new (PR#2421) uses parsed url Display: {new_b}"
+        );
+    }
+
+    #[test]
     fn given_url_with_hash_separator_survives_to_string() {
         // The rattler_lock v7 writer at requires_dist time picks the
         // verbatim `given` string of a VerbatimUrl over the parsed URL's
