@@ -40,6 +40,7 @@ where
     let mut command = Command::new("pixi run")
         .no_binary_name(true)
         .disable_help_flag(true)
+        .disable_help_subcommand(true)
         .disable_version_flag(true)
         .subcommand_required(true)
         .allow_external_subcommands(true)

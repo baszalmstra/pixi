@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     convert::identity,
     ffi::OsString,
-    io::Write,
     string::String,
 };
 
@@ -27,7 +26,8 @@ use pixi_manifest::{FeaturesExt, TaskName};
 use pixi_progress::global_multi_progress;
 use pixi_task::{
     AmbiguousTask, CanSkip, ExecutableTask, FailedToParseShellScript, InvalidWorkingDirectory,
-    PreferExecutable, SearchEnvironments, TaskAndEnvironment, TaskGraph, get_task_env,
+    PreferExecutable, SearchEnvironments, TaskAndEnvironment, TaskGraph, build_run_command,
+    get_task_env,
 };
 use rattler_conda_types::Platform;
 use thiserror::Error;
@@ -400,66 +400,41 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
 /// Called when a command was not found.
 ///
-/// Renders the available tasks for the selected environment(s) along with
-/// their descriptions, so that bare `pixi run` matches the richer output of
-/// `pixi task list` (see https://github.com/prefix-dev/pixi/issues/5276).
+/// Renders the available tasks for the selected environment(s) by asking
+/// clap to print the help text of the same [`Command`] we use for
+/// parsing `pixi run`. Each task is a subcommand whose `about` is its
+/// description, so the listing stays in sync with whatever `pixi run`
+/// would accept (see https://github.com/prefix-dev/pixi/issues/5276).
 fn command_not_found<'p>(workspace: &'p Workspace, explicit_environment: Option<Environment<'p>>) {
     let environments: Vec<Environment<'p>> = match explicit_environment {
         Some(env) => vec![env],
         None => workspace.environments(),
     };
 
-    // Collect the visible tasks (skipping `_`-prefixed) and the first
-    // description we see per task name.
-    let visible_tasks: HashSet<TaskName> = environments
+    // Collect visible (non-`_`-prefixed) task names. First definition
+    // encountered wins for the args schema, matching how
+    // `parse_run_args` resolves duplicates.
+    let visible: HashSet<TaskName> = environments
         .iter()
         .flat_map(|env| env.get_filtered_tasks())
         .collect();
 
-    let mut descriptions: BTreeMap<TaskName, String> = BTreeMap::new();
+    let mut tasks: BTreeMap<TaskName, &pixi_manifest::Task> = BTreeMap::new();
     for env in &environments {
-        if let Ok(tasks) = env.tasks(Some(env.best_platform())) {
-            for (name, task) in tasks {
-                if !visible_tasks.contains(name) || descriptions.contains_key(name) {
-                    continue;
-                }
-                if let Some(description) = task.description() {
-                    descriptions.insert(name.clone(), description.to_string());
+        if let Ok(env_tasks) = env.tasks(Some(env.best_platform())) {
+            for (name, task) in env_tasks {
+                if visible.contains(name) {
+                    tasks.entry(name.clone()).or_insert(task);
                 }
             }
         }
     }
 
-    if !visible_tasks.is_empty() {
-        let header_style = console::Style::new().bold().cyan();
-        let italic = console::Style::new().italic();
-
-        // Render the table into a buffer so we can emit it as one
-        // `pixi_progress::println!` call (which suspends any active progress
-        // bar around the write).
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut writer = tabwriter::TabWriter::new(&mut buffer);
-        let _ = writeln!(
-            writer,
-            "{}\t{}",
-            header_style.apply_to("Task"),
-            header_style.apply_to("Description"),
-        );
-        for name in visible_tasks.iter().sorted() {
-            let description = descriptions
-                .get(name)
-                .map(|d| italic.apply_to(d.as_str()).to_string())
-                .unwrap_or_default();
-            let _ = writeln!(writer, "{}\t{}", name.fancy_display().bold(), description);
-        }
-        let _ = writer.flush();
-        let table = String::from_utf8_lossy(&buffer);
-
-        pixi_progress::println!(
-            "\n{}\n{}",
-            console::style("Available tasks:").bold(),
-            table.trim_end(),
-        );
+    if !tasks.is_empty() {
+        let mut command =
+            build_run_command(tasks.iter().map(|(n, t)| (n.as_str(), *t)));
+        let help = command.render_help();
+        pixi_progress::println!("{help}");
     }
 
     // Help user when there is no task available because the platform is not
