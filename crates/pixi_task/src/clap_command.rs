@@ -6,7 +6,7 @@
 //! clap's builder API to construct the [`clap::Command`] dynamically from
 //! the task's typed `args` definition.
 
-use clap::{Arg, Command, builder::PossibleValuesParser};
+use clap::{Arg, Command, builder::PossibleValuesParser, error::ContextKind};
 use pixi_manifest::{
     Task,
     task::{TaskArg, TypedDependencyArg},
@@ -93,32 +93,16 @@ pub fn parse_typed_task_args(
 /// (e.g. `args = ["debug"]` or `args = [{ target = "debug" }]`). We map
 /// each declared [`TaskArg`] to a long-flag `--name` option on a clap
 /// [`Command`], translate positionals into the corresponding `--name
-/// value` pair (matched by declaration index), and let clap validate
-/// defaults, choices and required-ness — so the dependency-graph path
-/// produces the same error rendering as direct CLI invocations.
-///
-/// The "positional before named" rule is enforced here, before clap
-/// sees the arguments, so the error stays clearly attributable.
+/// value` pair (matched by declaration index), and hand the resulting
+/// stream to clap. Defaults, choices, required-ness, unknown names,
+/// duplicate values and unexpected extras are all reported by clap with
+/// its usual rendering — no custom validation is layered on top.
 pub fn parse_dep_task_args(
     task_name: &str,
     task: &Task,
     dep_args: &[TypedDependencyArg],
 ) -> Result<Vec<String>, String> {
     let task_args = task.args().unwrap_or(&[]);
-
-    let mut seen_named = false;
-    for arg in dep_args {
-        match arg {
-            TypedDependencyArg::Named(_, _) => seen_named = true,
-            TypedDependencyArg::Positional(value) => {
-                if seen_named {
-                    return Err(format!(
-                        "positional argument '{value}' found after named argument for task '{task_name}'"
-                    ));
-                }
-            }
-        }
-    }
 
     // Flatten dep_args into a `--name value` stream. Positionals are
     // bound to the declared arg at that index; if there are more
@@ -185,30 +169,19 @@ pub fn parse_dep_task_args(
 }
 
 /// Renders a clap-style "unknown command" error for `name` when it does
-/// not match any of `known_task_names` but is close to one (Levenshtein
-/// distance ≤ `threshold`).
+/// not match any task and clap itself considers one of the known names a
+/// close enough match to recommend.
 ///
-/// Returns `None` if `name` is exactly known, or if no candidate is
-/// similar enough — in which case the caller should fall through to
-/// running the command as an executable (so `pixi run python script.py`
-/// keeps working even when no `python` task exists).
+/// We delegate the similarity decision to clap: a temporary [`Command`]
+/// with a `PossibleValuesParser` over the known task names is asked to
+/// parse `[name]`, and we surface the resulting error only when clap's
+/// renderer has attached a suggestion (`ContextKind::Suggested*`). This
+/// reuses the same did-you-mean algorithm the rest of pixi's CLI uses,
+/// and quietly returns `None` when there is no close match — so the
+/// caller can still fall through to running the input as an executable
+/// (e.g. `pixi run python script.py` when no `python` task exists).
 pub fn unknown_command_error(name: &str, known_task_names: &[String]) -> Option<String> {
-    if known_task_names.iter().any(|n| n == name) {
-        return None;
-    }
-    if !is_bare_identifier(name) {
-        return None;
-    }
-
-    let threshold = match name.len() {
-        0..=3 => 1,
-        4..=7 => 2,
-        _ => 3,
-    };
-    let has_close_match = known_task_names
-        .iter()
-        .any(|candidate| strsim::levenshtein(name, candidate) <= threshold);
-    if !has_close_match {
+    if known_task_names.is_empty() || known_task_names.iter().any(|n| n == name) {
         return None;
     }
 
@@ -224,24 +197,18 @@ pub fn unknown_command_error(name: &str, known_task_names: &[String]) -> Option<
                 .value_parser(PossibleValuesParser::new(known_task_names)),
         );
 
-    Some(
-        command
-            .try_get_matches_from([name])
-            .err()
-            .map(|err| err.render().to_string())
-            // unreachable: an unknown value against PossibleValuesParser
-            // always produces an error.
-            .unwrap_or_else(|| format!("no task named '{name}'")),
-    )
-}
-
-fn is_bare_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    let err = command.try_get_matches_from([name]).err()?;
+    let clap_suggested = err.context().any(|(kind, _)| {
+        matches!(
+            kind,
+            ContextKind::Suggested
+                | ContextKind::SuggestedValue
+                | ContextKind::SuggestedArg
+                | ContextKind::SuggestedSubcommand
+                | ContextKind::SuggestedCommand
+        )
+    });
+    clap_suggested.then(|| err.render().to_string())
 }
 
 #[cfg(test)]
@@ -403,29 +370,25 @@ mod tests {
     }
 
     #[test]
-    fn dep_rejects_positional_after_named() {
-        let task = task_with_args(vec![
-            TaskArg {
-                name: ArgName::from_str("a").unwrap(),
-                default: None,
-                choices: None,
-            },
-            TaskArg {
-                name: ArgName::from_str("b").unwrap(),
-                default: None,
-                choices: None,
-            },
-        ]);
+    fn dep_rejects_duplicate_value() {
+        // Specifying the same arg as both positional and named yields a
+        // clap-rendered duplicate-value error rather than silently picking
+        // one side.
+        let task = task_with_args(vec![TaskArg {
+            name: ArgName::from_str("target").unwrap(),
+            default: None,
+            choices: None,
+        }]);
         let err = parse_dep_task_args(
-            "task",
+            "build",
             &task,
             &[
-                TypedDependencyArg::Named("a".into(), "1".into()),
-                TypedDependencyArg::Positional("2".into()),
+                TypedDependencyArg::Positional("a".into()),
+                TypedDependencyArg::Named("target".into(), "b".into()),
             ],
         )
         .unwrap_err();
-        assert!(err.contains("after named"), "got: {err}");
+        assert!(err.contains("target"), "got: {err}");
     }
 
     #[test]
@@ -443,16 +406,23 @@ mod tests {
     }
 
     #[test]
-    fn unknown_command_silent_for_non_identifier() {
+    fn unknown_command_silent_for_path_like() {
+        // Inputs that look nothing like a task name — clap won't suggest a
+        // match, so we fall through to executing as a shell command.
         let known: Vec<String> = vec!["build".into()];
-        // Path-like, contains shell metas — fall through to shell.
         assert!(unknown_command_error("./script.sh", &known).is_none());
-        assert!(unknown_command_error("a b c", &known).is_none());
+        assert!(unknown_command_error("/usr/bin/python", &known).is_none());
     }
 
     #[test]
     fn unknown_command_silent_for_exact_match() {
         let known: Vec<String> = vec!["build".into()];
         assert!(unknown_command_error("build", &known).is_none());
+    }
+
+    #[test]
+    fn unknown_command_silent_with_no_known_tasks() {
+        let known: Vec<String> = vec![];
+        assert!(unknown_command_error("anything", &known).is_none());
     }
 }
