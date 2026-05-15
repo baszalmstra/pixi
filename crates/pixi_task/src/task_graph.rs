@@ -20,8 +20,8 @@ use thiserror::Error;
 
 use crate::{
     TaskDisambiguation,
-    clap_command::parse_typed_task_args,
-    error::{AmbiguousTaskError, InvalidArgValueError, MissingArgError, MissingTaskError},
+    clap_command::{parse_dep_task_args, parse_typed_task_args, unknown_command_error},
+    error::{AmbiguousTaskError, MissingTaskError},
     task_environment::{FindTaskError, FindTaskSource, SearchEnvironments},
 };
 
@@ -237,7 +237,29 @@ impl<'p> TaskGraph<'p> {
         {
             match search_envs.find_task(TaskName::from(name.clone()), FindTaskSource::CmdArgs, None)
             {
-                Err(FindTaskError::MissingTask(_)) => {}
+                Err(FindTaskError::MissingTask(_)) => {
+                    // The first argument doesn't match any task. Before falling
+                    // through to executing it as a custom shell command, check
+                    // whether the user clearly meant a task name (single bare
+                    // identifier close to an existing task) so we can surface a
+                    // clap-style "did you mean" error rather than leaving the
+                    // shell to report "command not found".
+                    if args.len() == 1 {
+                        let known_task_names: Vec<String> = search_envs
+                            .project
+                            .environments()
+                            .into_iter()
+                            .flat_map(|env| env.get_filtered_tasks())
+                            .map(|task_name| task_name.as_str().to_owned())
+                            .collect();
+                        if let Some(rendered) = unknown_command_error(name, &known_task_names) {
+                            return Err(TaskGraphError::UnknownCommand {
+                                name: name.clone(),
+                                rendered,
+                            });
+                        }
+                    }
+                }
                 Err(FindTaskError::AmbiguousTask(err)) => {
                     return Err(TaskGraphError::AmbiguousTask(err));
                 }
@@ -469,6 +491,7 @@ impl<'p> TaskGraph<'p> {
                     task: Cow::Borrowed(task_dependency),
                     run_environment: task_env,
                     args: Some(Self::merge_args(
+                        task_dependency,
                         &dependency.task_name,
                         task_dependency.args().map(|args| args.to_vec()).as_ref(),
                         dependency.args.as_ref(),
@@ -495,6 +518,7 @@ impl<'p> TaskGraph<'p> {
     }
 
     fn merge_args(
+        task: &Task,
         task_name: &TaskName,
         task_arguments: Option<&Vec<TaskArg>>,
         dep_args: Option<&Vec<TypedDependencyArg>>,
@@ -503,11 +527,6 @@ impl<'p> TaskGraph<'p> {
             Some(args) => args,
             None => &Vec::new(),
         };
-
-        let task_arg_names: Vec<String> = task_arguments
-            .iter()
-            .map(|arg| arg.name.as_str().to_owned())
-            .collect();
 
         let dep_args = match dep_args {
             Some(args) => args,
@@ -527,88 +546,25 @@ impl<'p> TaskGraph<'p> {
             return Ok(ArgValues::FreeFormArgs(free_form_args));
         }
 
-        let mut named_args = Vec::new();
-        let mut seen_named = false;
-
-        // build up vec of named args whilst validating that all named args are valid for this task,
-        // and that all positional args precede any named args
-        for arg in dep_args {
-            match arg {
-                TypedDependencyArg::Named(name, value) => {
-                    if !task_arg_names.contains(name) {
-                        return Err(TaskGraphError::UnknownArgument(
-                            name.to_string(),
-                            task_name.to_string(),
-                        ));
-                    }
-                    seen_named = true;
-                    named_args.push((name.to_string(), value.to_string()));
-                }
-                TypedDependencyArg::Positional(value) => {
-                    if seen_named {
-                        return Err(TaskGraphError::PositionalAfterNamedArgument(
-                            value.to_string(),
-                            task_name.to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-
-        let mut typed_args = Vec::with_capacity(task_arguments.len());
-
-        for (i, arg) in task_arguments.iter().enumerate() {
-            let arg_name = arg.name.as_str();
-            let arg_value = if let Some((_n, v)) = named_args.iter().find(|(n, _v)| n == arg_name) {
-                // a matching named arg was specified
-                v.to_string()
-            } else if i < dep_args.len() {
-                // check for a positional arg, or a default value, or error
-                match &dep_args[i] {
-                    TypedDependencyArg::Positional(v) => v.clone(),
-                    _ => {
-                        if let Some(default) = &arg.default {
-                            default.clone()
-                        } else {
-                            return Err(MissingArgError {
-                                arg: arg_name.to_string(),
-                                task: task_name.to_string(),
-                                choices: arg.choices.as_ref().map(|c| c.join(", ")),
-                            }
-                            .into());
-                        }
-                    }
-                }
-            } else if let Some(default) = &arg.default {
-                default.clone()
-            } else {
-                return Err(MissingArgError {
-                    arg: arg_name.to_owned(),
+        // Delegate to the clap-based dependency parser so depends-on
+        // produces the same error rendering as direct CLI invocations
+        // (usage line, `[possible values: ...]`, unknown `--flag`, etc.).
+        let values =
+            parse_dep_task_args(task_name.as_str(), task, dep_args).map_err(|rendered| {
+                TaskGraphError::TaskArgs {
                     task: task_name.to_string(),
-                    choices: arg.choices.as_ref().map(|c| c.join(", ")),
+                    rendered,
                 }
-                .into());
-            };
+            })?;
 
-            if !arg.is_valid_value(&arg_value) {
-                return Err(InvalidArgValueError {
-                    arg: arg_name.to_owned(),
-                    task: task_name.to_string(),
-                    value: arg_value,
-                    choices: arg
-                        .choices
-                        .as_ref()
-                        .map(|c| c.join(", "))
-                        .unwrap_or_default(),
-                }
-                .into());
-            }
-
-            typed_args.push(TypedArg {
-                name: arg_name.to_owned(),
-                value: arg_value,
-            });
-        }
+        let typed_args = task_arguments
+            .iter()
+            .zip(values.into_iter())
+            .map(|(declared, value)| TypedArg {
+                name: declared.name.as_str().to_owned(),
+                value,
+            })
+            .collect();
 
         Ok(ArgValues::TypedArgs {
             args: typed_args,
@@ -662,33 +618,23 @@ pub enum TaskGraphError {
     #[error("could not split task, assuming non valid task")]
     InvalidTask,
 
-    #[error("task '{0}' received more arguments than expected")]
-    #[diagnostic(help("use `--` to separate task arguments from extra passthrough arguments"))]
-    TooManyArguments(String),
-
-    /// Wraps the clap-rendered error message for a typed task's CLI args.
+    /// Wraps the clap-rendered error message for a task's arguments.
     ///
-    /// Carries the message verbatim so that we present the same usage line,
-    /// "possible values" hint and did-you-mean suggestions that the rest of
-    /// the pixi CLI uses.
+    /// Produced for both direct CLI invocations and TOML `depends-on`
+    /// entries so the diagnostic surface matches the rest of the pixi CLI
+    /// (usage line, `[possible values: ...]`, "unexpected argument").
     #[error("invalid arguments for task '{task}':\n\n{rendered}")]
     TaskArgs { task: String, rendered: String },
 
-    #[error(transparent)]
-    MissingArgument(#[from] MissingArgError),
+    /// The first argument is not a known task, but it is similar enough to
+    /// one that we surface a clap-rendered "did you mean" error instead of
+    /// silently falling through to running it as a shell command.
+    #[error("no task named '{name}':\n\n{rendered}")]
+    UnknownCommand { name: String, rendered: String },
 
     #[error(transparent)]
     #[diagnostic(transparent)]
     TemplateStringError(#[from] TemplateStringError),
-
-    #[error("named argument '{0}' does not exist for task {1}")]
-    UnknownArgument(String, String),
-
-    #[error("Positional argument '{0}' found after named argument for task {1}")]
-    PositionalAfterNamedArgument(String, String),
-
-    #[error(transparent)]
-    InvalidArgValue(#[from] InvalidArgValueError),
 }
 
 #[cfg(test)]
