@@ -97,6 +97,16 @@ pub struct Args {
     #[clap(short = 'n', long)]
     pub dry_run: bool,
 
+    /// Refuse to run anything that isn't a declared task.
+    ///
+    /// Without this flag, `pixi run <name>` falls through to executing
+    /// `<name>` as a shell command when no task matches — useful for
+    /// invoking arbitrary executables from the environment. Passing
+    /// `--no-external` disables that fall-through: unknown names are
+    /// rejected with a clap error (including a "did you mean" hint).
+    #[arg(long)]
+    pub no_external: bool,
+
     #[clap(long, action = clap::ArgAction::HelpLong)]
     pub help: Option<bool>,
 
@@ -215,6 +225,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             PreferExecutable::TaskFirst
         },
         args.templated,
+        !args.no_external,
     )?;
     tracing::debug!("Task graph: {}", task_graph);
 
@@ -365,7 +376,15 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 task_idx += 1;
             }
             Err(TaskExecutionError::NonZeroExitCode(code)) => {
-                if code == 127 {
+                // When we fell through to running the input as a shell
+                // command (a `Custom` anonymous task) and the shell
+                // reports "command not found" (POSIX exit 127), the user
+                // likely typed something that wasn't a task and isn't an
+                // executable either. Surface the task list so they can
+                // see what was available. For named tasks, a 127 exit
+                // means a *step* inside the task failed — not actionable
+                // by listing tasks, so we leave it alone.
+                if code == 127 && executable_task.task().is_custom() {
                     command_not_found(&workspace, explicit_environment.clone());
                 }
                 std::process::exit(code);
