@@ -20,6 +20,7 @@ use thiserror::Error;
 
 use crate::{
     TaskDisambiguation,
+    clap_command::parse_typed_task_args,
     error::{AmbiguousTaskError, InvalidArgValueError, MissingArgError, MissingTaskError},
     task_environment::{FindTaskError, FindTaskSource, SearchEnvironments},
 };
@@ -263,33 +264,27 @@ impl<'p> TaskGraph<'p> {
                             vec![]
                         };
 
-                        // Check if we don't have more arguments than the task expects
-                        if args.len() > task_arguments.len() {
-                            return Err(TaskGraphError::TooManyArguments(task_name.to_string()));
-                        }
+                        // Parse the typed arguments using a clap `Command` built from the
+                        // task's argument schema. This gives us the same error rendering
+                        // as the rest of the pixi CLI (usage line, possible values, etc.).
+                        let values = parse_typed_task_args(&task_name, task, &args)
+                            .map_err(|rendered| TaskGraphError::TaskArgs {
+                                task: task_name.clone(),
+                                rendered,
+                            })?;
 
-                        // TODO: support named arguments from the CLI
-                        let typed_dep_args = args
+                        let typed = task_arguments
                             .iter()
-                            .map(|a| TypedDependencyArg::Positional(a.to_string()))
+                            .zip(values.into_iter())
+                            .map(|(declared, value)| TypedArg {
+                                name: declared.name.as_str().to_owned(),
+                                value,
+                            })
                             .collect();
 
-                        let merged = Self::merge_args(
-                            &TaskName::from(task_name.clone()),
-                            Some(&task_arguments.to_vec()),
-                            Some(&typed_dep_args),
-                        )?;
-
-                        // Combine with any extra args passed after `--`
-                        Some(match merged {
-                            ArgValues::TypedArgs { args: typed, .. } => ArgValues::TypedArgs {
-                                args: typed,
-                                extra: extra_args,
-                            },
-                            ArgValues::FreeFormArgs(mut free) => {
-                                free.extend(extra_args);
-                                ArgValues::FreeFormArgs(free)
-                            }
+                        Some(ArgValues::TypedArgs {
+                            args: typed,
+                            extra: extra_args,
                         })
                     } else {
                         // Task has no typed args — strip the `--` separator only if it is
@@ -670,6 +665,14 @@ pub enum TaskGraphError {
     #[error("task '{0}' received more arguments than expected")]
     #[diagnostic(help("use `--` to separate task arguments from extra passthrough arguments"))]
     TooManyArguments(String),
+
+    /// Wraps the clap-rendered error message for a typed task's CLI args.
+    ///
+    /// Carries the message verbatim so that we present the same usage line,
+    /// "possible values" hint and did-you-mean suggestions that the rest of
+    /// the pixi CLI uses.
+    #[error("invalid arguments for task '{task}':\n\n{rendered}")]
+    TaskArgs { task: String, rendered: String },
 
     #[error(transparent)]
     MissingArgument(#[from] MissingArgError),
@@ -1186,11 +1189,10 @@ mod test {
     "#;
         let run_args = &["build", "profile"];
         let error = TaskGraphTest::new(workspace_str, run_args).expect_error();
-        assert_matches!(error, TaskGraphError::InvalidArgValue(err) => {
-            assert_eq!(err.arg, "target");
-            assert_eq!(err.task, "build");
-            assert_eq!(err.value, "profile");
-            assert_eq!(err.choices, "debug, release");
+        assert_matches!(error, TaskGraphError::TaskArgs { task, rendered } => {
+            assert_eq!(task, "build");
+            assert!(rendered.contains("profile"), "rendered: {rendered}");
+            assert!(rendered.contains("debug") && rendered.contains("release"), "rendered: {rendered}");
         });
     }
 
@@ -1208,10 +1210,10 @@ mod test {
     "#;
         let run_args = &["build"];
         let error = TaskGraphTest::new(workspace_str, run_args).expect_error();
-        assert_matches!(error, TaskGraphError::MissingArgument(err) => {
-            assert_eq!(err.arg, "target");
-            assert_eq!(err.task, "build");
-            assert_eq!(err.choices, Some("debug, release".to_string()));
+        assert_matches!(error, TaskGraphError::TaskArgs { task, rendered } => {
+            assert_eq!(task, "build");
+            assert!(rendered.contains("target"), "rendered: {rendered}");
+            assert!(rendered.contains("pixi run build"), "rendered: {rendered}");
         });
     }
 

@@ -12,6 +12,7 @@ version = "0.1.0"
 [dependencies]
 anyhow = { workspace = true }
 assert_matches = { workspace = true }
+clap = { workspace = true, features = ["std", "error-context", "color", "wrap_help", "usage"] }
 crossbeam-channel = { workspace = true }
 deno_task_shell = { workspace = true }
 fancy_display = { workspace = true }

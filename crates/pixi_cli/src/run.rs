@@ -1,7 +1,8 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     convert::identity,
     ffi::OsString,
+    io::Write,
     string::String,
 };
 
@@ -390,27 +391,66 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 }
 
 /// Called when a command was not found.
+///
+/// Renders the available tasks for the selected environment(s) along with
+/// their descriptions, so that bare `pixi run` matches the richer output of
+/// `pixi task list` (see https://github.com/prefix-dev/pixi/issues/5276).
 fn command_not_found<'p>(workspace: &'p Workspace, explicit_environment: Option<Environment<'p>>) {
-    let available_tasks: HashSet<TaskName> =
-        if let Some(explicit_environment) = explicit_environment {
-            explicit_environment.get_filtered_tasks()
-        } else {
-            workspace
-                .environments()
-                .into_iter()
-                .flat_map(|env| env.get_filtered_tasks())
-                .collect()
-        };
+    let environments: Vec<Environment<'p>> = match explicit_environment {
+        Some(env) => vec![env],
+        None => workspace.environments(),
+    };
 
-    if !available_tasks.is_empty() {
+    // Collect the visible tasks (skipping `_`-prefixed) and the first
+    // description we see per task name.
+    let visible_tasks: HashSet<TaskName> = environments
+        .iter()
+        .flat_map(|env| env.get_filtered_tasks())
+        .collect();
+
+    let mut descriptions: BTreeMap<TaskName, String> = BTreeMap::new();
+    for env in &environments {
+        if let Ok(tasks) = env.tasks(Some(env.best_platform())) {
+            for (name, task) in tasks {
+                if !visible_tasks.contains(name) || descriptions.contains_key(name) {
+                    continue;
+                }
+                if let Some(description) = task.description() {
+                    descriptions.insert(name.clone(), description.to_string());
+                }
+            }
+        }
+    }
+
+    if !visible_tasks.is_empty() {
+        let header_style = console::Style::new().bold().cyan();
+        let italic = console::Style::new().italic();
+
+        // Render the table into a buffer so we can emit it as one
+        // `pixi_progress::println!` call (which suspends any active progress
+        // bar around the write).
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut writer = tabwriter::TabWriter::new(&mut buffer);
+        let _ = writeln!(
+            writer,
+            "{}\t{}",
+            header_style.apply_to("Task"),
+            header_style.apply_to("Description"),
+        );
+        for name in visible_tasks.iter().sorted() {
+            let description = descriptions
+                .get(name)
+                .map(|d| italic.apply_to(d.as_str()).to_string())
+                .unwrap_or_default();
+            let _ = writeln!(writer, "{}\t{}", name.fancy_display().bold(), description);
+        }
+        let _ = writer.flush();
+        let table = String::from_utf8_lossy(&buffer);
+
         pixi_progress::println!(
-            "\nAvailable tasks:\n{}",
-            available_tasks
-                .into_iter()
-                .sorted()
-                .format_with("\n", |name, f| {
-                    f(&format_args!("\t{}", name.fancy_display().bold()))
-                })
+            "\n{}\n{}",
+            console::style("Available tasks:").bold(),
+            table.trim_end(),
         );
     }
 
