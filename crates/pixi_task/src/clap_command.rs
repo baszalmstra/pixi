@@ -29,13 +29,11 @@ const FREEFORM_ARG_ID: &str = "__pixi_free";
 /// (a task with the same name defined in multiple environments) the first
 /// definition wins for purposes of the args schema.
 ///
-/// When `allow_external` is `true`, unknown subcommands are accepted and
-/// returned as [`RunParseResult::External`] — the caller can then run
-/// them through the shell (preserving `pixi run python script.py`). When
-/// `false`, clap rejects unknown subcommands with its standard
-/// `InvalidSubcommand` error, complete with the built-in "tip: a similar
-/// subcommand exists" hint.
-pub fn build_run_command<'a, I>(tasks: I, allow_external: bool) -> Command
+/// Unknown subcommands are accepted via clap's
+/// `allow_external_subcommands` and returned as
+/// [`RunParseResult::External`] so the caller can run them through the
+/// shell (preserving `pixi run python script.py`).
+pub fn build_run_command<'a, I>(tasks: I) -> Command
 where
     I: IntoIterator<Item = (&'a str, &'a Task)>,
 {
@@ -44,7 +42,7 @@ where
         .disable_help_flag(true)
         .disable_version_flag(true)
         .subcommand_required(true)
-        .allow_external_subcommands(allow_external)
+        .allow_external_subcommands(true)
         .override_usage("pixi run <TASK> [ARGS]");
 
     let mut seen = std::collections::HashSet::new();
@@ -152,28 +150,18 @@ pub enum RunParseError {
     /// pre-formatted error message (usage line, possible-values hint,
     /// duplicate-arg, etc.).
     TaskArgs { task: String, rendered: String },
-    /// The first token didn't match any task but clap suggested a close
-    /// match. `rendered` is clap's full "invalid subcommand … tip: a
-    /// similar value exists" message.
-    UnknownTask { name: String, rendered: String },
 }
 
 /// Parse the trailing arguments of `pixi run` against the dynamic task
 /// subcommand tree.
 ///
-/// `allow_external` toggles clap's `allow_external_subcommands`:
-/// * `true` (default) — unknown subcommands come back as
-///   [`RunParseResult::External`]; the caller runs them as a shell
-///   command and falls back to printing `command_not_found` if the
-///   shell exits 127.
-/// * `false` (`--no-external` mode) — clap rejects unknown
-///   subcommands with its standard `InvalidSubcommand` error, including
-///   the "tip: a similar subcommand exists" hint. We surface that as
-///   [`RunParseError::UnknownTask`].
+/// Unknown subcommands come back as [`RunParseResult::External`] (via
+/// clap's `allow_external_subcommands`); the caller is expected to run
+/// them as a shell command and fall back to printing `command_not_found`
+/// if the shell exits 127.
 pub fn parse_run_args<'a, I>(
     tasks: I,
     cli_args: &[String],
-    allow_external: bool,
 ) -> Result<RunParseResult, RunParseError>
 where
     I: IntoIterator<Item = (&'a str, &'a Task)>,
@@ -193,10 +181,7 @@ where
         task_map.entry(name.as_str()).or_insert(*task);
     }
 
-    let command = build_run_command(
-        task_vec.iter().map(|(n, t)| (n.as_str(), *t)),
-        allow_external,
-    );
+    let command = build_run_command(task_vec.iter().map(|(n, t)| (n.as_str(), *t)));
 
     let matches = match command.try_get_matches_from(cli_args) {
         Ok(m) => m,
@@ -259,18 +244,12 @@ where
 /// With `allow_external_subcommands(true)` clap doesn't produce
 /// `InvalidSubcommand` for unknown names — those come back as `Ok` with
 /// an external subcommand match. The only remaining error kinds are
-/// arg-validation failures inside a known subcommand, and
-/// `InvalidSubcommand` from `--no-external` mode (which is exactly
-/// what we surface as `UnknownTask`).
+/// arg-validation failures inside a known subcommand.
 fn dispatch_clap_error(
     err: clap::Error,
     cli_args: &[String],
 ) -> Result<RunParseResult, RunParseError> {
     match err.kind() {
-        ErrorKind::InvalidSubcommand => Err(RunParseError::UnknownTask {
-            name: cli_args[0].clone(),
-            rendered: err.render().to_string(),
-        }),
         ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
             Ok(RunParseResult::Empty)
         }
@@ -404,7 +383,7 @@ mod tests {
     #[test]
     fn empty_args_returns_empty() {
         let task = free_form_task();
-        let result = parse_run_args([("hello", &task)], &[], true).unwrap();
+        let result = parse_run_args([("hello", &task)], &[]).unwrap();
         assert!(matches!(result, RunParseResult::Empty));
     }
 
@@ -415,7 +394,7 @@ mod tests {
             default: None,
             choices: Some(vec!["debug".into(), "release".into()]),
         }]);
-        let result = parse_run_args([("build", &task)], &[s("build"), s("debug")], true).unwrap();
+        let result = parse_run_args([("build", &task)], &[s("build"), s("debug")]).unwrap();
         match result {
             RunParseResult::Task { name, values, extra } => {
                 assert_eq!(name, "build");
@@ -436,7 +415,6 @@ mod tests {
         let result = parse_run_args(
             [("build", &task)],
             &[s("build"), s("debug"), s("--"), s("--verbose"), s("foo")],
-            true,
         )
         .unwrap();
         match result {
@@ -454,7 +432,6 @@ mod tests {
         let result = parse_run_args(
             [("hello", &task)],
             &[s("hello"), s("--help"), s("--"), s("more")],
-            true,
         )
         .unwrap();
         match result {
@@ -468,56 +445,25 @@ mod tests {
     }
 
     #[test]
-    fn unknown_token_falls_through_by_default() {
-        // With `allow_external == true`, both close-match typos and
-        // genuinely unrelated tokens fall through to the shell. The CLI
-        // layer then surfaces `command_not_found` if the shell exits 127.
+    fn unknown_token_falls_through() {
+        // Both close-match typos and genuinely unrelated tokens fall
+        // through to the shell via clap's `allow_external_subcommands`.
+        // The CLI layer surfaces `command_not_found` if the shell exits
+        // 127.
         let task = task_with_args(vec![TaskArg {
             name: ArgName::from_str("target").unwrap(),
             default: None,
             choices: None,
         }]);
 
-        let typo = parse_run_args([("build", &task)], &[s("buidl")], true).unwrap();
+        let typo = parse_run_args([("build", &task)], &[s("buidl")]).unwrap();
         assert!(matches!(typo, RunParseResult::External(ref a) if a == &vec![s("buidl")]));
 
         let distant =
-            parse_run_args([("build", &task)], &[s("python"), s("script.py")], true).unwrap();
+            parse_run_args([("build", &task)], &[s("python"), s("script.py")]).unwrap();
         assert!(
             matches!(distant, RunParseResult::External(ref a) if a == &vec![s("python"), s("script.py")])
         );
-    }
-
-    #[test]
-    fn unknown_token_errors_with_no_external() {
-        // With `allow_external == false`, clap reports `InvalidSubcommand`
-        // and includes its built-in "did you mean" tip for close matches.
-        let task = task_with_args(vec![TaskArg {
-            name: ArgName::from_str("target").unwrap(),
-            default: None,
-            choices: None,
-        }]);
-        let err = parse_run_args([("build", &task)], &[s("buidl")], false).unwrap_err();
-        match err {
-            RunParseError::UnknownTask { name, rendered } => {
-                assert_eq!(name, "buidl");
-                assert!(rendered.contains("build"), "{rendered}");
-            }
-            other => panic!("expected UnknownTask, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn distant_token_errors_with_no_external_without_suggestion() {
-        let task = task_with_args(vec![TaskArg {
-            name: ArgName::from_str("target").unwrap(),
-            default: None,
-            choices: None,
-        }]);
-        let err = parse_run_args([("build", &task)], &[s("python")], false).unwrap_err();
-        // Still UnknownTask — `--no-external` doesn't fall through even
-        // when no suggestion is available.
-        assert!(matches!(err, RunParseError::UnknownTask { .. }));
     }
 
     #[test]
@@ -527,7 +473,7 @@ mod tests {
             default: None,
             choices: Some(vec!["debug".into(), "release".into()]),
         }]);
-        let err = parse_run_args([("build", &task)], &[s("build"), s("profile")], true).unwrap_err();
+        let err = parse_run_args([("build", &task)], &[s("build"), s("profile")]).unwrap_err();
         match err {
             RunParseError::TaskArgs { task, rendered } => {
                 assert_eq!(task, "build");
@@ -548,7 +494,7 @@ mod tests {
             default: None,
             choices: None,
         }]);
-        let err = parse_run_args([("build", &task)], &[s("build")], true).unwrap_err();
+        let err = parse_run_args([("build", &task)], &[s("build")]).unwrap_err();
         assert!(matches!(err, RunParseError::TaskArgs { .. }));
     }
 
@@ -559,7 +505,7 @@ mod tests {
             default: Some("debug".into()),
             choices: None,
         }]);
-        let result = parse_run_args([("build", &task)], &[s("build")], true).unwrap();
+        let result = parse_run_args([("build", &task)], &[s("build")]).unwrap();
         match result {
             RunParseResult::Task { values, .. } => assert_eq!(values, vec![s("debug")]),
             other => panic!("expected Task, got {other:?}"),

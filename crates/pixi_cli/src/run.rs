@@ -97,16 +97,6 @@ pub struct Args {
     #[clap(short = 'n', long)]
     pub dry_run: bool,
 
-    /// Refuse to run anything that isn't a declared task.
-    ///
-    /// Without this flag, `pixi run <name>` falls through to executing
-    /// `<name>` as a shell command when no task matches — useful for
-    /// invoking arbitrary executables from the environment. Passing
-    /// `--no-external` disables that fall-through: unknown names are
-    /// rejected with a clap error (including a "did you mean" hint).
-    #[arg(long)]
-    pub no_external: bool,
-
     #[clap(long, action = clap::ArgAction::HelpLong)]
     pub help: Option<bool>,
 
@@ -225,7 +215,6 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             PreferExecutable::TaskFirst
         },
         args.templated,
-        !args.no_external,
     )?;
     tracing::debug!("Task graph: {}", task_graph);
 

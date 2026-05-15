@@ -211,11 +211,6 @@ impl<'p> TaskGraph<'p> {
     /// name exists. Instead, the arguments are treated as a custom command to
     /// execute within the environment, allowing running executables that
     /// collide with task names.
-    ///
-    /// When `allow_external` is `false`, unknown first-token names are
-    /// rejected with clap's `InvalidSubcommand` error (including the
-    /// built-in did-you-mean tip) rather than falling through to the
-    /// shell. This is the `pixi run --no-external` mode.
     pub fn from_cmd_args<D: TaskDisambiguation<'p>>(
         project: &'p Workspace,
         search_envs: &SearchEnvironments<'p, D>,
@@ -223,7 +218,6 @@ impl<'p> TaskGraph<'p> {
         skip_deps: bool,
         prefer_executable: PreferExecutable,
         templated: bool,
-        allow_external: bool,
     ) -> Result<Self, TaskGraphError> {
         // Split 'args' into arguments if it's a single string, supporting commands
         // like: `"test 1 == 0 || echo failed"` or `"echo foo && echo bar"` or
@@ -259,13 +253,9 @@ impl<'p> TaskGraph<'p> {
             let parse = parse_run_args(
                 task_pairs.iter().map(|(n, t)| (n.as_str(), *t)),
                 &args,
-                allow_external,
             );
 
             match parse {
-                Err(RunParseError::UnknownTask { name, rendered }) => {
-                    return Err(TaskGraphError::UnknownCommand { name, rendered });
-                }
                 Err(RunParseError::TaskArgs { task, rendered }) => {
                     return Err(TaskGraphError::TaskArgs { task, rendered });
                 }
@@ -622,12 +612,6 @@ pub enum TaskGraphError {
     #[error("invalid arguments for task '{task}':\n\n{rendered}")]
     TaskArgs { task: String, rendered: String },
 
-    /// The first argument is not a known task, but it is similar enough to
-    /// one that we surface a clap-rendered "did you mean" error instead of
-    /// silently falling through to running it as a shell command.
-    #[error("no task named '{name}':\n\n{rendered}")]
-    UnknownCommand { name: String, rendered: String },
-
     #[error(transparent)]
     #[diagnostic(transparent)]
     TemplateStringError(#[from] TemplateStringError),
@@ -713,7 +697,6 @@ mod test {
                 self.skip_deps,
                 self.prefer_executable,
                 self.templated,
-                true,
             )?;
 
             let commands = graph
@@ -1032,7 +1015,6 @@ mod test {
             false,
             PreferExecutable::TaskFirst,
             false,
-            true,
         )
         .expect("should not fail with braces when templating is disabled");
 
@@ -1080,7 +1062,6 @@ mod test {
             vec!["echo".to_string(), "{{ pixi.platform }}".to_string()],
             false,
             PreferExecutable::TaskFirst,
-            true,
             true,
         )
         .expect("should succeed with valid template variable");
@@ -1202,7 +1183,6 @@ mod test {
             false,
             PreferExecutable::Always,
             false,
-            true,
         )
         .expect("graph should be created");
 
