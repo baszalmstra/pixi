@@ -20,7 +20,7 @@ use thiserror::Error;
 
 use crate::{
     TaskDisambiguation,
-    clap_command::{parse_dep_task_args, parse_typed_task_args, unknown_command_error},
+    clap_command::{RunParseError, RunParseResult, parse_dep_task_args, parse_run_args},
     error::{AmbiguousTaskError, MissingTaskError},
     task_environment::{FindTaskError, FindTaskSource, SearchEnvironments},
 };
@@ -223,7 +223,7 @@ impl<'p> TaskGraph<'p> {
         // like: `"test 1 == 0 || echo failed"` or `"echo foo && echo bar"` or
         // `"echo 'Hello World'"` This prevents shell interpretation of pixi run
         // inputs. Use as-is if 'task' already contains multiple elements.
-        let (mut args, verbatim) = if args.len() == 1 {
+        let (args, verbatim) = if args.len() == 1 {
             (
                 shlex::split(args[0].as_str()).ok_or(TaskGraphError::InvalidTask)?,
                 false,
@@ -232,69 +232,70 @@ impl<'p> TaskGraph<'p> {
             (args, true)
         };
 
-        if prefer_executable == PreferExecutable::TaskFirst
-            && let Some(name) = args.first()
-        {
-            match search_envs.find_task(TaskName::from(name.clone()), FindTaskSource::CmdArgs, None)
-            {
-                Err(FindTaskError::MissingTask(_)) => {
-                    // The first argument doesn't match any task. Before falling
-                    // through to executing it as a custom shell command, check
-                    // whether the user clearly meant a task name (single bare
-                    // identifier close to an existing task) so we can surface a
-                    // clap-style "did you mean" error rather than leaving the
-                    // shell to report "command not found".
-                    if args.len() == 1 {
-                        let known_task_names: Vec<String> = search_envs
-                            .project
-                            .environments()
-                            .into_iter()
-                            .flat_map(|env| env.get_filtered_tasks())
-                            .map(|task_name| task_name.as_str().to_owned())
-                            .collect();
-                        if let Some(rendered) = unknown_command_error(name, &known_task_names) {
-                            return Err(TaskGraphError::UnknownCommand {
-                                name: name.clone(),
-                                rendered,
-                            });
+        if prefer_executable == PreferExecutable::TaskFirst {
+            // Build a list of (name, &Task) covering every task visible in
+            // the workspace. clap's subcommand matching then handles task
+            // recognition, did-you-mean and arg validation in one pass.
+            let task_pairs: Vec<(TaskName, &Task)> = project
+                .environments()
+                .into_iter()
+                .flat_map(|env| {
+                    let platform = Some(env.best_platform());
+                    env.tasks(platform)
+                        .into_iter()
+                        .flat_map(|tasks| tasks.into_iter())
+                        .filter(|(name, _)| !name.as_str().starts_with('_'))
+                        .map(|(name, task)| (name.clone(), task))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            let parse = parse_run_args(
+                task_pairs.iter().map(|(n, t)| (n.as_str(), *t)),
+                &args,
+            );
+
+            match parse {
+                Err(RunParseError::UnknownTask { name, rendered }) => {
+                    return Err(TaskGraphError::UnknownCommand { name, rendered });
+                }
+                Err(RunParseError::TaskArgs { task, rendered }) => {
+                    return Err(TaskGraphError::TaskArgs { task, rendered });
+                }
+                Ok(RunParseResult::Empty) => {
+                    // Empty input — fall through; the caller will print
+                    // `command_not_found`. (`from_cmd_args` is normally
+                    // gated on non-empty args, so this is just defensive.)
+                }
+                Ok(RunParseResult::External(_)) => {
+                    // No task matched and clap saw no close match. Fall
+                    // through to running the input as a shell command so
+                    // `pixi run python script.py` still works.
+                }
+                Ok(RunParseResult::Task { name, values, extra }) => {
+                    // Resolve the task to a concrete environment. This is
+                    // where ambiguity (same task name in multiple envs) is
+                    // surfaced.
+                    let (task_env, task) = match search_envs.find_task(
+                        TaskName::from(name.clone()),
+                        FindTaskSource::CmdArgs,
+                        None,
+                    ) {
+                        Err(FindTaskError::MissingTask(err)) => {
+                            return Err(TaskGraphError::MissingTask(err));
                         }
-                    }
-                }
-                Err(FindTaskError::AmbiguousTask(err)) => {
-                    return Err(TaskGraphError::AmbiguousTask(err));
-                }
-                Ok((task_env, task)) => {
-                    // If an explicit environment was specified and the task is from the default
-                    // environment use the specified environment instead.
+                        Err(FindTaskError::AmbiguousTask(err)) => {
+                            return Err(TaskGraphError::AmbiguousTask(err));
+                        }
+                        Ok(found) => found,
+                    };
+
                     let run_env = match search_envs.explicit_environment.clone() {
                         Some(explicit_env) if task_env.is_default() => explicit_env,
                         _ => task_env,
                     };
 
-                    let task_name = args.remove(0);
-
                     let arg_values = if let Some(task_arguments) = task.args() {
-                        // Extract any arguments after `--`. For tasks with typed args, `--`
-                        // can appear anywhere after the task name (e.g. after providing all
-                        // typed arg values). Everything before `--` is treated as typed args;
-                        // everything after is forwarded verbatim to the underlying command.
-                        let extra_args = if let Some(pos) = args.iter().position(|a| a == "--") {
-                            let extra = args[pos + 1..].to_vec();
-                            args.truncate(pos);
-                            extra
-                        } else {
-                            vec![]
-                        };
-
-                        // Parse the typed arguments using a clap `Command` built from the
-                        // task's argument schema. This gives us the same error rendering
-                        // as the rest of the pixi CLI (usage line, possible values, etc.).
-                        let values = parse_typed_task_args(&task_name, task, &args)
-                            .map_err(|rendered| TaskGraphError::TaskArgs {
-                                task: task_name.clone(),
-                                rendered,
-                            })?;
-
                         let typed = task_arguments
                             .iter()
                             .zip(values.into_iter())
@@ -303,29 +304,21 @@ impl<'p> TaskGraph<'p> {
                                 value,
                             })
                             .collect();
-
                         Some(ArgValues::TypedArgs {
                             args: typed,
-                            extra: extra_args,
+                            extra,
                         })
                     } else {
-                        // Task has no typed args — strip the `--` separator only if it is
-                        // the first argument after the task name. A `--` that appears later
-                        // is passed through verbatim (it may be meaningful to the underlying
-                        // command, e.g. `git log -- somefile`).
-                        let free_args = if args.first().map(|s| s.as_str()) == Some("--") {
-                            args[1..].to_vec()
-                        } else {
-                            args.clone()
-                        };
-                        Some(ArgValues::FreeFormArgs(free_args))
+                        Some(ArgValues::FreeFormArgs(extra))
                     };
+
+                    let task_name: TaskName = name.into();
 
                     if skip_deps {
                         return Ok(Self {
                             project,
                             nodes: vec![TaskNode {
-                                name: Some(task_name.into()),
+                                name: Some(task_name),
                                 task: Cow::Borrowed(task),
                                 run_environment: run_env,
                                 args: arg_values,
@@ -338,17 +331,13 @@ impl<'p> TaskGraph<'p> {
                         project,
                         search_envs,
                         TaskNode {
-                            name: Some(task_name.into()),
+                            name: Some(task_name),
                             task: Cow::Borrowed(task),
                             run_environment: run_env,
                             args: arg_values,
                             dependencies: vec![],
                         },
-                        Some(
-                            args.iter()
-                                .map(|a| TypedDependencyArg::Positional(a.clone()))
-                                .collect(),
-                        ),
+                        None,
                     );
                 }
             }

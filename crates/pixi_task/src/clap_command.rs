@@ -1,46 +1,109 @@
-//! Build a [`clap::Command`] from a pixi [`Task`] so that the same parser
-//! used for the rest of pixi's CLI can validate task arguments and render
-//! its familiar error messages (usage line, possible values, etc.).
+//! Build a [`clap::Command`] for `pixi run` where each pixi task is a
+//! dynamically-registered subcommand. This lets clap drive everything we
+//! used to do by hand — subcommand matching, did-you-mean for unknown
+//! tasks, validation of typed arguments, and arg forwarding — so the
+//! diagnostics look like the rest of pixi's CLI.
 //!
-//! Tasks are defined in TOML rather than as Rust types, so this module uses
-//! clap's builder API to construct the [`clap::Command`] dynamically from
-//! the task's typed `args` definition.
+//! Tasks live in TOML rather than as Rust types, so the [`Command`] is
+//! assembled at runtime using clap's builder API.
 
-use clap::{Arg, Command, builder::PossibleValuesParser, error::ContextKind};
+use std::collections::HashMap;
+
+use clap::{
+    Arg, Command,
+    builder::PossibleValuesParser,
+    error::{ContextKind, ErrorKind},
+};
 use pixi_manifest::{
     Task,
     task::{TaskArg, TypedDependencyArg},
 };
 
-/// Builds a [`clap::Command`] that parses the positional arguments for a
-/// task.
+/// Sentinel arg id used to collect everything after `--` for tasks with
+/// typed args.
+const EXTRA_ARG_ID: &str = "__pixi_extra";
+/// Sentinel arg id used to slurp every argument for tasks without typed
+/// args (free-form forwarding).
+const FREEFORM_ARG_ID: &str = "__pixi_free";
+
+/// Builds a [`Command`] that represents `pixi run` with every task in
+/// `tasks` registered as a subcommand.
 ///
-/// Each declared [`TaskArg`] becomes a positional [`Arg`]. Defaults and
-/// `choices` are translated into clap's `default_value` and
-/// `value_parser(PossibleValuesParser)`.
-///
-/// The command uses `no_binary_name(true)` so callers can feed it just the
-/// args after the task name. `--help` is not registered as a flag; tasks may
-/// legitimately want to forward `--help` to the underlying command (e.g.
-/// `pixi run ruff --help`).
-pub fn task_clap_command(task_name: &str, task: &Task) -> Command {
-    let mut command = Command::new(task_name.to_string())
+/// `tasks` is consumed in order; if the same name appears more than once
+/// (a task with the same name defined in multiple environments) the first
+/// definition wins for purposes of the args schema.
+pub fn build_run_command<'a, I>(tasks: I) -> Command
+where
+    I: IntoIterator<Item = (&'a str, &'a Task)>,
+{
+    let mut command = Command::new("pixi run")
         .no_binary_name(true)
         .disable_help_flag(true)
         .disable_version_flag(true)
-        .override_usage(format!("pixi run {task_name} [ARGS]"));
+        .subcommand_required(true)
+        .override_usage("pixi run <TASK> [ARGS]");
 
-    if let Some(description) = task.description() {
-        command = command.about(description.to_string());
-    }
-
-    if let Some(args) = task.args() {
-        for arg in args {
-            command = command.arg(task_arg_to_clap(arg));
+    let mut seen = std::collections::HashSet::new();
+    for (name, task) in tasks {
+        if seen.insert(name.to_string()) {
+            command = command.subcommand(task_subcommand(name, task));
         }
     }
 
     command
+}
+
+/// Builds the [`Command`] used as a subcommand for a single task.
+///
+/// * Typed tasks expose each declared [`TaskArg`] as a positional, plus a
+///   `last(true)` trailing arg that captures whatever follows `--` so it
+///   can be forwarded to the underlying command.
+/// * Free-form tasks (no `args` schema) use a single
+///   `trailing_var_arg(true) + allow_hyphen_values(true)` positional so
+///   the entire tail — including `--help`, `--`, hyphenated flags —
+///   reaches the underlying command verbatim.
+///
+/// `disable_help_flag(true)` is set on every subcommand: pixi's design is
+/// that `pixi run ruff --help` forwards `--help` to ruff, never
+/// intercepts it.
+fn task_subcommand(name: &str, task: &Task) -> Command {
+    let mut sub = Command::new(name.to_string())
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .override_usage(format!("pixi run {name} [ARGS]"));
+
+    if let Some(description) = task.description() {
+        sub = sub.about(description.to_string());
+    }
+
+    match task.args() {
+        Some(args) if !args.is_empty() => {
+            for arg in args {
+                sub = sub.arg(task_arg_to_clap(arg));
+            }
+            // Hidden sentinel: collects whatever follows `--` so it can be
+            // forwarded verbatim. Kept out of the usage line to avoid
+            // leaking the internal `__pixi_extra` name.
+            sub = sub.arg(
+                Arg::new(EXTRA_ARG_ID)
+                    .last(true)
+                    .num_args(0..)
+                    .allow_hyphen_values(true)
+                    .hide(true),
+            );
+        }
+        _ => {
+            sub = sub.arg(
+                Arg::new(FREEFORM_ARG_ID)
+                    .trailing_var_arg(true)
+                    .allow_hyphen_values(true)
+                    .num_args(0..)
+                    .hide(true),
+            );
+        }
+    }
+
+    sub
 }
 
 fn task_arg_to_clap(task_arg: &TaskArg) -> Arg {
@@ -57,34 +120,155 @@ fn task_arg_to_clap(task_arg: &TaskArg) -> Arg {
     arg
 }
 
-/// Parses CLI arguments for a task whose `args` schema is defined.
+/// Outcome of running `pixi run`'s args through the dynamic clap
+/// subcommand tree.
+#[derive(Debug)]
+pub enum RunParseResult {
+    /// `pixi run` invoked without anything after it.
+    Empty,
+    /// A known task matched and its arguments validated cleanly.
+    Task {
+        name: String,
+        /// One entry per declared [`TaskArg`], in declaration order.
+        values: Vec<String>,
+        /// Anything after `--` (for typed tasks) or the entire forwarded
+        /// arg list (for free-form tasks).
+        extra: Vec<String>,
+    },
+    /// The first token didn't match any task and clap didn't recommend a
+    /// close match — the caller should run it verbatim as a shell
+    /// command, preserving `pixi run python script.py`.
+    External(Vec<String>),
+}
+
+/// Error produced when clap rejects the user's `pixi run` invocation.
+#[derive(Debug)]
+pub enum RunParseError {
+    /// A known task's args failed validation. `rendered` is clap's
+    /// pre-formatted error message (usage line, possible-values hint,
+    /// duplicate-arg, etc.).
+    TaskArgs { task: String, rendered: String },
+    /// The first token didn't match any task but clap suggested a close
+    /// match. `rendered` is clap's full "invalid subcommand … tip: a
+    /// similar value exists" message.
+    UnknownTask { name: String, rendered: String },
+}
+
+/// Parse the trailing arguments of `pixi run` against the dynamic task
+/// subcommand tree.
 ///
-/// On success, returns the resolved value for each declared
-/// [`TaskArg`] in the same order. On failure, returns the fully-rendered
-/// clap error message (including the usage line and any "possible values"
-/// hint), which the caller can surface as a diagnostic.
-pub fn parse_typed_task_args(
-    task_name: &str,
-    task: &Task,
-    args: &[String],
-) -> Result<Vec<String>, String> {
-    let task_args = task.args().unwrap_or(&[]);
-    let command = task_clap_command(task_name, task);
-
-    let matches = command
-        .try_get_matches_from(args)
-        .map_err(|err| err.render().to_string())?;
-
-    let mut values = Vec::with_capacity(task_args.len());
-    for declared in task_args {
-        let name = declared.name.as_str();
-        let value = matches
-            .get_one::<String>(name)
-            .cloned()
-            .unwrap_or_default();
-        values.push(value);
+/// The result distinguishes the three possible outcomes:
+/// 1. A known task matched — the caller wires up a `TaskNode`.
+/// 2. The first token wasn't a task, but neither did clap suggest one —
+///    fall through to running it as an arbitrary shell command.
+/// 3. The args reached clap but failed validation — surface the rendered
+///    error directly.
+pub fn parse_run_args<'a, I>(
+    tasks: I,
+    cli_args: &[String],
+) -> Result<RunParseResult, RunParseError>
+where
+    I: IntoIterator<Item = (&'a str, &'a Task)>,
+{
+    if cli_args.is_empty() {
+        return Ok(RunParseResult::Empty);
     }
-    Ok(values)
+
+    // We need the task map to look up args after clap matches a
+    // subcommand. Collect first, then hand references back to clap.
+    let task_vec: Vec<(String, &Task)> = tasks
+        .into_iter()
+        .map(|(name, task)| (name.to_string(), task))
+        .collect();
+    let mut task_map: HashMap<&str, &Task> = HashMap::new();
+    for (name, task) in &task_vec {
+        task_map.entry(name.as_str()).or_insert(*task);
+    }
+
+    let command = build_run_command(task_vec.iter().map(|(n, t)| (n.as_str(), *t)));
+
+    let matches = match command.try_get_matches_from(cli_args) {
+        Ok(m) => m,
+        Err(err) => return dispatch_clap_error(err, cli_args),
+    };
+
+    let (name, sub_matches) = matches
+        .subcommand()
+        .expect("subcommand_required guarantees one matched");
+    let task = task_map.get(name).expect("matched name was registered");
+    let task_args = task.args().unwrap_or(&[]);
+
+    let values: Vec<String> = task_args
+        .iter()
+        .map(|a| {
+            sub_matches
+                .get_one::<String>(a.name.as_str())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let extra_key = if task_args.is_empty() {
+        FREEFORM_ARG_ID
+    } else {
+        EXTRA_ARG_ID
+    };
+    let extra: Vec<String> = sub_matches
+        .get_many::<String>(extra_key)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+
+    Ok(RunParseResult::Task {
+        name: name.to_string(),
+        values,
+        extra,
+    })
+}
+
+/// Translates a clap parse error from `parse_run_args` into either a
+/// fall-through (`Ok(External)`) or a user-facing diagnostic.
+fn dispatch_clap_error(
+    err: clap::Error,
+    cli_args: &[String],
+) -> Result<RunParseResult, RunParseError> {
+    match err.kind() {
+        ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument => {
+            // Clap attaches a `Suggested*` context entry only when its
+            // internal similarity heuristic deems a candidate close
+            // enough to recommend. Use that as the signal: with → real
+            // typo, without → assume the user is invoking an executable
+            // and let the shell handle it.
+            let suggested = err.context().any(|(kind, _)| {
+                matches!(
+                    kind,
+                    ContextKind::Suggested
+                        | ContextKind::SuggestedValue
+                        | ContextKind::SuggestedArg
+                        | ContextKind::SuggestedSubcommand
+                        | ContextKind::SuggestedCommand
+                )
+            });
+            if suggested {
+                Err(RunParseError::UnknownTask {
+                    name: cli_args[0].clone(),
+                    rendered: err.render().to_string(),
+                })
+            } else {
+                Ok(RunParseResult::External(cli_args.to_vec()))
+            }
+        }
+        ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            Ok(RunParseResult::Empty)
+        }
+        _ => Err(RunParseError::TaskArgs {
+            // The error happened inside a subcommand's parsing; the
+            // first cli arg is the task name.
+            task: cli_args[0].clone(),
+            rendered: err.render().to_string(),
+        }),
+    }
 }
 
 /// Parses arguments coming from a TOML `depends-on` entry.
@@ -104,10 +288,6 @@ pub fn parse_dep_task_args(
 ) -> Result<Vec<String>, String> {
     let task_args = task.args().unwrap_or(&[]);
 
-    // Flatten dep_args into a `--name value` stream. Positionals are
-    // bound to the declared arg at that index; if there are more
-    // positionals than declared args, the extras are appended raw so
-    // clap reports them as `unexpected argument`.
     let mut cli_args: Vec<String> = Vec::new();
     for (i, arg) in dep_args.iter().enumerate() {
         match arg {
@@ -168,55 +348,12 @@ pub fn parse_dep_task_args(
     Ok(values)
 }
 
-/// Renders a clap-style "unknown command" error for `name` when it does
-/// not match any task and clap itself considers one of the known names a
-/// close enough match to recommend.
-///
-/// We delegate the similarity decision to clap: a temporary [`Command`]
-/// with a `PossibleValuesParser` over the known task names is asked to
-/// parse `[name]`, and we surface the resulting error only when clap's
-/// renderer has attached a suggestion (`ContextKind::Suggested*`). This
-/// reuses the same did-you-mean algorithm the rest of pixi's CLI uses,
-/// and quietly returns `None` when there is no close match — so the
-/// caller can still fall through to running the input as an executable
-/// (e.g. `pixi run python script.py` when no `python` task exists).
-pub fn unknown_command_error(name: &str, known_task_names: &[String]) -> Option<String> {
-    if known_task_names.is_empty() || known_task_names.iter().any(|n| n == name) {
-        return None;
-    }
-
-    let command = Command::new("pixi run")
-        .no_binary_name(true)
-        .disable_help_flag(true)
-        .disable_version_flag(true)
-        .override_usage("pixi run <TASK> [ARGS]")
-        .arg(
-            Arg::new("task")
-                .required(true)
-                .value_name("TASK")
-                .value_parser(PossibleValuesParser::new(known_task_names)),
-        );
-
-    let err = command.try_get_matches_from([name]).err()?;
-    let clap_suggested = err.context().any(|(kind, _)| {
-        matches!(
-            kind,
-            ContextKind::Suggested
-                | ContextKind::SuggestedValue
-                | ContextKind::SuggestedArg
-                | ContextKind::SuggestedSubcommand
-                | ContextKind::SuggestedCommand
-        )
-    });
-    clap_suggested.then(|| err.render().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use pixi_manifest::task::{ArgName, Execute, Task, TaskArg, TypedDependencyArg};
     use std::str::FromStr;
 
-    use super::{parse_dep_task_args, parse_typed_task_args, unknown_command_error};
+    use super::{RunParseError, RunParseResult, parse_dep_task_args, parse_run_args};
 
     fn task_with_args(args: Vec<TaskArg>) -> Task {
         Task::Execute(Box::new(Execute {
@@ -233,74 +370,169 @@ mod tests {
         }))
     }
 
+    fn free_form_task() -> Task {
+        Task::Execute(Box::new(Execute {
+            cmd: pixi_manifest::task::CmdArgs::Single("echo".into()),
+            inputs: None,
+            outputs: None,
+            depends_on: vec![],
+            cwd: None,
+            env: None,
+            default_environment: None,
+            description: Some("Say hello".to_string()),
+            clean_env: false,
+            args: None,
+        }))
+    }
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
     #[test]
-    fn parses_positional_with_choices() {
+    fn empty_args_returns_empty() {
+        let task = free_form_task();
+        let result = parse_run_args([("hello", &task)], &[]).unwrap();
+        assert!(matches!(result, RunParseResult::Empty));
+    }
+
+    #[test]
+    fn known_task_with_typed_args_parses() {
         let task = task_with_args(vec![TaskArg {
             name: ArgName::from_str("target").unwrap(),
             default: None,
             choices: Some(vec!["debug".into(), "release".into()]),
         }]);
-        let values = parse_typed_task_args("build", &task, &["debug".to_string()]).unwrap();
-        assert_eq!(values, vec!["debug".to_string()]);
+        let result = parse_run_args([("build", &task)], &[s("build"), s("debug")]).unwrap();
+        match result {
+            RunParseResult::Task { name, values, extra } => {
+                assert_eq!(name, "build");
+                assert_eq!(values, vec![s("debug")]);
+                assert!(extra.is_empty());
+            }
+            other => panic!("expected Task, got {other:?}"),
+        }
     }
 
     #[test]
-    fn reports_invalid_choice_with_usage() {
-        let task = task_with_args(vec![TaskArg {
-            name: ArgName::from_str("target").unwrap(),
-            default: None,
-            choices: Some(vec!["debug".into(), "release".into()]),
-        }]);
-        let err = parse_typed_task_args("build", &task, &["profile".to_string()]).unwrap_err();
-        assert!(err.contains("profile"), "error should mention bad value: {err}");
-        assert!(
-            err.contains("debug") && err.contains("release"),
-            "error should list possible values: {err}"
-        );
-        assert!(err.contains("target"), "error should mention the arg name: {err}");
-    }
-
-    #[test]
-    fn reports_missing_required_arg() {
+    fn typed_task_collects_extras_after_dash_dash() {
         let task = task_with_args(vec![TaskArg {
             name: ArgName::from_str("target").unwrap(),
             default: None,
             choices: None,
         }]);
-        let err = parse_typed_task_args("build", &task, &[]).unwrap_err();
-        assert!(err.contains("target"), "error should mention missing arg: {err}");
-        assert!(err.contains("pixi run build"), "error should show usage: {err}");
-    }
-
-    #[test]
-    fn applies_default_when_arg_omitted() {
-        let task = task_with_args(vec![TaskArg {
-            name: ArgName::from_str("target").unwrap(),
-            default: Some("debug".to_string()),
-            choices: None,
-        }]);
-        let values = parse_typed_task_args("build", &task, &[]).unwrap();
-        assert_eq!(values, vec!["debug".to_string()]);
-    }
-
-    #[test]
-    fn reports_unexpected_extra_arg() {
-        let task = task_with_args(vec![TaskArg {
-            name: ArgName::from_str("target").unwrap(),
-            default: None,
-            choices: None,
-        }]);
-        let err = parse_typed_task_args(
-            "build",
-            &task,
-            &["debug".to_string(), "extra".to_string()],
+        let result = parse_run_args(
+            [("build", &task)],
+            &[s("build"), s("debug"), s("--"), s("--verbose"), s("foo")],
         )
-        .unwrap_err();
-        assert!(
-            err.contains("extra") || err.contains("unexpected"),
-            "error should report extra arg: {err}"
-        );
+        .unwrap();
+        match result {
+            RunParseResult::Task { values, extra, .. } => {
+                assert_eq!(values, vec![s("debug")]);
+                assert_eq!(extra, vec![s("--verbose"), s("foo")]);
+            }
+            other => panic!("expected Task, got {other:?}"),
+        }
     }
+
+    #[test]
+    fn free_form_task_forwards_everything() {
+        let task = free_form_task();
+        let result = parse_run_args(
+            [("hello", &task)],
+            &[s("hello"), s("--help"), s("--"), s("more")],
+        )
+        .unwrap();
+        match result {
+            RunParseResult::Task { name, values, extra } => {
+                assert_eq!(name, "hello");
+                assert!(values.is_empty());
+                assert_eq!(extra, vec![s("--help"), s("--"), s("more")]);
+            }
+            other => panic!("expected Task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_close_match_returns_user_error() {
+        let task = task_with_args(vec![TaskArg {
+            name: ArgName::from_str("target").unwrap(),
+            default: None,
+            choices: None,
+        }]);
+        let err = parse_run_args([("build", &task)], &[s("buidl")]).unwrap_err();
+        match err {
+            RunParseError::UnknownTask { name, rendered } => {
+                assert_eq!(name, "buidl");
+                assert!(rendered.contains("build"), "{rendered}");
+            }
+            other => panic!("expected UnknownTask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_distant_token_falls_through() {
+        let task = task_with_args(vec![TaskArg {
+            name: ArgName::from_str("target").unwrap(),
+            default: None,
+            choices: None,
+        }]);
+        let result = parse_run_args([("build", &task)], &[s("python"), s("script.py")]).unwrap();
+        match result {
+            RunParseResult::External(args) => {
+                assert_eq!(args, vec![s("python"), s("script.py")]);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_choice_surfaces_clap_error() {
+        let task = task_with_args(vec![TaskArg {
+            name: ArgName::from_str("target").unwrap(),
+            default: None,
+            choices: Some(vec!["debug".into(), "release".into()]),
+        }]);
+        let err = parse_run_args([("build", &task)], &[s("build"), s("profile")]).unwrap_err();
+        match err {
+            RunParseError::TaskArgs { task, rendered } => {
+                assert_eq!(task, "build");
+                assert!(rendered.contains("profile"), "{rendered}");
+                assert!(
+                    rendered.contains("debug") && rendered.contains("release"),
+                    "{rendered}"
+                );
+            }
+            other => panic!("expected TaskArgs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_required_arg_surfaces_clap_error() {
+        let task = task_with_args(vec![TaskArg {
+            name: ArgName::from_str("target").unwrap(),
+            default: None,
+            choices: None,
+        }]);
+        let err = parse_run_args([("build", &task)], &[s("build")]).unwrap_err();
+        assert!(matches!(err, RunParseError::TaskArgs { .. }));
+    }
+
+    #[test]
+    fn default_value_applied_when_missing() {
+        let task = task_with_args(vec![TaskArg {
+            name: ArgName::from_str("target").unwrap(),
+            default: Some("debug".into()),
+            choices: None,
+        }]);
+        let result = parse_run_args([("build", &task)], &[s("build")]).unwrap();
+        match result {
+            RunParseResult::Task { values, .. } => assert_eq!(values, vec![s("debug")]),
+            other => panic!("expected Task, got {other:?}"),
+        }
+    }
+
+    // --- depends-on tests, unchanged behaviour ---
 
     #[test]
     fn dep_parses_positional() {
@@ -315,7 +547,7 @@ mod tests {
             &[TypedDependencyArg::Positional("release".into())],
         )
         .unwrap();
-        assert_eq!(values, vec!["release".to_string()]);
+        assert_eq!(values, vec![s("release")]);
     }
 
     #[test]
@@ -328,13 +560,10 @@ mod tests {
         let values = parse_dep_task_args(
             "build",
             &task,
-            &[TypedDependencyArg::Named(
-                "target".into(),
-                "debug".into(),
-            )],
+            &[TypedDependencyArg::Named("target".into(), "debug".into())],
         )
         .unwrap();
-        assert_eq!(values, vec!["debug".to_string()]);
+        assert_eq!(values, vec![s("debug")]);
     }
 
     #[test]
@@ -367,62 +596,5 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("flavor"), "got: {err}");
-    }
-
-    #[test]
-    fn dep_rejects_duplicate_value() {
-        // Specifying the same arg as both positional and named yields a
-        // clap-rendered duplicate-value error rather than silently picking
-        // one side.
-        let task = task_with_args(vec![TaskArg {
-            name: ArgName::from_str("target").unwrap(),
-            default: None,
-            choices: None,
-        }]);
-        let err = parse_dep_task_args(
-            "build",
-            &task,
-            &[
-                TypedDependencyArg::Positional("a".into()),
-                TypedDependencyArg::Named("target".into(), "b".into()),
-            ],
-        )
-        .unwrap_err();
-        assert!(err.contains("target"), "got: {err}");
-    }
-
-    #[test]
-    fn unknown_command_suggests_close_match() {
-        let known: Vec<String> = vec!["build".into(), "test".into(), "lint".into()];
-        let err = unknown_command_error("buidl", &known).expect("should suggest");
-        assert!(err.contains("buidl"), "got: {err}");
-        assert!(err.contains("build"), "got: {err}");
-    }
-
-    #[test]
-    fn unknown_command_silent_for_distant_word() {
-        let known: Vec<String> = vec!["build".into(), "test".into()];
-        assert!(unknown_command_error("python", &known).is_none());
-    }
-
-    #[test]
-    fn unknown_command_silent_for_path_like() {
-        // Inputs that look nothing like a task name — clap won't suggest a
-        // match, so we fall through to executing as a shell command.
-        let known: Vec<String> = vec!["build".into()];
-        assert!(unknown_command_error("./script.sh", &known).is_none());
-        assert!(unknown_command_error("/usr/bin/python", &known).is_none());
-    }
-
-    #[test]
-    fn unknown_command_silent_for_exact_match() {
-        let known: Vec<String> = vec!["build".into()];
-        assert!(unknown_command_error("build", &known).is_none());
-    }
-
-    #[test]
-    fn unknown_command_silent_with_no_known_tasks() {
-        let known: Vec<String> = vec![];
-        assert!(unknown_command_error("anything", &known).is_none());
     }
 }

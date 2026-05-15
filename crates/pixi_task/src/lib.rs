@@ -7,7 +7,7 @@ mod task_graph;
 mod task_hash;
 
 pub use clap_command::{
-    parse_dep_task_args, parse_typed_task_args, task_clap_command, unknown_command_error,
+    RunParseError, RunParseResult, build_run_command, parse_dep_task_args, parse_run_args,
 };
 pub use file_hashes::{FileHashes, FileHashesError};
 pub use pixi_manifest::{Task, TaskName};
