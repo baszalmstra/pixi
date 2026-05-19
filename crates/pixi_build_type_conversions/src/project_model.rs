@@ -174,6 +174,7 @@ fn to_target_v1(
                 .transpose()?
                 .unwrap_or_default(),
         ),
+        run_exports: None,
     })
 }
 

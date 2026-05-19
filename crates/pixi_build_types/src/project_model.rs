@@ -189,6 +189,11 @@ pub struct Target {
         schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
     )]
     pub run_constraints: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// Run exports of the project. These are propagated to downstream
+    /// consumers of this package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_exports: Option<TargetRunExports>,
 }
 
 impl Target {
@@ -202,8 +207,75 @@ impl Target {
         let has_no_host_deps = self.host_dependencies.as_ref().is_none_or(|d| d.is_empty());
         let has_no_run_deps = self.run_dependencies.as_ref().is_none_or(|d| d.is_empty());
         let has_no_run_constraints = self.run_constraints.as_ref().is_none_or(|d| d.is_empty());
+        let has_no_run_exports = self.run_exports.as_ref().is_none_or(|r| r.is_empty());
 
-        has_no_build_deps && has_no_host_deps && has_no_run_deps && has_no_run_constraints
+        has_no_build_deps
+            && has_no_host_deps
+            && has_no_run_deps
+            && has_no_run_constraints
+            && has_no_run_exports
+    }
+}
+
+/// Run exports declared by a package. Each bucket carries a map of
+/// dependencies whose semantics are documented at
+/// <https://rattler.build/latest/reference/recipe_file/#run-exports>.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TargetRunExports {
+    /// Weak run exports: added to downstream `run` when this package is a
+    /// host-dependency of the consumer.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub weak: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// Strong run exports: added to downstream `run` when this package is a
+    /// build- or host-dependency of the consumer.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub strong: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// Noarch run exports: applied only when the downstream consumer is a
+    /// noarch package.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub noarch: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// Weak constraints: like `weak`, but contribute to the downstream
+    /// `run_constraints` instead of `run`.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub weak_constraints: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// Strong constraints: like `strong`, but contribute to the downstream
+    /// `run_constraints` instead of `run`.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub strong_constraints: Option<OrderMap<SourcePackageName, PackageSpec>>,
+}
+
+impl TargetRunExports {
+    /// Returns `true` if every bucket is empty/absent.
+    pub fn is_empty(&self) -> bool {
+        let empty = |m: &Option<OrderMap<SourcePackageName, PackageSpec>>| {
+            m.as_ref().is_none_or(|d| d.is_empty())
+        };
+        empty(&self.weak)
+            && empty(&self.strong)
+            && empty(&self.noarch)
+            && empty(&self.weak_constraints)
+            && empty(&self.strong_constraints)
     }
 }
 
@@ -624,6 +696,7 @@ impl Hash for Target {
             host_dependencies,
             run_dependencies,
             run_constraints,
+            run_exports,
         } = self;
 
         StableHashBuilder::<H>::new()
@@ -631,6 +704,35 @@ impl Hash for Target {
             .field("host_dependencies", host_dependencies)
             .field("run_dependencies", run_dependencies)
             .field("run_constraints", run_constraints)
+            .field("run_exports", run_exports)
+            .finish(state);
+    }
+}
+
+impl IsDefault for TargetRunExports {
+    type Item = Self;
+
+    fn is_non_default(&self) -> Option<&Self::Item> {
+        if !self.is_empty() { Some(self) } else { None }
+    }
+}
+
+impl Hash for TargetRunExports {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let TargetRunExports {
+            weak,
+            strong,
+            noarch,
+            weak_constraints,
+            strong_constraints,
+        } = self;
+
+        StableHashBuilder::<H>::new()
+            .field("weak", weak)
+            .field("strong", strong)
+            .field("noarch", noarch)
+            .field("weak_constraints", weak_constraints)
+            .field("strong_constraints", strong_constraints)
             .finish(state);
     }
 }
