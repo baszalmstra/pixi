@@ -15,7 +15,9 @@ use pixi_record::{PixiRecord, UnresolvedPixiRecord, UnresolvedSourceRecord, Vari
 use pixi_spec::{ResolvedExcludeNewer, SourceAnchor, SourceLocationSpec};
 use pixi_variant::VariantSelector;
 use rattler_conda_types::{
-    ChannelUrl, PackageRecord, RepoDataRecord, package::DistArchiveIdentifier, prefix::Prefix,
+    ChannelUrl, PackageRecord, RepoDataRecord,
+    package::{CondaArchiveType, DistArchiveIdentifier},
+    prefix::Prefix,
 };
 use rattler_digest::Sha256Hash;
 use tracing::instrument;
@@ -77,6 +79,11 @@ pub struct SourceBuildSpec {
     /// User-supplied build number forwarded to the backend's project
     /// model. Overrides any value declared in the manifest.
     pub build_number: Option<u64>,
+
+    /// The conda archive format the backend should produce. `None` lets the
+    /// backend pick its own default. The chosen format participates in the
+    /// artifact cache key so `.conda` and `.tar.bz2` builds don't collide.
+    pub archive_type: Option<CondaArchiveType>,
 }
 
 /// Built artifact plus its sha256 and a
@@ -185,6 +192,7 @@ async fn compute_inner(
         &build_source_dep_sha256s,
         &host_source_dep_sha256s,
         &project_model_overrides,
+        spec.archive_type,
     );
 
     // On artifact cache hit, return without invoking the backend.
@@ -355,6 +363,7 @@ async fn compute_inner(
                 },
                 variant: output.metadata.variant.clone(),
                 output_directory: None,
+                archive_type: spec.archive_type,
             }),
             backend,
             name: output.metadata.name.clone(),
@@ -458,6 +467,11 @@ async fn build_source_deps(
                 // dependency closure builds against consistent values.
                 build_string_prefix: spec.build_string_prefix.clone(),
                 build_number: spec.build_number,
+                // Source dependencies are consumed as input to the parent
+                // build, so the chosen archive format for the parent does
+                // not constrain how they themselves are packaged. Let the
+                // backend keep producing its default `.conda` for them.
+                archive_type: None,
             };
             let result = sub_ctx.compute(&SourceBuildKey::new(nested_spec)).await?;
             Ok(result.artifact_sha256)

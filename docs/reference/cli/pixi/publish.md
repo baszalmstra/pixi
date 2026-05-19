@@ -46,7 +46,7 @@ pixi publish [OPTIONS]
 - <a id="arg---package-format" href="#arg---package-format">`--package-format <PACKAGE_FORMAT>`</a>
 :  The package archive format to publish
 <br>**default**: `conda`
-<br>**options**: `conda`, `tar-bz2`, `both`
+<br>**options**: `conda`, `tar-bz2`
 
 ## Config Options
 - <a id="arg---auth-file" href="#arg---auth-file">`--auth-file <AUTH_FILE>`</a>

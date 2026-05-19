@@ -791,7 +791,7 @@ where
                 timestamp: chrono::Utc::now(),
                 subpackages: BTreeMap::new(),
                 packaging_settings: PackagingSettings::from_args(
-                    CondaArchiveType::Conda,
+                    params.archive_type.unwrap_or(CondaArchiveType::Conda),
                     CompressionLevel::default(),
                 ),
                 store_recipe: false,

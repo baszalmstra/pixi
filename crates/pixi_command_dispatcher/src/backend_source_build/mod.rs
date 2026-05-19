@@ -28,6 +28,7 @@ use pixi_glob::GlobSet;
 use pixi_spec::{BinarySpec, PixiSpec, SpecConversionError};
 use rattler_conda_types::{
     ChannelConfig, ChannelUrl, MatchSpec, PackageName, Platform, RepoDataRecord, VersionWithSource,
+    package::CondaArchiveType,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -103,6 +104,10 @@ pub struct BackendSourceBuildV1Method {
 
     /// Whether to build the package in editable mode.
     pub editable: bool,
+
+    /// The conda archive format the backend should produce. `None` lets the
+    /// backend pick its own default (today that's `.conda`).
+    pub archive_type: Option<CondaArchiveType>,
 }
 
 #[derive(Debug, Serialize)]
@@ -284,6 +289,7 @@ impl BackendSourceBuildSpec {
                     work_directory: work_directory.clone(),
                     output_directory: params.output_directory,
                     editable: Some(params.editable),
+                    archive_type: params.archive_type,
                 },
                 move |line| {
                     let _err = futures::executor::block_on(log_sink.send(line));

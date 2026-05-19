@@ -12,6 +12,7 @@ use std::{
 
 use rattler_conda_types::{
     ChannelUrl, MatchSpec, PackageName, Platform, RepoDataRecord, VersionWithSource,
+    package::CondaArchiveType,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
@@ -63,6 +64,12 @@ pub struct CondaBuildV1Params {
     /// Whether we want to install the package as editable
     // TODO: remove this parameter as soon as we have profiles
     pub editable: Option<bool>,
+
+    /// The conda archive format the backend should emit. Defaults to the
+    /// modern `.conda` format when omitted so older backends keep their
+    /// current behavior.
+    #[serde(default)]
+    pub archive_type: Option<CondaArchiveType>,
 }
 
 #[serde_as]
