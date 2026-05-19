@@ -42,6 +42,7 @@ impl GenerateRecipe for MojoGenerator {
         _channels: Vec<ChannelUrl>,
         _cache_dir: Option<PathBuf>,
         _workspace_directory: Option<PathBuf>,
+        _workspace_scratch_directory: Option<PathBuf>,
     ) -> miette::Result<GeneratedRecipe> {
         // Determine the manifest root, because `manifest_path` can be
         // either a direct file path or a directory path.
@@ -268,6 +269,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -319,6 +321,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -359,6 +362,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -426,6 +430,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -472,6 +477,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -524,6 +530,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -568,6 +575,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -649,6 +657,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -710,6 +719,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )

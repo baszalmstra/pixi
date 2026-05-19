@@ -249,13 +249,19 @@ impl BuildBackendMetadataReporter for TopLevelProgress {
         if let Some(bar) = self.backend_metadata_bars.lock().get(&id).copied() {
             self.conda_solve_reporter.start(bar);
         }
-        // The backend's stdout/stderr is interesting at -vvv, but we don't
-        // want to interleave it into the progress bar. Drain the stream in
-        // the background so the producer never blocks; the lines are
-        // already visible to anyone running with `RUST_LOG`-level tracing.
+        // Forward backend stdout/stderr into tracing so logs from the
+        // spawned backend show up alongside pixi's own debug output.
+        // Without this, lines emitted by the backend (e.g. tracing
+        // spans set up via tracing-subscriber there) would be dropped
+        // on the floor and invisible to anyone debugging.
         tokio::spawn(async move {
             let mut stream = backend_output_stream;
-            while stream.next().await.is_some() {}
+            while let Some(line) = stream.next().await {
+                let line = line.trim_end_matches(['\r', '\n']);
+                if !line.is_empty() {
+                    tracing::debug!(target: "pixi::backend", "{line}");
+                }
+            }
         });
     }
 

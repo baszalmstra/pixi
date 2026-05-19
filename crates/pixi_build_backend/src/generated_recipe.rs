@@ -61,6 +61,11 @@ pub trait GenerateRecipe {
     ///   package, if any. Backends can use it to inspect sibling packages (e.g. the ROS
     ///   backend uses it to discover sibling `package.xml` files and emit them as source
     ///   dependencies). `None` when the package is built outside of a workspace context.
+    /// * `workspace_scratch_directory` - Optional per-workspace scratch directory the backend
+    ///   may use to persist derived state across runs and across multiple backend instances.
+    ///   The backend picks its own subdirectory inside and owns invalidation. See
+    ///   `pixi_build_types::procedures::initialize::InitializeParams::workspace_scratch_directory`
+    ///   for the convention.
     #[allow(clippy::too_many_arguments)]
     async fn generate_recipe(
         &self,
@@ -73,6 +78,7 @@ pub trait GenerateRecipe {
         channels: Vec<ChannelUrl>,
         cache_dir: Option<PathBuf>,
         workspace_directory: Option<PathBuf>,
+        workspace_scratch_directory: Option<PathBuf>,
     ) -> miette::Result<GeneratedRecipe>;
 
     /// Returns a list of globs that should be used to find the input files

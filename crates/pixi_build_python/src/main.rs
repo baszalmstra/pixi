@@ -130,6 +130,7 @@ impl GenerateRecipe for PythonGenerator {
         channels: Vec<ChannelUrl>,
         cache_dir: Option<PathBuf>,
         _workspace_directory: Option<PathBuf>,
+        _workspace_scratch_directory: Option<PathBuf>,
     ) -> miette::Result<GeneratedRecipe> {
         let params = python_params.unwrap_or_default();
 
@@ -699,6 +700,7 @@ version = "0.1.0"
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -743,6 +745,7 @@ version = "0.1.0"
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -790,6 +793,7 @@ version = "0.1.0"
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -831,6 +835,7 @@ version = "0.1.0"
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -905,6 +910,7 @@ version = "0.1.0"
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -954,6 +960,7 @@ version = "0.1.0"
                 None,
                 &std::collections::HashSet::<pixi_build_backend::variants::NormalizedKey>::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -1074,6 +1081,7 @@ version = "0.1.0"
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -1112,6 +1120,7 @@ version = "0.1.0"
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -1221,6 +1230,7 @@ build-backend = "hatchling.build"
                 vec![ChannelUrl::from(
                     url::Url::parse("https://prefix.dev/conda-forge").unwrap(),
                 )],
+                None,
                 None,
                 None,
             )
@@ -1336,6 +1346,7 @@ build-backend = "setuptools.build_meta"
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )

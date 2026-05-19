@@ -57,6 +57,7 @@ impl GenerateRecipe for RosGenerator {
         channels: Vec<ChannelUrl>,
         _cache_dir: Option<PathBuf>,
         workspace_directory: Option<PathBuf>,
+        workspace_scratch_directory: Option<PathBuf>,
     ) -> miette::Result<GeneratedRecipe> {
         // Determine the manifest root
         let manifest_root = if manifest_path.is_file() {
@@ -87,18 +88,14 @@ impl GenerateRecipe for RosGenerator {
                 )
             })?;
 
-        let distro = {
-            use tracing::Instrument;
-            let span = tracing::info_span!("ros_distro_fetch", distro = %distro_name);
-            let started = std::time::Instant::now();
-            let distro = Distro::fetch(&distro_name).instrument(span).await?;
-            tracing::info!(
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                distro = %distro_name,
-                "Distro::fetch returned"
-            );
-            distro
-        };
+        // Subdirectory inside the workspace scratch dir owned exclusively by this
+        // backend. `pixi-build-ros-v0` lets us bump the cache layout without
+        // colliding with concurrent backends or older cached entries.
+        let http_cache_dir = workspace_scratch_directory
+            .as_deref()
+            .map(|root| root.join("pixi-build-ros-v0").join("http-cache"));
+
+        let distro = Distro::fetch(&distro_name, http_cache_dir.as_deref()).await?;
 
         // Parse package.xml
         let package_xml_path = manifest_root.join("package.xml");
@@ -527,6 +524,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -656,6 +654,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe")
@@ -744,6 +743,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -972,6 +972,7 @@ mod tests {
                 vec![],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe with explicit package.xml path");
@@ -1008,6 +1009,7 @@ mod tests {
                 vec![ChannelUrl::from(
                     url::Url::parse("https://prefix.dev/robostack-jazzy").unwrap(),
                 )],
+                None,
                 None,
                 None,
             )
@@ -1057,6 +1059,7 @@ mod tests {
                 )],
                 None,
                 None,
+                None,
             )
             .await
             .expect("Explicit distro should override channel");
@@ -1100,6 +1103,7 @@ mod tests {
                 )],
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -1135,6 +1139,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
                 None,
             )
@@ -1323,6 +1328,7 @@ mod tests {
                 vec![],
                 None,
                 Some(workspace_root.to_path_buf()),
+                None,
             )
             .await
             .expect("generate_recipe should succeed");
@@ -1369,6 +1375,7 @@ mod tests {
                 vec![],
                 None,
                 Some(workspace_root.to_path_buf()),
+                None,
             )
             .await
             .expect("generate_recipe should succeed");
@@ -1416,6 +1423,7 @@ mod tests {
                 vec![],
                 None,
                 Some(workspace_root.to_path_buf()),
+                None,
             )
             .await
             .expect("generate_recipe should succeed");
@@ -1460,6 +1468,7 @@ mod tests {
                 vec![],
                 None,
                 Some(workspace_root.to_path_buf()),
+                None,
             )
             .await
             .expect("generate_recipe should succeed");
@@ -1525,6 +1534,7 @@ mod tests {
                 vec![],
                 None,
                 Some(workspace_root.to_path_buf()),
+                None,
             )
             .await
             .expect("generate_recipe should succeed");
@@ -1560,6 +1570,7 @@ mod tests {
                 vec![],
                 None,
                 Some(workspace_root.to_path_buf()),
+                None,
             )
             .await
             .expect("generate_recipe should succeed");
