@@ -1003,6 +1003,7 @@ mod tests {
             build_dependencies: Some(OrderMap::new()),
             run_dependencies: Some(OrderMap::new()),
             run_constraints: Some(OrderMap::new()),
+            run_exports: None,
         };
         project_model.targets = Some(Targets {
             default_target: Some(empty_target),
@@ -1064,6 +1065,7 @@ mod tests {
             build_dependencies: Some(OrderMap::new()),
             run_dependencies: Some(OrderMap::new()),
             run_constraints: Some(OrderMap::new()),
+            run_exports: None,
         };
         project_model.targets = Some(Targets {
             default_target: Some(target_with_deps),
@@ -1175,6 +1177,7 @@ mod tests {
                 )),
                 PackageSpec::Binary(BinaryPackageSpec::default()),
             )])),
+            run_exports: None,
         }
     }
 
@@ -1292,6 +1295,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: Some(deps),
+            run_exports: None,
         };
         assert!(!target.is_empty());
 
@@ -1300,6 +1304,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: None,
+            run_exports: None,
         };
         assert!(empty.is_empty());
     }
@@ -1321,6 +1326,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: None,
+            run_exports: None,
         };
 
         // Same dependency in run_dependencies
@@ -1329,6 +1335,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: Some(deps.clone()),
             run_constraints: None,
+            run_exports: None,
         };
 
         // Same dependency in build_dependencies
@@ -1337,6 +1344,7 @@ mod tests {
             build_dependencies: Some(deps.clone()),
             run_dependencies: None,
             run_constraints: None,
+            run_exports: None,
         };
         // Same dependency in run_constraints
         let target4 = Target {
@@ -1344,6 +1352,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: Some(deps.clone()),
+            run_exports: None,
         };
 
         let hash1 = calculate_hash(&target1);

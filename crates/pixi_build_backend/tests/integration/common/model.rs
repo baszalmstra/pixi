@@ -185,6 +185,7 @@ fn convert_target_to_v1(target: &Target) -> PbtTarget {
                 })
                 .collect(),
         ),
+        run_exports: None,
     }
 }
 
