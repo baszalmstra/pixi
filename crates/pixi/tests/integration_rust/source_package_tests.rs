@@ -2668,75 +2668,36 @@ host-lib = "*"
         })
         .expect("publish did not produce a .conda for my-pkg");
 
-    // Read the produced .conda's info/index.json and snapshot the
-    // build-relevant subset. Subdir is redacted because it varies with the
-    // host platform the test runs on; everything else (name, version,
-    // license, depends, constrains, noarch, build string / number) must
-    // stay stable, and in particular both run-exports — the `host-lib`
-    // self-pin and the runtime link to `runtime-lib` — must show up in
-    // `depends`. Before the fix `depends` came back as `[]`.
-    let index_json: IndexJson = rattler_package_streaming::seek::read_package_file(&produced)
-        .expect("failed to read info/index.json from the produced .conda");
+    // Read the produced .conda's info/index.json and snapshot it. Subdir
+    // is redacted because it varies with the host platform the test runs
+    // on; everything else (name, version, license, depends, constrains,
+    // noarch, build string / number) must stay stable, and in particular
+    // both run-exports — the `host-lib` self-pin and the runtime link to
+    // `runtime-lib` — must show up in `depends`. Before the fix `depends`
+    // came back as `[]`.
+    let mut index_json: IndexJson =
+        rattler_package_streaming::seek::read_package_file(&produced)
+            .expect("failed to read info/index.json from the produced .conda");
 
-    let mut depends_sorted = index_json.depends.clone();
-    depends_sorted.sort();
-    let mut constrains_sorted = index_json.constrains.clone();
-    constrains_sorted.sort();
-    let subdir_redacted = index_json
-        .subdir
-        .as_deref()
-        .map(|_| "[SUBDIR]".to_string())
-        .unwrap_or_else(|| "<none>".to_string());
+    // Sort depends/constrains so the snapshot is order-independent, and
+    // redact subdir since it varies with the host platform the test runs
+    // on.
+    index_json.depends.sort();
+    index_json.constrains.sort();
+    if index_json.subdir.is_some() {
+        index_json.subdir = Some("[SUBDIR]".to_string());
+    }
 
-    let summary = format!(
-        "name: {name}\n\
-         version: {version}\n\
-         license: {license}\n\
-         license_family: {license_family}\n\
-         subdir: {subdir}\n\
-         noarch: {noarch}\n\
-         build: {build:?}\n\
-         build_number: {build_number}\n\
-         depends:\n{depends}\n\
-         constrains:\n{constrains}\n",
-        name = index_json.name.as_normalized(),
-        version = index_json.version,
-        license = index_json.license.as_deref().unwrap_or("<none>"),
-        license_family = index_json.license_family.as_deref().unwrap_or("<none>"),
-        subdir = subdir_redacted,
-        noarch = format!("{:?}", index_json.noarch),
-        build = index_json.build,
-        build_number = index_json.build_number,
-        depends = depends_sorted
-            .iter()
-            .map(|d| format!("  - {d}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        constrains = if constrains_sorted.is_empty() {
-            "  <empty>".to_string()
-        } else {
-            constrains_sorted
-                .iter()
-                .map(|c| format!("  - {c}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-    );
-
-    insta::assert_snapshot!(summary, @r###"
-    name: my-pkg
-    version: 0.4.2
-    license: BSD-3-Clause
-    license_family: <none>
-    subdir: [SUBDIR]
-    noarch: NoArchType(None)
+    insta::assert_yaml_snapshot!(index_json, @r###"
     build: ""
     build_number: 0
     depends:
-      - host-lib >=2.5,<3.0a0
+      - "host-lib >=2.5,<3.0a0"
       - runtime-lib >=1.0
-    constrains:
-      <empty>
+    license: BSD-3-Clause
+    name: my-pkg
+    subdir: "[SUBDIR]"
+    version: 0.4.2
     "###);
 }
 
