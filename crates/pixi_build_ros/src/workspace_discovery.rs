@@ -133,13 +133,59 @@ fn walk(
     packages: &mut HashMap<String, PathBuf>,
     pruned_dirs: &mut Vec<PathBuf>,
 ) -> Result<(), WorkspaceDiscoveryError> {
-    if IGNORE_MARKERS.iter().any(|m| dir.join(m).is_file()) {
+    // One `read_dir` per directory. We inspect the cached `DirEntry`
+    // metadata as we iterate to derive: (a) whether this directory is
+    // marker-pruned, (b) whether it contains a package.xml, and (c)
+    // the list of subdirectories to recurse into. Avoids the 4+ extra
+    // `stat` calls the previous version did per directory
+    // (`dir.join(marker).is_file()` * 3 + `dir.join("package.xml").is_file()`
+    // + `path.is_dir()` per child entry); on Windows where each `stat`
+    // costs ~50us, that adds up to several hundred ms per workspace
+    // walk on large trees like navigation2.
+    let entries = fs::read_dir(dir).map_err(|source| WorkspaceDiscoveryError::Io {
+        path: dir.to_path_buf(),
+        source: source.into(),
+    })?;
+
+    let mut marker_present = false;
+    let mut package_xml_path: Option<PathBuf> = None;
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|source| WorkspaceDiscoveryError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if file_type.is_file() {
+            if IGNORE_MARKERS.iter().any(|m| name_str == *m) {
+                marker_present = true;
+            } else if name_str == "package.xml" {
+                package_xml_path = Some(entry.path());
+            }
+        } else if file_type.is_dir() {
+            // Skip dot-prefixed dirs the same way colcon does. The
+            // check applies only to subdirectories, never to the
+            // workspace root itself.
+            if name_str.starts_with('.') {
+                continue;
+            }
+            subdirs.push(entry.path());
+        }
+    }
+
+    if marker_present {
         record_pruned(workspace_root, dir, pruned_dirs);
         return Ok(());
     }
 
-    let package_xml = dir.join("package.xml");
-    if package_xml.is_file() {
+    if let Some(package_xml) = package_xml_path {
         let content =
             fs::read_to_string(&package_xml).map_err(|source| WorkspaceDiscoveryError::ReadFile {
                 path: package_xml.clone(),
@@ -158,41 +204,20 @@ fn walk(
             });
         }
         packages.insert(parsed.name, package_xml);
+
+        // ROS packages are leaves: a directory containing `package.xml` is
+        // a package, and packages do not nest. Matches colcon's
+        // behaviour. Skipping the recursion into a package's own source
+        // tree (`src/`, `include/`, `test/`, ...) cuts hundreds of
+        // wasted directory traversals on workspaces like navigation2.
+        return Ok(());
     }
 
-    let entries = fs::read_dir(dir).map_err(|source| WorkspaceDiscoveryError::Io {
-        path: dir.to_path_buf(),
-        source: source.into(),
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|source| WorkspaceDiscoveryError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        // Skip dot-prefixed directories the same way colcon does: this covers
-        // `.pixi`, `.git`, `.vscode`, etc. without hardcoding any specific
-        // name. The check is only applied to subdirectories, never to the
-        // workspace root itself. A single `!**/.*/**` glob (emitted by the
-        // caller) covers the invalidation side for all of these without
-        // needing to enumerate them, so we do not record each one here.
-        if is_hidden_dir(&path) {
-            continue;
-        }
-        walk(workspace_root, &path, packages, pruned_dirs)?;
+    for subdir in subdirs {
+        walk(workspace_root, &subdir, packages, pruned_dirs)?;
     }
 
     Ok(())
-}
-
-fn is_hidden_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|name| name.starts_with('.'))
 }
 
 fn record_pruned(workspace_root: &Path, dir: &Path, pruned_dirs: &mut Vec<PathBuf>) {
@@ -428,6 +453,29 @@ mod tests {
     fn nonexistent_workspace_root_returns_empty() {
         let result = discover_ros_packages(Path::new("/this/path/does/not/exist")).unwrap();
         assert!(result.packages.is_empty());
+    }
+
+    #[test]
+    fn nested_package_xml_inside_package_is_not_discovered() {
+        // Colcon convention: a directory containing `package.xml` is a
+        // ROS package, and ROS packages do not nest. Anything inside
+        // is the package's own source tree (a stray `package.xml` in a
+        // vendored third-party dir, for example) and must not be
+        // mistaken for a separate workspace sibling.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write_package_xml(&root.join("pkg_a"), "pkg_a");
+        // A nested package.xml a few levels deep inside pkg_a's source
+        // tree. Could be vendored code, a test fixture, anything.
+        write_package_xml(
+            &root.join("pkg_a").join("third_party").join("nested_pkg"),
+            "nested_pkg",
+        );
+
+        let result = discover_ros_packages(root).unwrap();
+        assert_eq!(result.packages.len(), 1);
+        assert!(result.packages.contains_key("pkg_a"));
+        assert!(!result.packages.contains_key("nested_pkg"));
     }
 
     #[test]
