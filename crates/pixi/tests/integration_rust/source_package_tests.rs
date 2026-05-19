@@ -2675,20 +2675,15 @@ host-lib = "*"
     // both run-exports — the `host-lib` self-pin and the runtime link to
     // `runtime-lib` — must show up in `depends`. Before the fix `depends`
     // came back as `[]`.
-    let mut index_json: IndexJson =
+    let index_json: IndexJson =
         rattler_package_streaming::seek::read_package_file(&produced)
             .expect("failed to read info/index.json from the produced .conda");
 
-    // Sort depends/constrains so the snapshot is order-independent, and
-    // redact subdir since it varies with the host platform the test runs
-    // on.
-    index_json.depends.sort();
-    index_json.constrains.sort();
-    if index_json.subdir.is_some() {
-        index_json.subdir = Some("[SUBDIR]".to_string());
-    }
-
-    insta::assert_yaml_snapshot!(index_json, @r###"
+    // Subdir is redacted because it varies with the host platform the
+    // test runs on.
+    insta::assert_yaml_snapshot!(index_json, {
+        ".subdir" => "[SUBDIR]",
+    }, @r###"
     build: ""
     build_number: 0
     depends:
