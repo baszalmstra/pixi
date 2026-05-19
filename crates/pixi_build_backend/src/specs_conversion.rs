@@ -783,4 +783,75 @@ mod test {
             "linux-weak >=4.0",
         );
     }
+
+    /// A source dependency listed under `run_exports.<bucket>` (for example a
+    /// path-spec that points at another local package) must flow through the
+    /// pipeline as a `PackageDependency::Source`, with the encoded
+    /// `source://?path=…` URL preserved on the resulting `MatchSpec`.
+    #[test]
+    fn test_targets_v1_run_exports_with_source_dependency() {
+        use pixi_build_types::{PathSpec, TargetRunExports};
+
+        let mut weak = OrderMap::new();
+        weak.insert(
+            SourcePackageName::from(PackageName::new_unchecked("sibling-package")),
+            PackageSpec::Source(SourcePackageSpec::from(PathSpec {
+                path: "../sibling-package".to_string(),
+            })),
+        );
+
+        let default_target = Target {
+            run_exports: Some(TargetRunExports {
+                weak: Some(weak),
+                ..TargetRunExports::default()
+            }),
+            host_dependencies: None,
+            build_dependencies: None,
+            run_dependencies: None,
+            run_constraints: None,
+        };
+
+        let targets = Targets {
+            default_target: Some(default_target),
+            targets: None,
+        };
+
+        let req = from_targets_v1_to_conditional_requirements(&targets);
+        let weak_items: Vec<_> = req.run_exports.weak.iter().collect();
+        assert_eq!(
+            weak_items.len(),
+            1,
+            "default-target source run-export should produce exactly one item"
+        );
+        let concrete = weak_items[0]
+            .as_value()
+            .expect("default-target run-export should be a bare value")
+            .as_concrete()
+            .expect("expected a concrete match spec");
+        let match_spec = &concrete.0;
+        assert_eq!(
+            match_spec
+                .name
+                .as_exact()
+                .expect("name should be exact")
+                .as_normalized(),
+            "sibling-package",
+        );
+        let url = match_spec
+            .url
+            .as_ref()
+            .expect("source run-export must serialize with a source URL");
+        assert_eq!(url.scheme(), "source");
+        let path_pair = url
+            .query_pairs()
+            .find(|(k, _)| k == "path")
+            .expect("source URL must encode the path");
+        assert_eq!(path_pair.1, "../sibling-package");
+
+        // Other buckets must remain empty.
+        assert_eq!(req.run_exports.strong.iter().count(), 0);
+        assert_eq!(req.run_exports.noarch.iter().count(), 0);
+        assert_eq!(req.run_exports.weak_constraints.iter().count(), 0);
+        assert_eq!(req.run_exports.strong_constraints.iter().count(), 0);
+    }
 }
