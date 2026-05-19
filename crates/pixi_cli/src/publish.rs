@@ -12,8 +12,6 @@ use std::{
 };
 use url::Url;
 
-use std::str::FromStr;
-
 use clap::Parser;
 use indicatif::ProgressBar;
 use miette::{Context, IntoDiagnostic};
@@ -982,6 +980,8 @@ async fn upload_to_local_filesystem_channel(
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use rattler_conda_types::{
         compression_level::CompressionLevel, package::CondaArchiveType,

@@ -87,6 +87,19 @@ pub struct CondaPackageFormat {
     pub compression_level: CondaCompressionLevel,
 }
 
+impl CondaPackageFormat {
+    /// `.conda` with the cheapest available compression. Suited for
+    /// intermediate artifacts (e.g. source dependencies built during
+    /// `pixi install`) where the bytes will be unpacked again immediately
+    /// and the time saved on compression dwarfs the disk cost.
+    pub const fn fast() -> Self {
+        CondaPackageFormat {
+            archive_type: CondaArchiveType::Conda,
+            compression_level: CondaCompressionLevel::Named(NamedCompressionLevel::Lowest),
+        }
+    }
+}
+
 /// Wire-level representation of the compression level for a conda or
 /// tar.bz2 package. Mirrors `rattler_conda_types::compression_level::
 /// CompressionLevel`, but with serde and `Hash` so it can travel through

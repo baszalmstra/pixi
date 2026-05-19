@@ -469,11 +469,12 @@ async fn build_source_deps(
                 // dependency closure builds against consistent values.
                 build_string_prefix: spec.build_string_prefix.clone(),
                 build_number: spec.build_number,
-                // Source dependencies are consumed as input to the parent
-                // build, so the chosen package format for the parent does
-                // not constrain how they themselves are packaged. Let the
-                // backend keep producing its defaults.
-                package_format: None,
+                // Source dependencies get unpacked back into the parent's
+                // build/host prefix immediately, so the chosen format for
+                // the parent does not flow through. Use the cheapest
+                // compression — the artifact never leaves the local
+                // cache.
+                package_format: Some(CondaPackageFormat::fast()),
             };
             let result = sub_ctx.compute(&SourceBuildKey::new(nested_spec)).await?;
             Ok(result.artifact_sha256)
