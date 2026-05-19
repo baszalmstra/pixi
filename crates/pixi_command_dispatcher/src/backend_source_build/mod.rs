@@ -21,7 +21,7 @@ use pixi_build_types::{
     procedures::conda_build_v1::{
         CondaBuildV1Dependency, CondaBuildV1DependencyRunExportSource,
         CondaBuildV1DependencySource, CondaBuildV1Output, CondaBuildV1Params, CondaBuildV1Prefix,
-        CondaBuildV1PrefixPackage, CondaBuildV1RunExports,
+        CondaBuildV1PrefixPackage, CondaBuildV1RunExports, CondaCompressionLevel,
     },
 };
 use pixi_glob::GlobSet;
@@ -108,6 +108,10 @@ pub struct BackendSourceBuildV1Method {
     /// The conda archive format the backend should produce. `None` lets the
     /// backend pick its own default (today that's `.conda`).
     pub archive_type: Option<CondaArchiveType>,
+
+    /// The compression level the backend should apply. `None` lets the
+    /// backend pick its own default.
+    pub compression_level: Option<CondaCompressionLevel>,
 }
 
 #[derive(Debug, Serialize)]
@@ -290,6 +294,7 @@ impl BackendSourceBuildSpec {
                     output_directory: params.output_directory,
                     editable: Some(params.editable),
                     archive_type: params.archive_type,
+                    compression_level: params.compression_level,
                 },
                 move |line| {
                     let _err = futures::executor::block_on(log_sink.send(line));

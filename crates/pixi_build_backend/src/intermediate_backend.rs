@@ -792,7 +792,10 @@ where
                 subpackages: BTreeMap::new(),
                 packaging_settings: PackagingSettings::from_args(
                     params.archive_type.unwrap_or(CondaArchiveType::Conda),
-                    CompressionLevel::default(),
+                    params
+                        .compression_level
+                        .map(CompressionLevel::from)
+                        .unwrap_or_default(),
                 ),
                 store_recipe: false,
                 force_colors: true,

@@ -12,7 +12,9 @@ use std::{
 };
 use url::Url;
 
-use clap::{Parser, ValueEnum};
+use std::str::FromStr;
+
+use clap::Parser;
 use indicatif::ProgressBar;
 use miette::{Context, IntoDiagnostic};
 use pixi_auth::get_auth_store;
@@ -22,7 +24,7 @@ use pixi_command_dispatcher::{
     ComputeResultExt, EnvironmentRef, EnvironmentSpec, EphemeralEnv,
     keys::{ResolveSourcePackageKey, ResolveSourcePackageSpec, SourceBuildKey, SourceBuildSpec},
 };
-use pixi_config::{Config, ConfigCli};
+use pixi_config::{Config, ConfigCli, PackageFormatAndCompression};
 use pixi_core::{WorkspaceLocator, environment::sanity_check_workspace, workspace::DiscoveryStart};
 use pixi_manifest::FeaturesExt;
 use pixi_path::AbsPathBuf;
@@ -31,7 +33,7 @@ use pixi_record::{PinnedPathSpec, PinnedSourceSpec};
 use pixi_reporters::TopLevelProgress;
 use pixi_spec::SourceLocationSpec;
 use pixi_utils::variants::VariantConfig;
-use rattler_conda_types::{GenericVirtualPackage, Platform, package::CondaArchiveType};
+use rattler_conda_types::{GenericVirtualPackage, Platform};
 use rattler_networking::AuthenticationStorage;
 use rattler_package_streaming::seek::read_package_file;
 
@@ -117,33 +119,16 @@ pub struct Args {
     #[arg(long)]
     pub generate_attestation: bool,
 
-    /// The package archive format to publish.
-    ///
-    /// Backends build `.conda` artifacts; selecting `tar-bz2` repackages each
-    /// built artifact into the legacy `.tar.bz2` format before uploading, and
-    /// `both` publishes both formats side by side.
-    #[arg(long, value_enum, default_value_t = PackageFormat::Conda)]
-    pub package_format: PackageFormat,
+    /// The package archive format and compression level the backend should
+    /// emit, e.g. `conda`, `tar-bz2`, `conda:max`, `conda:15`, or
+    /// `tar-bz2:9`. Numeric ranges follow rattler-build: -7..=22 for
+    /// `.conda` (zstd) and 1..=9 for `.tar.bz2` (bzip2).
+    #[arg(long, value_parser = parse_package_format)]
+    pub package_format: Option<PackageFormatAndCompression>,
 }
 
-/// Output archive format for `pixi publish`.
-#[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[clap(rename_all = "kebab-case")]
-pub enum PackageFormat {
-    /// The modern zip-based `.conda` format (default).
-    #[default]
-    Conda,
-    /// The legacy `.tar.bz2` format.
-    TarBz2,
-}
-
-impl From<PackageFormat> for CondaArchiveType {
-    fn from(value: PackageFormat) -> Self {
-        match value {
-            PackageFormat::Conda => CondaArchiveType::Conda,
-            PackageFormat::TarBz2 => CondaArchiveType::TarBz2,
-        }
-    }
+fn parse_package_format(s: &str) -> Result<PackageFormatAndCompression, String> {
+    PackageFormatAndCompression::from_str(s)
 }
 
 /// Validate that the full path of package manifest exists and is a supported
@@ -470,7 +455,11 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             variant_files: Some(variant_files.clone()),
             build_string_prefix: args.build_string_prefix.clone(),
             build_number: args.build_number,
-            archive_type: Some(args.package_format.into()),
+            archive_type: args.package_format.as_ref().map(|f| f.archive_type),
+            compression_level: args
+                .package_format
+                .as_ref()
+                .map(|f| f.compression_level.into()),
         };
         let built = command_dispatcher
             .engine()
@@ -999,16 +988,39 @@ async fn upload_to_local_filesystem_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rattler_conda_types::{
+        compression_level::CompressionLevel, package::CondaArchiveType,
+    };
 
     #[test]
-    fn package_format_maps_to_archive_type() {
-        assert_eq!(
-            CondaArchiveType::from(PackageFormat::Conda),
-            CondaArchiveType::Conda
-        );
-        assert_eq!(
-            CondaArchiveType::from(PackageFormat::TarBz2),
-            CondaArchiveType::TarBz2
-        );
+    fn parses_bare_package_format() {
+        let parsed = parse_package_format("conda").unwrap();
+        assert_eq!(parsed.archive_type, CondaArchiveType::Conda);
+        assert_eq!(parsed.compression_level, CompressionLevel::Default);
+    }
+
+    #[test]
+    fn parses_named_compression_level() {
+        let parsed = parse_package_format("conda:max").unwrap();
+        assert_eq!(parsed.archive_type, CondaArchiveType::Conda);
+        assert_eq!(parsed.compression_level, CompressionLevel::Highest);
+    }
+
+    #[test]
+    fn parses_numeric_compression_level() {
+        let parsed = parse_package_format("tar-bz2:5").unwrap();
+        assert_eq!(parsed.archive_type, CondaArchiveType::TarBz2);
+        assert_eq!(parsed.compression_level, CompressionLevel::Numeric(5));
+    }
+
+    #[test]
+    fn rejects_unknown_format() {
+        assert!(parse_package_format("zip").is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_numeric_level() {
+        assert!(parse_package_format("tar-bz2:42").is_err());
+        assert!(parse_package_format("conda:99").is_err());
     }
 }

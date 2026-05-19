@@ -112,6 +112,7 @@ async fn test_conda_build_v1() {
         output_directory: None,
         editable: None,
         archive_type: None,
+        compression_level: None,
     };
 
     let some_config = json!({

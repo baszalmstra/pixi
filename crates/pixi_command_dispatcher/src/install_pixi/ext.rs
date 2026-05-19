@@ -171,10 +171,11 @@ async fn install_inner(
                 // forwards user-supplied values here.
                 build_string_prefix: None,
                 build_number: None,
-                // Archive format is a `pixi publish` concern; installing
-                // source packages just consumes whatever the backend
-                // defaults to.
+                // Archive format and compression level are `pixi publish`
+                // concerns; installing source packages just consumes
+                // whatever the backend defaults to.
                 archive_type: None,
+                compression_level: None,
             };
             sub_ctx
                 .compute(&SourceBuildKey::new(build_spec))

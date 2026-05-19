@@ -12,7 +12,7 @@ use std::{
 
 use rattler_conda_types::{
     ChannelUrl, MatchSpec, PackageName, Platform, RepoDataRecord, VersionWithSource,
-    package::CondaArchiveType,
+    compression_level::CompressionLevel, package::CondaArchiveType,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
@@ -70,6 +70,65 @@ pub struct CondaBuildV1Params {
     /// current behavior.
     #[serde(default)]
     pub archive_type: Option<CondaArchiveType>,
+
+    /// The compression level the backend should apply when writing the
+    /// archive. Defaults to the backend's preferred level when omitted.
+    /// Numeric ranges follow rattler-build: 1..=9 for `tar.bz2` and
+    /// -7..=22 for `.conda`.
+    #[serde(default)]
+    pub compression_level: Option<CondaCompressionLevel>,
+}
+
+/// Wire-level representation of the compression level for a conda or
+/// tar.bz2 package. Mirrors `rattler_conda_types::compression_level::
+/// CompressionLevel`, but with serde and `Hash` so it can travel through
+/// the JSON-RPC protocol and participate in cache keys.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum CondaCompressionLevel {
+    /// One of the named compression presets (`lowest`, `default`, `highest`).
+    Named(NamedCompressionLevel),
+    /// A raw numeric level. Range depends on the archive type.
+    Numeric(i32),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NamedCompressionLevel {
+    Lowest,
+    #[default]
+    Default,
+    Highest,
+}
+
+impl From<CondaCompressionLevel> for CompressionLevel {
+    fn from(value: CondaCompressionLevel) -> Self {
+        match value {
+            CondaCompressionLevel::Named(NamedCompressionLevel::Lowest) => CompressionLevel::Lowest,
+            CondaCompressionLevel::Named(NamedCompressionLevel::Default) => {
+                CompressionLevel::Default
+            }
+            CondaCompressionLevel::Named(NamedCompressionLevel::Highest) => {
+                CompressionLevel::Highest
+            }
+            CondaCompressionLevel::Numeric(level) => CompressionLevel::Numeric(level),
+        }
+    }
+}
+
+impl From<CompressionLevel> for CondaCompressionLevel {
+    fn from(value: CompressionLevel) -> Self {
+        match value {
+            CompressionLevel::Lowest => CondaCompressionLevel::Named(NamedCompressionLevel::Lowest),
+            CompressionLevel::Default => {
+                CondaCompressionLevel::Named(NamedCompressionLevel::Default)
+            }
+            CompressionLevel::Highest => {
+                CondaCompressionLevel::Named(NamedCompressionLevel::Highest)
+            }
+            CompressionLevel::Numeric(level) => CondaCompressionLevel::Numeric(level),
+        }
+    }
 }
 
 #[serde_as]

@@ -9,7 +9,10 @@ use std::{collections::BTreeMap, hash::Hash, path::PathBuf, sync::Arc};
 
 use derive_more::Display;
 use futures::{SinkExt, channel::mpsc::unbounded};
-use pixi_build_types::procedures::conda_outputs::{CondaOutput, CondaOutputsParams};
+use pixi_build_types::procedures::{
+    conda_build_v1::CondaCompressionLevel,
+    conda_outputs::{CondaOutput, CondaOutputsParams},
+};
 use pixi_compute_engine::{ComputeCtx, Key};
 use pixi_record::{PixiRecord, UnresolvedPixiRecord, UnresolvedSourceRecord, VariantValue};
 use pixi_spec::{ResolvedExcludeNewer, SourceAnchor, SourceLocationSpec};
@@ -84,6 +87,12 @@ pub struct SourceBuildSpec {
     /// backend pick its own default. The chosen format participates in the
     /// artifact cache key so `.conda` and `.tar.bz2` builds don't collide.
     pub archive_type: Option<CondaArchiveType>,
+
+    /// The compression level the backend should apply when writing the
+    /// archive. `None` lets the backend pick its own default. The chosen
+    /// level participates in the artifact cache key so differently-sized
+    /// outputs of otherwise-identical inputs don't collide.
+    pub compression_level: Option<CondaCompressionLevel>,
 }
 
 /// Built artifact plus its sha256 and a
@@ -193,6 +202,7 @@ async fn compute_inner(
         &host_source_dep_sha256s,
         &project_model_overrides,
         spec.archive_type,
+        spec.compression_level,
     );
 
     // On artifact cache hit, return without invoking the backend.
@@ -364,6 +374,7 @@ async fn compute_inner(
                 variant: output.metadata.variant.clone(),
                 output_directory: None,
                 archive_type: spec.archive_type,
+                compression_level: spec.compression_level,
             }),
             backend,
             name: output.metadata.name.clone(),
@@ -468,10 +479,11 @@ async fn build_source_deps(
                 build_string_prefix: spec.build_string_prefix.clone(),
                 build_number: spec.build_number,
                 // Source dependencies are consumed as input to the parent
-                // build, so the chosen archive format for the parent does
-                // not constrain how they themselves are packaged. Let the
-                // backend keep producing its default `.conda` for them.
+                // build, so the chosen archive format and compression level
+                // for the parent do not constrain how they themselves are
+                // packaged. Let the backend keep producing its defaults.
                 archive_type: None,
+                compression_level: None,
             };
             let result = sub_ctx.compute(&SourceBuildKey::new(nested_spec)).await?;
             Ok(result.artifact_sha256)

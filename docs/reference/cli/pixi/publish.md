@@ -44,9 +44,7 @@ pixi publish [OPTIONS]
 - <a id="arg---generate-attestation" href="#arg---generate-attestation">`--generate-attestation`</a>
 :  Generate sigstore attestation (prefix.dev only)
 - <a id="arg---package-format" href="#arg---package-format">`--package-format <PACKAGE_FORMAT>`</a>
-:  The package archive format to publish
-<br>**default**: `conda`
-<br>**options**: `conda`, `tar-bz2`
+:  The package archive format and compression level the backend should emit, e.g. `conda`, `tar-bz2`, `conda:max`, `conda:15`, or `tar-bz2:9`. Numeric ranges follow rattler-build: -7..=22 for `.conda` (zstd) and 1..=9 for `.tar.bz2` (bzip2)
 
 ## Config Options
 - <a id="arg---auth-file" href="#arg---auth-file">`--auth-file <AUTH_FILE>`</a>
