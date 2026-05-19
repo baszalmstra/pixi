@@ -12,7 +12,7 @@ use std::{
 };
 use url::Url;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use indicatif::ProgressBar;
 use miette::{Context, IntoDiagnostic};
 use pixi_auth::get_auth_store;
@@ -31,7 +31,10 @@ use pixi_record::{PinnedPathSpec, PinnedSourceSpec};
 use pixi_reporters::TopLevelProgress;
 use pixi_spec::SourceLocationSpec;
 use pixi_utils::variants::VariantConfig;
-use rattler_conda_types::{GenericVirtualPackage, Platform};
+use rattler_conda_types::{
+    GenericVirtualPackage, Platform, compression_level::CompressionLevel,
+    package::CondaArchiveType,
+};
 use rattler_networking::AuthenticationStorage;
 use rattler_package_streaming::seek::read_package_file;
 
@@ -116,6 +119,37 @@ pub struct Args {
     /// Generate sigstore attestation (prefix.dev only)
     #[arg(long)]
     pub generate_attestation: bool,
+
+    /// The package archive format to publish.
+    ///
+    /// Backends build `.conda` artifacts; selecting `tar-bz2` repackages each
+    /// built artifact into the legacy `.tar.bz2` format before uploading, and
+    /// `both` publishes both formats side by side.
+    #[arg(long, value_enum, default_value_t = PackageFormat::Conda)]
+    pub package_format: PackageFormat,
+}
+
+/// Output archive format for `pixi publish`.
+#[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum PackageFormat {
+    /// The modern zip-based `.conda` format (default).
+    #[default]
+    Conda,
+    /// The legacy `.tar.bz2` format.
+    TarBz2,
+    /// Publish both `.conda` and `.tar.bz2` artifacts.
+    Both,
+}
+
+impl PackageFormat {
+    fn includes_conda(self) -> bool {
+        matches!(self, PackageFormat::Conda | PackageFormat::Both)
+    }
+
+    fn includes_tar_bz2(self) -> bool {
+        matches!(self, PackageFormat::TarBz2 | PackageFormat::Both)
+    }
 }
 
 /// Validate that the full path of package manifest exists and is a supported
@@ -462,6 +496,22 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         miette::bail!("No packages were built. Nothing to publish.");
     }
 
+    // Translate the freshly-built `.conda` artifacts into the user-requested
+    // formats. `Both` keeps the original `.conda` and appends a `.tar.bz2`
+    // sibling; `TarBz2` drops the `.conda` from the upload list.
+    if args.package_format.includes_tar_bz2() {
+        let mut converted = Vec::with_capacity(built_package_paths.len());
+        for conda_path in &built_package_paths {
+            let tar_bz2_path = convert_conda_to_tar_bz2(conda_path)?;
+            converted.push(tar_bz2_path);
+        }
+        if args.package_format.includes_conda() {
+            built_package_paths.extend(converted);
+        } else {
+            built_package_paths = converted;
+        }
+    }
+
     let base = std::env::current_dir()
         .into_diagnostic()
         .context("Could not get current work directory.")?;
@@ -656,6 +706,103 @@ async fn upload_to_local_filesystem_path(
 
     Ok(())
 }
+
+/// Extract a freshly-built `.conda` archive and repackage its contents as
+/// `.tar.bz2`. The new artifact is written next to the source archive so the
+/// upload path can stay agnostic about how the file was produced.
+fn convert_conda_to_tar_bz2(conda_path: &Path) -> miette::Result<PathBuf> {
+    let file_name = conda_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| {
+            miette::miette!(
+                "Cannot derive tar.bz2 filename from '{}'",
+                conda_path.display()
+            )
+        })?;
+    let (stem, archive_type) = CondaArchiveType::split_str(file_name).ok_or_else(|| {
+        miette::miette!(
+            "Built artifact '{}' does not have a recognized conda extension",
+            conda_path.display()
+        )
+    })?;
+    // The build path always produces `.conda`; converting an already-`.tar.bz2`
+    // artifact would be a no-op repackage and almost certainly signals a bug
+    // upstream, so reject it loudly.
+    if archive_type != CondaArchiveType::Conda {
+        return Err(miette::miette!(
+            "Cannot convert '{}' to tar.bz2: source is already a {} archive",
+            conda_path.display(),
+            archive_type.extension(),
+        ));
+    }
+
+    let tar_bz2_path = conda_path.with_file_name(format!(
+        "{stem}{ext}",
+        ext = CondaArchiveType::TarBz2.extension()
+    ));
+
+    // Skip the extract+repack if a converted artifact is already on disk for
+    // this exact stem — the artifact cache hands us the same path across runs.
+    if tar_bz2_path.exists() {
+        return Ok(tar_bz2_path);
+    }
+
+    let extract_dir = tempfile::tempdir()
+        .into_diagnostic()
+        .context("Failed to create temporary directory for tar.bz2 conversion")?;
+    rattler_package_streaming::fs::extract(conda_path, extract_dir.path())
+        .map_err(|e| miette::miette!("Failed to extract '{}': {}", conda_path.display(), e))?;
+
+    let paths = collect_files(extract_dir.path()).into_diagnostic().context(
+        format!("Failed to enumerate files extracted from '{}'", conda_path.display()),
+    )?;
+
+    let output = fs_err::File::create(&tar_bz2_path)
+        .into_diagnostic()
+        .context(format!(
+            "Failed to create tar.bz2 artifact at '{}'",
+            tar_bz2_path.display()
+        ))?;
+    rattler_package_streaming::write::write_tar_bz2_package(
+        output,
+        extract_dir.path(),
+        &paths,
+        CompressionLevel::Default,
+        None,
+        None,
+    )
+    .map_err(|e| {
+        miette::miette!(
+            "Failed to write tar.bz2 artifact '{}': {}",
+            tar_bz2_path.display(),
+            e
+        )
+    })?;
+
+    Ok(tar_bz2_path)
+}
+
+/// Recursively collect every regular file under `root`, returned as absolute
+/// paths suitable for `write_tar_bz2_package` (which strips `base_path` itself).
+fn collect_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs_err::read_dir(&dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let path = entry.path();
+            if file_type.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Upload packages to a Prefix.dev server.
 async fn upload_to_prefix(
     url: &Url,
@@ -964,4 +1111,83 @@ async fn upload_to_local_filesystem_channel(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rattler_package_streaming::write::write_conda_package;
+    use std::io::Write;
+
+    /// Build a minimal but valid `.conda` archive containing only an
+    /// `info/index.json` entry. Just enough for the extract+repack helper to
+    /// have something to chew on.
+    fn make_minimal_conda(dir: &Path, name: &str) -> PathBuf {
+        let staging = dir.join("staging");
+        fs_err::create_dir_all(staging.join("info")).unwrap();
+        let index_json_path = staging.join("info").join("index.json");
+        let mut f = fs_err::File::create(&index_json_path).unwrap();
+        write!(
+            f,
+            r#"{{"name":"{name}","version":"0.1.0","build":"0","build_number":0,"subdir":"noarch","depends":[],"constrains":[],"license":null}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        let out_path = dir.join(format!("{name}-0.1.0-0.conda"));
+        let out_file = fs_err::File::create(&out_path).unwrap();
+        write_conda_package(
+            out_file,
+            &staging,
+            &[index_json_path],
+            CompressionLevel::Default,
+            None,
+            &format!("{name}-0.1.0-0"),
+            None,
+            None,
+        )
+        .unwrap();
+        out_path
+    }
+
+    #[test]
+    fn convert_creates_sibling_tar_bz2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conda_path = make_minimal_conda(tmp.path(), "demo");
+
+        let tar_bz2_path = convert_conda_to_tar_bz2(&conda_path).expect("conversion to succeed");
+
+        assert_eq!(tar_bz2_path, conda_path.with_file_name("demo-0.1.0-0.tar.bz2"));
+        assert!(tar_bz2_path.exists());
+        assert_eq!(
+            CondaArchiveType::try_from(tar_bz2_path.as_path()),
+            Some(CondaArchiveType::TarBz2)
+        );
+
+        // Calling again is a no-op cache hit and must not error or rewrite.
+        let again = convert_conda_to_tar_bz2(&conda_path).expect("second conversion to succeed");
+        assert_eq!(again, tar_bz2_path);
+    }
+
+    #[test]
+    fn convert_rejects_non_conda_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("demo-0.1.0-0.tar.bz2");
+        fs_err::write(&fake, b"not a real package").unwrap();
+        let err = convert_conda_to_tar_bz2(&fake).expect_err("should reject tar.bz2 input");
+        assert!(
+            err.to_string().contains("already a"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn package_format_inclusion_matrix() {
+        assert!(PackageFormat::Conda.includes_conda());
+        assert!(!PackageFormat::Conda.includes_tar_bz2());
+        assert!(!PackageFormat::TarBz2.includes_conda());
+        assert!(PackageFormat::TarBz2.includes_tar_bz2());
+        assert!(PackageFormat::Both.includes_conda());
+        assert!(PackageFormat::Both.includes_tar_bz2());
+    }
 }
