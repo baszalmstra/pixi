@@ -97,6 +97,7 @@ fn package_dependency_to_item(dep: PackageDependency) -> Item<SerializableMatchS
 }
 
 pub fn from_targets_v1_to_conditional_requirements(targets: &Targets) -> Requirements {
+    let mut requirements = Requirements::default();
     let mut build_items = ConditionalList::default();
     let mut host_items = ConditionalList::default();
     let mut run_items = ConditionalList::default();
@@ -136,7 +137,13 @@ pub fn from_targets_v1_to_conditional_requirements(targets: &Targets) -> Require
                 .into_iter()
                 .map(|spec| spec.1)
                 .map(package_dependency_to_item),
-        )
+        );
+
+        extend_run_exports(
+            &mut requirements,
+            default_target.run_exports.as_ref(),
+            None,
+        );
     }
 
     // Add specific targets
@@ -184,16 +191,71 @@ pub fn from_targets_v1_to_conditional_requirements(targets: &Targets) -> Require
                     .map(|spec| spec.1)
                     .map(make_conditional),
             );
+
+            extend_run_exports(
+                &mut requirements,
+                target.run_exports.as_ref(),
+                Some(&selector_str),
+            );
         }
     }
 
-    Requirements {
-        build: build_items,
-        host: host_items,
-        run: run_items,
-        run_constraints: run_constraints_items,
-        ..Default::default()
-    }
+    requirements.build = build_items;
+    requirements.host = host_items;
+    requirements.run = run_items;
+    requirements.run_constraints = run_constraints_items;
+    requirements
+}
+
+/// Extend `requirements.run_exports` with items from a single target's
+/// [`pixi_build_types::TargetRunExports`].
+///
+/// When `selector_str` is `Some`, each item is wrapped in a `Conditional` with
+/// the given jinja expression so that platform-specific run-exports only apply
+/// on the matching platform. The default target passes `None`, producing
+/// unconditional items.
+///
+/// The `RunExports` type is not publicly nameable from rattler-build's
+/// stage0 module, so this helper takes `&mut Requirements` and mutates the
+/// public `run_exports` field in place.
+fn extend_run_exports(
+    requirements: &mut Requirements,
+    src: Option<&pixi_build_types::TargetRunExports>,
+    selector_str: Option<&str>,
+) {
+    let Some(src) = src else { return };
+
+    let to_item = |dep: PackageDependency| -> Item<SerializableMatchSpec> {
+        match selector_str {
+            None => package_dependency_to_item(dep),
+            Some(s) => Item::Conditional(Conditional {
+                condition: JinjaExpression::new(s.to_string()).expect("valid jinja expression"),
+                then: NestedItemList::single(package_dependency_to_item(dep)),
+                else_value: None,
+                condition_span: None,
+            }),
+        }
+    };
+
+    let convert = |bucket: &Option<OrderMap<SourcePackageName, PackageSpec>>,
+                   out: &mut ConditionalList<SerializableMatchSpec>| {
+        let Some(bucket) = bucket else { return };
+        let deps = package_specs_to_package_dependency(bucket.clone())
+            .expect("run-export package specs should convert");
+        out.extend(deps.into_iter().map(to_item));
+    };
+
+    convert(&src.weak, &mut requirements.run_exports.weak);
+    convert(&src.strong, &mut requirements.run_exports.strong);
+    convert(&src.noarch, &mut requirements.run_exports.noarch);
+    convert(
+        &src.weak_constraints,
+        &mut requirements.run_exports.weak_constraints,
+    );
+    convert(
+        &src.strong_constraints,
+        &mut requirements.run_exports.strong_constraints,
+    );
 }
 
 pub(crate) fn source_package_spec_to_package_dependency(
@@ -538,6 +600,7 @@ mod test {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: Some(constraints),
+            run_exports: None,
         }
     }
 
@@ -614,5 +677,110 @@ mod test {
             .as_concrete()
             .expect("expected a concrete match spec");
         assert_eq!(then_value.0.to_string(), "linux-only >=2.0");
+    }
+
+    /// `from_targets_v1_to_conditional_requirements` must route
+    /// `pbt::TargetRunExports` into the corresponding buckets of
+    /// `Requirements.run_exports`, with platform-specific items wrapped in a
+    /// `Conditional`.
+    #[test]
+    fn test_targets_v1_run_exports_in_requirements() {
+        use pixi_build_types::TargetRunExports;
+
+        fn bin(name: &str, version: &str) -> OrderMap<SourcePackageName, PackageSpec> {
+            let mut map = OrderMap::new();
+            map.insert(
+                SourcePackageName::from(PackageName::new_unchecked(name)),
+                PackageSpec::Binary(BinaryPackageSpec {
+                    version: Some(version.parse().unwrap()),
+                    ..BinaryPackageSpec::default()
+                }),
+            );
+            map
+        }
+
+        let default_target = Target {
+            run_exports: Some(TargetRunExports {
+                weak: Some(bin("libzma", "==1.0")),
+                strong: Some(bin("libgcc", ">=12")),
+                noarch: Some(bin("python", ">=3.8")),
+                weak_constraints: Some(bin("weak-c", "==2.0")),
+                strong_constraints: Some(bin("strong-c", "==3.0")),
+            }),
+            host_dependencies: None,
+            build_dependencies: None,
+            run_dependencies: None,
+            run_constraints: None,
+        };
+
+        let linux_target = Target {
+            run_exports: Some(TargetRunExports {
+                weak: Some(bin("linux-weak", ">=4.0")),
+                ..TargetRunExports::default()
+            }),
+            host_dependencies: None,
+            build_dependencies: None,
+            run_dependencies: None,
+            run_constraints: None,
+        };
+
+        let mut targets_map = OrderMap::new();
+        targets_map.insert(
+            TargetSelector::Platform("linux-64".to_string()),
+            linux_target,
+        );
+        let targets = Targets {
+            default_target: Some(default_target),
+            targets: Some(targets_map),
+        };
+
+        let req = from_targets_v1_to_conditional_requirements(&targets);
+        let re = &req.run_exports;
+
+        // Default-target items are bare values.
+        let single_value = |list: &ConditionalList<SerializableMatchSpec>| -> String {
+            assert_eq!(list.iter().count(), 1, "expected exactly one entry");
+            list.iter()
+                .next()
+                .unwrap()
+                .as_value()
+                .expect("expected a bare value")
+                .as_concrete()
+                .expect("expected a concrete match spec")
+                .0
+                .to_string()
+        };
+        assert_eq!(single_value(&re.strong), "libgcc >=12");
+        assert_eq!(single_value(&re.noarch), "python >=3.8");
+        assert_eq!(single_value(&re.weak_constraints), "weak-c ==2.0");
+        assert_eq!(single_value(&re.strong_constraints), "strong-c ==3.0");
+
+        // Weak has both the default bare value and the linux-64 conditional.
+        assert_eq!(re.weak.iter().count(), 2);
+        let mut weak = re.weak.iter();
+        assert_eq!(
+            weak.next()
+                .unwrap()
+                .as_value()
+                .unwrap()
+                .as_concrete()
+                .unwrap()
+                .0
+                .to_string(),
+            "libzma ==1.0",
+        );
+        let conditional = match weak.next().unwrap() {
+            Item::Conditional(c) => c,
+            Item::Value(_) => panic!("expected linux-64 weak run-export to be Conditional"),
+        };
+        let then = conditional
+            .then
+            .iter()
+            .next()
+            .expect("conditional then-branch must contain the run-export");
+        assert_eq!(
+            then.as_value().unwrap().as_concrete().unwrap().0.to_string(),
+            "linux-weak >=4.0",
+        );
     }
 }
