@@ -8,8 +8,8 @@ use rattler_conda_types::{PackageName, ParsePlatformError, Platform};
 
 use super::error::DependencyError;
 use crate::{
-    CondaDependencies, DependencyOverwriteBehavior, InternalDependencyBehavior, PyPiDependencies,
-    SpecType,
+    CondaDependencies, DependencyOverwriteBehavior, InternalDependencyBehavior, PackageRunExports,
+    PyPiDependencies, SpecType,
     activation::Activation,
     dependencies::{CondaConstraints, CondaDevDependencies},
     task::{Task, TaskName},
@@ -58,7 +58,7 @@ pub struct PackageTarget {
 
     /// Run-exports declared for this target, applied to downstream consumers
     /// of the package.
-    pub run_exports: crate::PackageRunExports,
+    pub run_exports: PackageRunExports,
 }
 
 impl WorkspaceTarget {
@@ -359,7 +359,7 @@ impl PackageTarget {
     }
 
     /// Returns the run exports of the target.
-    pub fn run_exports(&self) -> &crate::PackageRunExports {
+    pub fn run_exports(&self) -> &PackageRunExports {
         &self.run_exports
     }
 

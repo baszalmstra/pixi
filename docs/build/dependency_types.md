@@ -113,7 +113,7 @@ libgcc-ng = ">=12"
 ```
 
 The supported buckets are `weak`, `strong`, `noarch`, `weak-constraints`
-and `strong-constraints` — see
+and `strong-constraints`. See
 [the rattler-build reference](https://rattler.build/latest/reference/recipe_file/#run-exports)
 for the precise semantics. Run-exports can also be declared per target
 under `[package.target.<selector>.run-exports.<bucket>]`.

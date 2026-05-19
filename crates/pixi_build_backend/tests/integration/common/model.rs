@@ -2,7 +2,8 @@
 /// that can be used to create a ProjectModel from a JSON fixture file.
 use pixi_build_types::{
     BinaryPackageSpec as PbtBinaryPackageSpec, PackageSpec as PbtPackageSpec, PathSpec,
-    ProjectModel, Target as PbtTarget, TargetSelector as PbtTargetSelector, Targets as PbtTargets,
+    ProjectModel, Target as PbtTarget, TargetRunExports as PbtTargetRunExports,
+    TargetSelector as PbtTargetSelector, Targets as PbtTargets,
 };
 
 use rattler_conda_types::{PackageName, ParseStrictness, Version, VersionSpec};
@@ -38,6 +39,22 @@ pub struct Target {
     pub build_dependencies: HashMap<String, PackageSpec>,
     pub run_dependencies: HashMap<String, PackageSpec>,
     pub run_constraints: HashMap<String, PackageSpec>,
+    #[serde(default)]
+    pub run_exports: RunExports,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunExports {
+    #[serde(default)]
+    pub weak: HashMap<String, PackageSpec>,
+    #[serde(default)]
+    pub strong: HashMap<String, PackageSpec>,
+    #[serde(default)]
+    pub noarch: HashMap<String, PackageSpec>,
+    #[serde(default)]
+    pub weak_constraints: HashMap<String, PackageSpec>,
+    #[serde(default)]
+    pub strong_constraints: HashMap<String, PackageSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,7 +202,50 @@ fn convert_target_to_v1(target: &Target) -> PbtTarget {
                 })
                 .collect(),
         ),
-        run_exports: None,
+        run_exports: convert_run_exports_to_v1(&target.run_exports),
+    }
+}
+
+fn convert_run_exports_to_v1(run_exports: &RunExports) -> Option<PbtTargetRunExports> {
+    let convert = |bucket: &HashMap<String, PackageSpec>| {
+        if bucket.is_empty() {
+            None
+        } else {
+            Some(
+                bucket
+                    .iter()
+                    .map(|(name, spec)| {
+                        let source_name = pixi_build_types::SourcePackageName::from(
+                            PackageName::new_unchecked(name),
+                        );
+                        (source_name, convert_package_spec_to_v1(spec))
+                    })
+                    .collect(),
+            )
+        }
+    };
+
+    let weak = convert(&run_exports.weak);
+    let strong = convert(&run_exports.strong);
+    let noarch = convert(&run_exports.noarch);
+    let weak_constraints = convert(&run_exports.weak_constraints);
+    let strong_constraints = convert(&run_exports.strong_constraints);
+
+    if weak.is_none()
+        && strong.is_none()
+        && noarch.is_none()
+        && weak_constraints.is_none()
+        && strong_constraints.is_none()
+    {
+        None
+    } else {
+        Some(PbtTargetRunExports {
+            weak,
+            strong,
+            noarch,
+            weak_constraints,
+            strong_constraints,
+        })
     }
 }
 
