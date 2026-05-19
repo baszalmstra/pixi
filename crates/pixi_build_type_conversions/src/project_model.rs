@@ -174,8 +174,41 @@ fn to_target_v1(
                 .transpose()?
                 .unwrap_or_default(),
         ),
-        run_exports: None,
+        run_exports: to_run_exports_v1(target.run_exports(), channel_config)?,
     })
+}
+
+/// Convert [`PackageRunExports`] to the wire [`pbt::TargetRunExports`].
+/// Returns `None` when every bucket is empty so the wire field stays absent.
+fn to_run_exports_v1(
+    run_exports: &pixi_manifest::PackageRunExports,
+    channel_config: &ChannelConfig,
+) -> Result<Option<pbt::TargetRunExports>, SpecConversionError> {
+    if run_exports.is_empty() {
+        return Ok(None);
+    }
+
+    fn convert(
+        map: &pixi_spec_containers::DependencyMap<PackageName, pixi_spec::PixiSpec>,
+        channel_config: &ChannelConfig,
+    ) -> Result<
+        Option<ordermap::OrderMap<pbt::SourcePackageName, pbt::PackageSpec>>,
+        SpecConversionError,
+    > {
+        if map.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(to_pbt_dependencies(map.iter_specs(), channel_config)?))
+        }
+    }
+
+    Ok(Some(pbt::TargetRunExports {
+        weak: convert(&run_exports.weak, channel_config)?,
+        strong: convert(&run_exports.strong, channel_config)?,
+        noarch: convert(&run_exports.noarch, channel_config)?,
+        weak_constraints: convert(&run_exports.weak_constraints, channel_config)?,
+        strong_constraints: convert(&run_exports.strong_constraints, channel_config)?,
+    }))
 }
 
 pub fn to_target_selector_v1(selector: &TargetSelector) -> pbt::TargetSelector {
@@ -345,5 +378,74 @@ mod tests {
         assert!(target.run_dependencies.unwrap().is_empty());
         assert!(target.host_dependencies.unwrap().is_empty());
         assert!(target.build_dependencies.unwrap().is_empty());
+    }
+
+    /// `to_target_v1` must propagate `[package.run-exports.<bucket>]` from the
+    /// `PackageTarget` into the new `pbt::Target.run_exports` field, with
+    /// per-bucket routing preserved.
+    #[test]
+    fn test_to_target_v1_run_exports() {
+        use std::str::FromStr;
+
+        use pixi_manifest::{PackageRunExports, PackageTarget};
+        use pixi_spec::PixiSpec;
+        use rattler_conda_types::{PackageName, ParseStrictness, VersionSpec};
+
+        use super::pbt;
+
+        let spec = |s: &str| {
+            PixiSpec::Version(VersionSpec::from_str(s, ParseStrictness::Strict).unwrap())
+        };
+        let mut run_exports = PackageRunExports::default();
+        run_exports
+            .weak
+            .insert(PackageName::from_str("libzma").unwrap(), spec("==1.0"));
+        run_exports
+            .strong
+            .insert(PackageName::from_str("libgcc").unwrap(), spec(">=12"));
+        run_exports
+            .noarch
+            .insert(PackageName::from_str("python").unwrap(), spec(">=3.8"));
+        run_exports.weak_constraints.insert(
+            PackageName::from_str("weak-c").unwrap(),
+            spec("==2.0"),
+        );
+        run_exports.strong_constraints.insert(
+            PackageName::from_str("strong-c").unwrap(),
+            spec("==3.0"),
+        );
+
+        let package_target = PackageTarget {
+            run_exports,
+            ..PackageTarget::default()
+        };
+
+        let target = super::to_target_v1(&package_target, &some_channel_config()).unwrap();
+        let re = target
+            .run_exports
+            .expect("run_exports should be Some when any bucket is non-empty");
+
+        let bucket_spec = |bucket: &Option<ordermap::OrderMap<pbt::SourcePackageName, pbt::PackageSpec>>,
+                           name: &str| {
+            let map = bucket.as_ref().expect("bucket should be populated");
+            assert_eq!(map.len(), 1, "expected exactly one entry in {name} bucket");
+            let (n, spec) = map.iter().next().unwrap();
+            assert_eq!(n.as_str(), name);
+            match spec {
+                pbt::PackageSpec::Binary(b) => b.version.as_ref().unwrap().to_string(),
+                other => panic!("expected Binary spec, got {other:?}"),
+            }
+        };
+
+        assert_eq!(bucket_spec(&re.weak, "libzma"), "==1.0");
+        assert_eq!(bucket_spec(&re.strong, "libgcc"), ">=12");
+        assert_eq!(bucket_spec(&re.noarch, "python"), ">=3.8");
+        assert_eq!(bucket_spec(&re.weak_constraints, "weak-c"), "==2.0");
+        assert_eq!(bucket_spec(&re.strong_constraints, "strong-c"), "==3.0");
+
+        // Empty run-exports must round-trip to None so the wire field stays absent.
+        let empty_target = PackageTarget::default();
+        let empty = super::to_target_v1(&empty_target, &some_channel_config()).unwrap();
+        assert!(empty.run_exports.is_none());
     }
 }
