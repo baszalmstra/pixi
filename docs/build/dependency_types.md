@@ -96,6 +96,28 @@ This is useful to avoid having to specify the same dependencies in both sections
 As most packages on conda-forge will have these `run-exports` defined.
 When using something like `zlib`, you would only need to specify it in the `host-dependencies` section, and it will be used as a run-dependency automatically.
 
+Your own package can also publish `run-exports` so that downstream consumers
+pick up the right runtime dependencies automatically. Declare them under
+`[package.run-exports.<bucket>]`:
+
+```toml
+# Apply zlib as a run-dependency to any package that lists this one in
+# host-dependencies.
+[package.run-exports.weak]
+libzma = "*"
+
+# Apply libgcc-ng as a run-dependency to any package that lists this one
+# in either build- or host-dependencies (typical for compilers).
+[package.run-exports.strong]
+libgcc-ng = ">=12"
+```
+
+The supported buckets are `weak`, `strong`, `noarch`, `weak-constraints`
+and `strong-constraints` — see
+[the rattler-build reference](https://rattler.build/latest/reference/recipe_file/#run-exports)
+for the precise semantics. Run-exports can also be declared per target
+under `[package.target.<selector>.run-exports.<bucket>]`.
+
 
 ### [Dependencies (Run Dependencies)](../reference/pixi_manifest.md#dependencies)
 

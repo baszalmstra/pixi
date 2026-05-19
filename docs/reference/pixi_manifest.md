@@ -1290,6 +1290,7 @@ The package section is defined using the following fields:
 - `host-dependencies`: The host dependencies of the package.
 - `run-dependencies`: The run dependencies of the package.
 - `run-constraints`: Version constraints applied to the package's run environment.
+- `run-exports`: Run-exports propagated to downstream consumers of the package.
 - `target`: The target table to configure target specific dependencies. (Similar to the [target](#the-target-table) table)
 
 And to extend the basics, it can also contain the following fields:
@@ -1438,3 +1439,30 @@ This mirrors the conda concept that surfaces as `run_constrained` in the package
 ```toml
 --8<-- "docs/source_files/pixi_tomls/pixi-package-manifest.toml:run-constraints"
 ```
+
+### `run-exports`
+
+The `run-exports` declare dependencies that pixi will propagate to downstream
+consumers of this package. They mirror the
+[`run_exports` section in `recipe.yaml`](https://rattler.build/latest/reference/recipe_file/#run-exports)
+and are written into `info/run_exports.json` of the built conda package.
+
+Five buckets are supported:
+
+- `weak`: applied to consumers that depend on this package as a host-dependency.
+- `strong`: applied to consumers that depend on this package as either a
+  build- or host-dependency (typical for compilers).
+- `noarch`: applied only when the downstream consumer is a noarch package.
+- `weak-constraints`: like `weak`, but contributes to the consumer's
+  `run-constraints` instead of `run`.
+- `strong-constraints`: like `strong`, but contributes to the consumer's
+  `run-constraints` instead of `run`.
+
+```toml
+--8<-- "docs/source_files/pixi_tomls/pixi-package-manifest.toml:run-exports"
+```
+
+Run-exports can also be declared per platform under
+`[package.target.<selector>.run-exports.<bucket>]`. Source specs are
+supported and obey the same `pixi-build` preview gate as the dependency
+tables.

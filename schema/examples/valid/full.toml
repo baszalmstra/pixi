@@ -98,6 +98,15 @@ test1 = "*"
 [package.run-dependencies]
 test1 = "*"
 
+[package.run-exports.weak]
+libzma = "*"
+
+[package.run-exports.strong]
+libgcc-ng = ">=12"
+
+[package.target.linux-64.run-exports.weak]
+linux-libfoo = ">=1.0"
+
 [package.target.osx-64.host-dependencies]
 package1 = { version = ">=1.2.3", build = "py34_0" }
 pytorch-cpu = { version = "~=1.1", channel = "pytorch" }

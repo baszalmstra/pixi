@@ -1384,6 +1384,10 @@
             "minLength": 1
           }
         },
+        "run-exports": {
+          "$ref": "#/$defs/RunExports",
+          "description": "Run-exports declared by this package. See https://pixi.sh/latest/build/dependency_types/#run-exports."
+        },
         "target": {
           "title": "Target",
           "description": "Machine-specific aspects of the package",
@@ -1510,6 +1514,10 @@
           "propertyNames": {
             "minLength": 1
           }
+        },
+        "run-exports": {
+          "$ref": "#/$defs/RunExports",
+          "description": "Run-exports declared by this package. See https://pixi.sh/latest/build/dependency_types/#run-exports."
         }
       }
     },
@@ -1939,6 +1947,124 @@
           "description": "The version of the package in [PEP 440](https://www.python.org/dev/peps/pep-0440/) format",
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "RunExports": {
+      "title": "RunExports",
+      "description": "Run-exports propagate dependencies to downstream consumers of this package.\n\nSee https://rattler.build/latest/reference/recipe_file/#run-exports for the\nsemantics of each bucket.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "noarch": {
+          "title": "Noarch",
+          "description": "Applied only when the downstream consumer is a noarch package.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/MatchspecTable"
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          },
+          "examples": [
+            {
+              "python": ">=3.8"
+            }
+          ]
+        },
+        "strong": {
+          "title": "Strong",
+          "description": "Added to the consumer's `run` requirements when this package is a build- or host-dependency of the consumer.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/MatchspecTable"
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          },
+          "examples": [
+            {
+              "libgcc-ng": ">=12"
+            }
+          ]
+        },
+        "strong-constraints": {
+          "title": "Strong-Constraints",
+          "description": "Like `strong`, but contributes to the consumer's `run-constraints` instead of `run`.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/MatchspecTable"
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
+        },
+        "weak": {
+          "title": "Weak",
+          "description": "Added to the consumer's `run` requirements when this package is a host-dependency of the consumer.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/MatchspecTable"
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          },
+          "examples": [
+            {
+              "libzma": "*"
+            }
+          ]
+        },
+        "weak-constraints": {
+          "title": "Weak-Constraints",
+          "description": "Like `weak`, but contributes to the consumer's `run-constraints` instead of `run`.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/MatchspecTable"
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
         }
       }
     },

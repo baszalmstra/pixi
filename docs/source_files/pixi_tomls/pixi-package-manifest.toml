@@ -45,6 +45,14 @@ rich = ">=13.9.4,<14"
 numpy = ">=2"
 # --8<-- [end:run-constraints]
 
+# --8<-- [start:run-exports]
+[package.run-exports.weak]
+libzma = "*"
+
+[package.run-exports.strong]
+libgcc-ng = ">=12"
+# --8<-- [end:run-exports]
+
 
 [workspace]
 channels = ["https://prefix.dev/conda-forge"]

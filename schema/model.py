@@ -403,6 +403,44 @@ RunConstraintsField = Field(
 Dependencies = dict[CondaPackageName, MatchSpec] | None
 
 
+class RunExports(StrictBaseModel):
+    """Run-exports propagate dependencies to downstream consumers of this package.
+
+    See https://rattler.build/latest/reference/recipe_file/#run-exports for the
+    semantics of each bucket.
+    """
+
+    weak: Dependencies = Field(
+        None,
+        description="Added to the consumer's `run` requirements when this package is a host-dependency of the consumer.",
+        examples=[{"libzma": "*"}],
+    )
+    strong: Dependencies = Field(
+        None,
+        description="Added to the consumer's `run` requirements when this package is a build- or host-dependency of the consumer.",
+        examples=[{"libgcc-ng": ">=12"}],
+    )
+    noarch: Dependencies = Field(
+        None,
+        description="Applied only when the downstream consumer is a noarch package.",
+        examples=[{"python": ">=3.8"}],
+    )
+    weak_constraints: Dependencies = Field(
+        None,
+        description="Like `weak`, but contributes to the consumer's `run-constraints` instead of `run`.",
+    )
+    strong_constraints: Dependencies = Field(
+        None,
+        description="Like `strong`, but contributes to the consumer's `run-constraints` instead of `run`.",
+    )
+
+
+RunExportsField = Field(
+    None,
+    description="Run-exports declared by this package. See https://pixi.sh/latest/build/dependency_types/#run-exports.",
+)
+
+
 ################
 # Task section #
 ################
@@ -839,6 +877,7 @@ class Package(StrictBaseModel):
     build_dependencies: Dependencies = BuildDependenciesField
     run_dependencies: Dependencies = RunDependenciesField
     run_constraints: Dependencies = RunConstraintsField
+    run_exports: RunExports | None = RunExportsField
 
     target: dict[TargetName, PackageTarget] | None = Field(
         None,
@@ -931,6 +970,7 @@ class PackageTarget(StrictBaseModel):
     run_constraints: Dependencies = RunConstraintsField
     host_dependencies: Dependencies = HostDependenciesField
     build_dependencies: Dependencies = BuildDependenciesField
+    run_exports: RunExports | None = RunExportsField
 
 
 #######################
