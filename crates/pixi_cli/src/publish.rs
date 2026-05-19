@@ -123,12 +123,8 @@ pub struct Args {
     /// emit, e.g. `conda`, `tar-bz2`, `conda:max`, `conda:15`, or
     /// `tar-bz2:9`. Numeric ranges follow rattler-build: -7..=22 for
     /// `.conda` (zstd) and 1..=9 for `.tar.bz2` (bzip2).
-    #[arg(long, value_parser = parse_package_format)]
+    #[arg(long)]
     pub package_format: Option<PackageFormatAndCompression>,
-}
-
-fn parse_package_format(s: &str) -> Result<PackageFormatAndCompression, String> {
-    PackageFormatAndCompression::from_str(s)
 }
 
 /// Validate that the full path of package manifest exists and is a supported
@@ -993,33 +989,33 @@ mod tests {
 
     #[test]
     fn parses_bare_package_format() {
-        let parsed = parse_package_format("conda").unwrap();
+        let parsed = PackageFormatAndCompression::from_str("conda").unwrap();
         assert_eq!(parsed.archive_type, CondaArchiveType::Conda);
         assert_eq!(parsed.compression_level, CompressionLevel::Default);
     }
 
     #[test]
     fn parses_named_compression_level() {
-        let parsed = parse_package_format("conda:max").unwrap();
+        let parsed = PackageFormatAndCompression::from_str("conda:max").unwrap();
         assert_eq!(parsed.archive_type, CondaArchiveType::Conda);
         assert_eq!(parsed.compression_level, CompressionLevel::Highest);
     }
 
     #[test]
     fn parses_numeric_compression_level() {
-        let parsed = parse_package_format("tar-bz2:5").unwrap();
+        let parsed = PackageFormatAndCompression::from_str("tar-bz2:5").unwrap();
         assert_eq!(parsed.archive_type, CondaArchiveType::TarBz2);
         assert_eq!(parsed.compression_level, CompressionLevel::Numeric(5));
     }
 
     #[test]
     fn rejects_unknown_format() {
-        assert!(parse_package_format("zip").is_err());
+        assert!(PackageFormatAndCompression::from_str("zip").is_err());
     }
 
     #[test]
     fn rejects_out_of_range_numeric_level() {
-        assert!(parse_package_format("tar-bz2:42").is_err());
-        assert!(parse_package_format("conda:99").is_err());
+        assert!(PackageFormatAndCompression::from_str("tar-bz2:42").is_err());
+        assert!(PackageFormatAndCompression::from_str("conda:99").is_err());
     }
 }
