@@ -55,6 +55,10 @@ pub struct WorkspaceTarget {
 pub struct PackageTarget {
     /// Dependencies for this target.
     pub dependencies: HashMap<SpecType, DependencyMap<PackageName, PixiSpec>>,
+
+    /// Run-exports declared for this target, applied to downstream consumers
+    /// of the package.
+    pub run_exports: crate::PackageRunExports,
 }
 
 impl WorkspaceTarget {
@@ -352,6 +356,11 @@ impl PackageTarget {
     /// Returns the run constraints of the target
     pub fn run_constraints(&self) -> Option<&DependencyMap<PackageName, PixiSpec>> {
         self.dependencies.get(&SpecType::RunConstraints)
+    }
+
+    /// Returns the run exports of the target.
+    pub fn run_exports(&self) -> &crate::PackageRunExports {
+        &self.run_exports
     }
 
     /// Returns the host dependencies of the target

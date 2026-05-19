@@ -136,6 +136,7 @@ pub struct TomlPackage {
     pub build_dependencies: Option<PixiSpanned<UniquePackageMap>>,
     pub run_dependencies: Option<PixiSpanned<UniquePackageMap>>,
     pub run_constraints: Option<PixiSpanned<UniquePackageMap>>,
+    pub run_exports: Option<crate::toml::TomlRunExports>,
     pub target: IndexMap<PixiSpanned<TargetSelector>, TomlPackageTarget>,
 
     pub span: Span,
@@ -175,6 +176,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlPackage {
         let build_dependencies = th.optional("build-dependencies");
         let run_dependencies = th.optional("run-dependencies");
         let run_constraints = th.optional("run-constraints");
+        let run_exports = th.optional("run-exports");
         let build = th.required("build")?;
         let target = th
             .optional::<TomlWith<_, TomlIndexMap<_, Same>>>("target")
@@ -197,6 +199,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlPackage {
             build_dependencies,
             run_dependencies,
             run_constraints,
+            run_exports,
             build,
             target,
             span: value.span,
@@ -341,6 +344,7 @@ impl TomlPackage {
             run_constraints: self.run_constraints,
             host_dependencies: self.host_dependencies,
             build_dependencies: self.build_dependencies,
+            run_exports: self.run_exports,
         }
         .into_package_target(preview)?;
 
@@ -1273,6 +1277,115 @@ mod test {
                 )
             })
             .expect("source specs in run-constraints must be allowed when pixi-build is enabled");
+    }
+
+    #[test]
+    fn test_package_run_exports_default_and_target_specific() {
+        // Top-level [run-exports.*] tables land on the default target. Tables
+        // declared under [target.<sel>.run-exports.*] must end up on the
+        // matching per-target bucket without leaking into the default target.
+        let input = r#"
+        name = "pkg"
+        version = "1.0"
+
+        [run-exports.weak]
+        libzma = "*"
+
+        [target.linux-64.run-exports.strong]
+        libgcc = ">=12"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+        "#;
+
+        let manifest = parse_package(input);
+        let default_re = &manifest.targets.default().run_exports;
+        assert!(default_re.strong.is_empty());
+        assert_eq!(
+            default_re
+                .weak
+                .get(&PackageName::from_str("libzma").unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let linux = manifest
+            .targets
+            .for_target(&TargetSelector::Platform(Platform::Linux64))
+            .expect("linux-64 target should exist");
+        assert!(linux.run_exports.weak.is_empty());
+        assert_eq!(
+            linux
+                .run_exports
+                .strong
+                .get(&PackageName::from_str("libgcc").unwrap())
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap()
+                .as_version_spec()
+                .unwrap()
+                .to_string(),
+            ">=12"
+        );
+    }
+
+    #[test]
+    fn test_package_run_exports_source_spec_self_pin() {
+        // The issue example `own_package = { path = "." }`: source specs in
+        // run-exports require pixi-build, but with it enabled the spec must
+        // round-trip into the data model as a source spec.
+        let input = r#"
+        name = "pkg"
+        version = "1.0"
+
+        [run-exports.weak]
+        own-package = { path = "." }
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+        "#;
+
+        // Without pixi-build preview: rejected.
+        let err = TomlPackage::from_toml_str(input)
+            .unwrap()
+            .into_manifest(
+                WorkspacePackageProperties::default(),
+                PackageDefaults::default(),
+                &Preview::default(),
+                Path::new(""),
+            )
+            .unwrap_err();
+        let rendered = format_parse_error(input, err);
+        assert!(
+            rendered.contains("pixi-build"),
+            "expected pixi-build gating error, got: {rendered}"
+        );
+
+        // With pixi-build enabled: accepted, source spec preserved.
+        let preview = Preview::from_iter([KnownPreviewFeature::PixiBuild]);
+        let manifest = TomlPackage::from_toml_str(input)
+            .unwrap()
+            .into_manifest(
+                WorkspacePackageProperties::default(),
+                PackageDefaults::default(),
+                &preview,
+                Path::new(""),
+            )
+            .unwrap()
+            .value;
+        let spec = manifest
+            .targets
+            .default()
+            .run_exports
+            .weak
+            .get(&PackageName::from_str("own-package").unwrap())
+            .expect("own-package should be in weak run-exports")
+            .iter()
+            .next()
+            .unwrap();
+        assert!(spec.is_source(), "expected source spec, got {spec:?}");
     }
 
     #[test]

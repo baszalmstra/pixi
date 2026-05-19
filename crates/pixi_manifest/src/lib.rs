@@ -12,6 +12,7 @@ mod has_features_iter;
 mod has_manifest_ref;
 mod manifests;
 mod package;
+mod package_run_exports;
 mod preview;
 pub mod pypi;
 pub mod pyproject;
@@ -54,6 +55,7 @@ pub use spec_type::SpecType;
 pub use system_requirements::{
     GLIBC_FAMILY, LibCFamilyAndVersion, LibCSystemRequirement, MUSL_FAMILY, SystemRequirements,
 };
+pub use package_run_exports::PackageRunExports;
 pub use target::{PackageTarget, TargetSelector, Targets, WorkspaceTarget};
 pub use task::{Task, TaskName};
 use thiserror::Error;
