@@ -81,10 +81,9 @@ pub struct SourceBuildSpec {
     /// model. Overrides any value declared in the manifest.
     pub build_number: Option<u64>,
 
-    /// The archive format and compression level the backend should emit.
-    /// `None` lets the backend pick its own defaults. The chosen value
-    /// participates in the artifact cache key so different encodings of
-    /// otherwise-identical inputs don't collide.
+    /// Archive format and compression level. `None` lets the backend pick.
+    /// Folds into the artifact cache key but not the workspace key, so
+    /// different formats share build state but get distinct artifacts.
     pub package_format: Option<CondaPackageFormat>,
 }
 
@@ -245,6 +244,8 @@ async fn compute_inner(
 
     // Workspace dir is the backend's build root; state persists across
     // runs that share the same (source, deps, variants, backend).
+    // `package_format` is intentionally not included: differently-encoded
+    // outputs of the same build can share the same workdir.
     let workspace_key = compute_workspace_key(
         &spec.record,
         spec.build_environment.build_platform,
@@ -469,11 +470,8 @@ async fn build_source_deps(
                 // dependency closure builds against consistent values.
                 build_string_prefix: spec.build_string_prefix.clone(),
                 build_number: spec.build_number,
-                // Source dependencies get unpacked back into the parent's
-                // build/host prefix immediately, so the chosen format for
-                // the parent does not flow through. Use the cheapest
-                // compression — the artifact never leaves the local
-                // cache.
+                // Nested source deps are unpacked into the parent's
+                // prefix immediately; use the cheapest compression.
                 package_format: Some(CondaPackageFormat::fast()),
             };
             let result = sub_ctx.compute(&SourceBuildKey::new(nested_spec)).await?;

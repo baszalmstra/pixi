@@ -172,11 +172,8 @@ async fn install_inner(
                 // forwards user-supplied values here.
                 build_string_prefix: None,
                 build_number: None,
-                // Source packages built during `pixi install` are
-                // intermediate artifacts — they get unpacked into the
-                // prefix immediately, so we prefer the cheapest
-                // compression. `pixi publish` picks its own format and
-                // does not flow through this path.
+                // Source packages built during `pixi install` are unpacked
+                // immediately, so use the cheapest compression.
                 package_format: Some(CondaPackageFormat::fast()),
             };
             sub_ctx

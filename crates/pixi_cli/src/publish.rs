@@ -117,10 +117,9 @@ pub struct Args {
     #[arg(long)]
     pub generate_attestation: bool,
 
-    /// The package archive format and compression level the backend should
-    /// emit, e.g. `conda`, `tar-bz2`, `conda:max`, `conda:15`, or
-    /// `tar-bz2:9`. Numeric ranges follow rattler-build: -7..=22 for
-    /// `.conda` (zstd) and 1..=9 for `.tar.bz2` (bzip2).
+    /// Archive format and optional compression level, e.g. `conda`,
+    /// `tar-bz2`, `conda:max`, `conda:15`, `tar-bz2:9`. Numeric ranges
+    /// match rattler-build: -7..=22 for `.conda`, 1..=9 for `.tar.bz2`.
     #[arg(long)]
     pub package_format: Option<PackageFormatAndCompression>,
 }

@@ -104,8 +104,7 @@ pub struct BackendSourceBuildV1Method {
     /// Whether to build the package in editable mode.
     pub editable: bool,
 
-    /// The archive format and compression level the backend should emit.
-    /// `None` lets the backend pick its own defaults.
+    /// Archive format and compression level. `None` lets the backend pick.
     pub package_format: Option<CondaPackageFormat>,
 }
 

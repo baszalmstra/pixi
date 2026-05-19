@@ -65,33 +65,23 @@ pub struct CondaBuildV1Params {
     // TODO: remove this parameter as soon as we have profiles
     pub editable: Option<bool>,
 
-    /// The archive format and compression level the backend should emit.
-    /// `None` lets the backend pick its own defaults (today: `.conda` at
-    /// the default compression level), preserving the original behavior
-    /// for callers that don't care.
+    /// Archive format and compression level. `None` lets the backend pick.
     #[serde(default)]
     pub package_format: Option<CondaPackageFormat>,
 }
 
-/// Bundled archive format + compression level: the two are coupled
-/// (numeric ranges differ per format) so they travel as a single unit
-/// through the protocol, the cache key, and the backend spec.
+/// Archive format paired with its compression level.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct CondaPackageFormat {
     pub archive_type: CondaArchiveType,
-    /// Defaults to [`NamedCompressionLevel::Default`] when omitted so
-    /// callers that only want to pick an archive type can do so without
-    /// having to think about compression.
     #[serde(default)]
     pub compression_level: CondaCompressionLevel,
 }
 
 impl CondaPackageFormat {
-    /// `.conda` with the cheapest available compression. Suited for
-    /// intermediate artifacts (e.g. source dependencies built during
-    /// `pixi install`) where the bytes will be unpacked again immediately
-    /// and the time saved on compression dwarfs the disk cost.
+    /// `.conda` at the cheapest compression. Used for intermediate
+    /// artifacts that get unpacked immediately.
     pub const fn fast() -> Self {
         CondaPackageFormat {
             archive_type: CondaArchiveType::Conda,
@@ -100,16 +90,13 @@ impl CondaPackageFormat {
     }
 }
 
-/// Wire-level representation of the compression level for a conda or
-/// tar.bz2 package. Mirrors `rattler_conda_types::compression_level::
-/// CompressionLevel`, but with serde and `Hash` so it can travel through
-/// the JSON-RPC protocol and participate in cache keys.
+/// Wire-level mirror of `rattler_conda_types::compression_level::
+/// CompressionLevel` with serde and `Hash`.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum CondaCompressionLevel {
-    /// One of the named compression presets (`lowest`, `default`, `highest`).
     Named(NamedCompressionLevel),
-    /// A raw numeric level. Range depends on the archive type.
+    /// Numeric level; range depends on the archive type.
     Numeric(i32),
 }
 

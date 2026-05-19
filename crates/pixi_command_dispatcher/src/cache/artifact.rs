@@ -92,9 +92,7 @@ pub fn compute_artifact_cache_key(
     host_platform.hash(&mut hasher);
     backend_identifier.hash(&mut hasher);
     project_model_overrides.hash(&mut hasher);
-    // Tag with the requested archive format and compression level so two
-    // builds with otherwise-identical inputs but different output encodings
-    // land in distinct cache entries.
+    // Distinguish artifacts by output format.
     package_format.hash(&mut hasher);
 
     // Bucket-tagged streams: the same (url, sha256) behaves differently
