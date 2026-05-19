@@ -21,7 +21,7 @@ use pixi_auth::get_auth_store;
 use pixi_build_frontend::BackendOverride;
 use pixi_command_dispatcher::{
     BackendMetadataDir, BuildBackendMetadataSpec, BuildEnvironment, BuildProfile, CacheDirs,
-    ComputeResultExt, EnvironmentRef, EnvironmentSpec, EphemeralEnv,
+    ComputeResultExt, CondaPackageFormat, EnvironmentRef, EnvironmentSpec, EphemeralEnv,
     keys::{ResolveSourcePackageKey, ResolveSourcePackageSpec, SourceBuildKey, SourceBuildSpec},
 };
 use pixi_config::{Config, ConfigCli, PackageFormatAndCompression};
@@ -455,11 +455,10 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             variant_files: Some(variant_files.clone()),
             build_string_prefix: args.build_string_prefix.clone(),
             build_number: args.build_number,
-            archive_type: args.package_format.as_ref().map(|f| f.archive_type),
-            compression_level: args
-                .package_format
-                .as_ref()
-                .map(|f| f.compression_level.into()),
+            package_format: args.package_format.as_ref().map(|f| CondaPackageFormat {
+                archive_type: f.archive_type,
+                compression_level: f.compression_level.into(),
+            }),
         };
         let built = command_dispatcher
             .engine()

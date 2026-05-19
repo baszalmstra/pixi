@@ -21,14 +21,13 @@ use pixi_build_types::{
     procedures::conda_build_v1::{
         CondaBuildV1Dependency, CondaBuildV1DependencyRunExportSource,
         CondaBuildV1DependencySource, CondaBuildV1Output, CondaBuildV1Params, CondaBuildV1Prefix,
-        CondaBuildV1PrefixPackage, CondaBuildV1RunExports, CondaCompressionLevel,
+        CondaBuildV1PrefixPackage, CondaBuildV1RunExports, CondaPackageFormat,
     },
 };
 use pixi_glob::GlobSet;
 use pixi_spec::{BinarySpec, PixiSpec, SpecConversionError};
 use rattler_conda_types::{
     ChannelConfig, ChannelUrl, MatchSpec, PackageName, Platform, RepoDataRecord, VersionWithSource,
-    package::CondaArchiveType,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -105,13 +104,9 @@ pub struct BackendSourceBuildV1Method {
     /// Whether to build the package in editable mode.
     pub editable: bool,
 
-    /// The conda archive format the backend should produce. `None` lets the
-    /// backend pick its own default (today that's `.conda`).
-    pub archive_type: Option<CondaArchiveType>,
-
-    /// The compression level the backend should apply. `None` lets the
-    /// backend pick its own default.
-    pub compression_level: Option<CondaCompressionLevel>,
+    /// The archive format and compression level the backend should emit.
+    /// `None` lets the backend pick its own defaults.
+    pub package_format: Option<CondaPackageFormat>,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,8 +288,7 @@ impl BackendSourceBuildSpec {
                     work_directory: work_directory.clone(),
                     output_directory: params.output_directory,
                     editable: Some(params.editable),
-                    archive_type: params.archive_type,
-                    compression_level: params.compression_level,
+                    package_format: params.package_format,
                 },
                 move |line| {
                     let _err = futures::executor::block_on(log_sink.send(line));

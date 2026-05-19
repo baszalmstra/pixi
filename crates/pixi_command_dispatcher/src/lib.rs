@@ -68,6 +68,9 @@ pub use backend_source_build::{
     BackendBuiltSource, BackendSourceBuildError, BackendSourceBuildExt, BackendSourceBuildMethod,
     BackendSourceBuildPrefix, BackendSourceBuildSpec, BackendSourceBuildV1Method,
 };
+pub use pixi_build_types::procedures::conda_build_v1::{
+    CondaCompressionLevel, CondaPackageFormat, NamedCompressionLevel,
+};
 pub use build::BuildEnvironment;
 pub use build_backend_metadata::{
     BuildBackendMetadata, BuildBackendMetadataError, BuildBackendMetadataInner,

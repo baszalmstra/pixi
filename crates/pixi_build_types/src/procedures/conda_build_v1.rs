@@ -65,18 +65,26 @@ pub struct CondaBuildV1Params {
     // TODO: remove this parameter as soon as we have profiles
     pub editable: Option<bool>,
 
-    /// The conda archive format the backend should emit. Defaults to the
-    /// modern `.conda` format when omitted so older backends keep their
-    /// current behavior.
+    /// The archive format and compression level the backend should emit.
+    /// `None` lets the backend pick its own defaults (today: `.conda` at
+    /// the default compression level), preserving the original behavior
+    /// for callers that don't care.
     #[serde(default)]
-    pub archive_type: Option<CondaArchiveType>,
+    pub package_format: Option<CondaPackageFormat>,
+}
 
-    /// The compression level the backend should apply when writing the
-    /// archive. Defaults to the backend's preferred level when omitted.
-    /// Numeric ranges follow rattler-build: 1..=9 for `tar.bz2` and
-    /// -7..=22 for `.conda`.
+/// Bundled archive format + compression level: the two are coupled
+/// (numeric ranges differ per format) so they travel as a single unit
+/// through the protocol, the cache key, and the backend spec.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct CondaPackageFormat {
+    pub archive_type: CondaArchiveType,
+    /// Defaults to [`NamedCompressionLevel::Default`] when omitted so
+    /// callers that only want to pick an archive type can do so without
+    /// having to think about compression.
     #[serde(default)]
-    pub compression_level: Option<CondaCompressionLevel>,
+    pub compression_level: CondaCompressionLevel,
 }
 
 /// Wire-level representation of the compression level for a conda or
@@ -90,6 +98,12 @@ pub enum CondaCompressionLevel {
     Named(NamedCompressionLevel),
     /// A raw numeric level. Range depends on the archive type.
     Numeric(i32),
+}
+
+impl Default for CondaCompressionLevel {
+    fn default() -> Self {
+        CondaCompressionLevel::Named(NamedCompressionLevel::Default)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
