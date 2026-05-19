@@ -19,7 +19,7 @@ use rattler_conda_types::{ChannelUrl, Platform};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::Path,
     sync::Arc,
 };
@@ -41,6 +41,7 @@ impl GenerateRecipe for MojoGenerator {
         variants: &HashSet<NormalizedKey>,
         _channels: Vec<ChannelUrl>,
         _cache_dir: Option<PathBuf>,
+        _workspace_directory: Option<PathBuf>,
     ) -> miette::Result<GeneratedRecipe> {
         // Determine the manifest root, because `manifest_path` can be
         // either a direct file path or a directory path.
@@ -111,7 +112,7 @@ impl GenerateRecipe for MojoGenerator {
             )
             .with_secrets(model.secrets.iter().cloned().collect());
 
-        generated_recipe.build_input_globs = Self::globs().collect::<BTreeSet<_>>();
+        generated_recipe.build_input_globs = Self::globs().collect();
 
         Ok(generated_recipe)
     }
@@ -121,7 +122,7 @@ impl GenerateRecipe for MojoGenerator {
         config: &Self::Config,
         _workdir: impl AsRef<Path>,
         _editable: bool,
-    ) -> miette::Result<BTreeSet<String>> {
+    ) -> miette::Result<Vec<String>> {
         Ok(Self::globs()
             .chain(config.extra_input_globs.clone())
             .collect())
@@ -266,6 +267,7 @@ mod tests {
                 &HashSet::new(),
                 vec![],
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -316,6 +318,7 @@ mod tests {
                 &HashSet::new(),
                 vec![],
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -356,6 +359,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
             )
             .await
@@ -421,6 +425,7 @@ mod tests {
                 &HashSet::new(),
                 vec![],
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -467,6 +472,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
             )
             .await
@@ -517,6 +523,7 @@ mod tests {
                 &HashSet::new(),
                 vec![],
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -561,6 +568,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
             )
             .await
@@ -640,6 +648,7 @@ mod tests {
                 &HashSet::new(),
                 vec![],
                 None,
+                None,
             )
             .await
             .expect("Failed to generate recipe");
@@ -701,6 +710,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 vec![],
+                None,
                 None,
             )
             .await

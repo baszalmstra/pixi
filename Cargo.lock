@@ -6145,6 +6145,7 @@ dependencies = [
  "indexmap 2.14.0",
  "insta",
  "miette 7.6.0",
+ "pathdiff",
  "pixi_build_backend",
  "pixi_build_types",
  "rattler_build_jinja",
@@ -6160,6 +6161,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
 ]
 
