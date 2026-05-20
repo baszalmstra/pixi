@@ -10,8 +10,12 @@ use std::{
     sync::Arc,
 };
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use itertools::Either;
-use pixi_build_types::procedures::conda_outputs::CondaOutput;
+use pixi_build_types::{
+    self as pbt,
+    procedures::conda_outputs::{CondaOutput, CondaOutputDependencies},
+};
 use pixi_compute_engine::ComputeCtx;
 use pixi_compute_reporters::OperationId;
 use pixi_record::{
@@ -26,11 +30,14 @@ use rattler_solve::SolveStrategy;
 use crate::{
     BuildBackendMetadataSpec, DerivedEnvKind, EnvironmentRef, InstalledSourceHints, PtrArc,
     SourceRecordError, SourceRecordReporterSpec,
-    build::{Dependencies, PinnedSourceCodeLocation, PixiRunExports},
+    build::{Dependencies, PinnedSourceCodeLocation, PixiRunExports, conversion},
     compute_data::{HasGateway, HasSourceRecordReporter},
     cycle::CycleEnvironment,
     injected_config::ChannelConfigKey,
-    keys::solve_pixi_environment::{SolvePixiEnvironmentKey, SolvePixiEnvironmentSpec},
+    keys::{
+        resolve_source_package::{ResolveSourcePackageKey, ResolveSourcePackageSpec},
+        solve_pixi_environment::{SolvePixiEnvironmentKey, SolvePixiEnvironmentSpec},
+    },
     reporter::SourceRecordReporter,
 };
 use pixi_compute_reporters::{Active, LifecycleKind, ReporterLifecycle};
@@ -117,12 +124,6 @@ async fn assemble_source_record_inner(
     let source_anchor = SourceAnchor::from(source_location.clone());
     let channel_config = ctx.compute(&ChannelConfigKey).await;
     let pkg_name = output.metadata.name.clone();
-    tracing::debug!(
-        name = %pkg_name.as_source(),
-        env = %env_ref,
-        hints_ptr = ?Arc::as_ptr(installed_source_hints.as_arc()),
-        "assemble_source_record: enter"
-    );
 
     // Look up this `(package, source_location)`'s install hint. The
     // nested build / host solves use it as their prior-resolution
@@ -148,27 +149,62 @@ async fn assemble_source_record_inner(
         .map_err(SourceRecordError::from)?
         .unwrap_or_default();
 
-    tracing::debug!(
-        name = %pkg_name.as_source(),
-        "assemble_source_record: entering nested_solve(Build)"
-    );
-    let mut build_records = nested_solve(
-        ctx,
-        &pkg_name,
-        preferred_build_source,
-        env_ref,
-        DerivedEnvKind::Build,
-        CycleEnvironment::Build,
-        build_dependencies.clone(),
-        Arc::clone(&installed_build_packages),
-        installed_source_hints,
-    )
-    .await?;
-    tracing::debug!(
-        name = %pkg_name.as_source(),
-        records = build_records.len(),
-        "assemble_source_record: nested_solve(Build) returned"
-    );
+    // Kick the build solve and the host env's source-metadata
+    // prefetch in parallel. Host's nested_solve genuinely depends on
+    // build's run-exports (so host's *solve* can't start until build
+    // finishes), but the manifest-declared source list for host is
+    // already known, and fetching its source records concurrently with
+    // build's solve warms the engine cache. By the time we get to
+    // nested_solve(Host) below, its RSPs hit the cache instead of
+    // re-fetching.
+    let host_seeds = output
+        .host_dependencies
+        .as_ref()
+        .map(|deps| collect_source_seeds(deps, &source_anchor))
+        .unwrap_or_default();
+    let host_env_ref = env_ref.derived(pkg_name.clone(), DerivedEnvKind::Host);
+
+    // Branch A owns its own clones because each branch's async body is
+    // moved into the compute engine's parallel runner.
+    let build_pkg_name = pkg_name.clone();
+    let build_pref = Arc::clone(preferred_build_source);
+    let build_env_ref = env_ref.clone();
+    let build_hints = installed_source_hints.clone();
+    let build_deps_owned = build_dependencies.clone();
+    let build_installed = Arc::clone(&installed_build_packages);
+
+    let host_pref = Arc::clone(preferred_build_source);
+    let host_hints = installed_source_hints.clone();
+
+    let (build_records_result, ()) = ctx
+        .compute2(
+            async move |sub_ctx: &mut ComputeCtx| {
+                nested_solve(
+                    sub_ctx,
+                    &build_pkg_name,
+                    &build_pref,
+                    &build_env_ref,
+                    DerivedEnvKind::Build,
+                    CycleEnvironment::Build,
+                    build_deps_owned,
+                    build_installed,
+                    &build_hints,
+                )
+                .await
+            },
+            async move |sub_ctx: &mut ComputeCtx| {
+                prefetch_source_records(
+                    sub_ctx,
+                    host_seeds,
+                    host_env_ref,
+                    host_pref,
+                    host_hints,
+                )
+                .await;
+            },
+        )
+        .await;
+    let mut build_records = build_records_result?;
 
     // Clone the gateway handle so we don't hold an immutable borrow
     // on `ctx` across the subsequent mutable-borrow calls (another
@@ -201,10 +237,6 @@ async fn assemble_source_record_inner(
         .unwrap_or_default()
         .extend_with_run_exports_from_build(&build_run_exports);
 
-    tracing::debug!(
-        name = %pkg_name.as_source(),
-        "assemble_source_record: entering nested_solve(Host)"
-    );
     let mut host_records = nested_solve(
         ctx,
         &pkg_name,
@@ -217,11 +249,6 @@ async fn assemble_source_record_inner(
         installed_source_hints,
     )
     .await?;
-    tracing::debug!(
-        name = %pkg_name.as_source(),
-        records = host_records.len(),
-        "assemble_source_record: nested_solve(Host) returned"
-    );
 
     let host_run_exports = host_dependencies
         .extract_run_exports(
@@ -582,4 +609,62 @@ impl LifecycleKind for SourceRecordReporterLifecycle {
     fn on_finished<'r>(active: Active<'r, Self::Reporter<'r>, Self::Id>) {
         active.reporter.on_finished(active.id);
     }
+}
+
+/// Pull `(name, location)` for every source spec in `deps.depends`,
+/// resolving any relative source paths through `anchor`. PinCompatible
+/// and binary specs are skipped because only source specs need an RSP
+/// prefetch. Invalid package names are silently dropped: the real
+/// `Dependencies::new` call later surfaces them as the canonical error.
+fn collect_source_seeds(
+    deps: &CondaOutputDependencies,
+    anchor: &SourceAnchor,
+) -> Vec<(PackageName, SourceLocationSpec)> {
+    deps.depends
+        .iter()
+        .filter_map(|named| {
+            let pbt::PackageSpec::Source(source) = &named.spec else {
+                return None;
+            };
+            let name = PackageName::try_from(named.name.as_str()).ok()?;
+            let resolved = conversion::from_source_spec_v1(source.clone()).resolve(anchor);
+            Some((name, resolved.location))
+        })
+        .collect()
+}
+
+/// Fire RSP computes for every `(name, location)` in `seeds`,
+/// concurrently, and wait for all of them. The results are discarded;
+/// the engine caches them so the real `nested_solve` that issues these
+/// same RSPs later hits the cache instead of re-fetching.
+///
+/// Errors are swallowed: if a prefetched RSP fails the eventual real
+/// invocation will surface the error in the right place. Treating the
+/// prefetch as best-effort keeps it from being able to fail the
+/// caller's solve.
+async fn prefetch_source_records(
+    ctx: &mut ComputeCtx,
+    seeds: Vec<(PackageName, SourceLocationSpec)>,
+    env_ref: EnvironmentRef,
+    preferred_build_source: Arc<BTreeMap<PackageName, PinnedSourceSpec>>,
+    installed_source_hints: PtrArc<InstalledSourceHints>,
+) {
+    if seeds.is_empty() {
+        return;
+    }
+    let mut p = ctx.parallel();
+    let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
+    for (name, location) in seeds {
+        let key = ResolveSourcePackageKey::new(ResolveSourcePackageSpec {
+            package: name,
+            source_location: location,
+            preferred_build_source: Arc::clone(&preferred_build_source),
+            env_ref: env_ref.clone(),
+            installed_source_hints: installed_source_hints.clone(),
+        });
+        pending.push(p.compute(async move |sub_ctx: &mut ComputeCtx| {
+            let _ = sub_ctx.compute(&key).await;
+        }));
+    }
+    while pending.next().await.is_some() {}
 }

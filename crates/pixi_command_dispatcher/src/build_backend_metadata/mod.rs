@@ -388,16 +388,30 @@ impl BuildBackendMetadataInner {
             };
         }
 
+        // Invalidate when the glob picks up a file the cache entry never
+        // recorded (i.e. one that was added since the last run). The
+        // existing entries in `input_files` were freshness-checked above;
+        // this second pass only catches newcomers.
+        //
+        // `input_files` stores paths relative to `build_source_dir` (see
+        // the `strip_prefix` at the write site), so the absolute paths
+        // returned by `collect_matching` must be relativized before the
+        // membership check or every path looks "new".
+        let globs_root = build_source_dir.as_std_path();
         let glob_set = GlobSet::create(cache_entry.input_globs.iter().map(String::as_str));
         for matching_file in glob_set
-            .collect_matching(build_source_dir.as_std_path())
+            .collect_matching(globs_root)
             .map_err(BuildBackendMetadataError::from)?
         {
-            let path = matching_file.into_path();
-            if cache_entry.input_files.contains(&path) {
+            let abs_path = matching_file.into_path();
+            let key_path = abs_path
+                .strip_prefix(globs_root)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|_| abs_path.clone());
+            if !cache_entry.input_files.contains(&key_path) {
                 tracing::info!(
                     "found cached outputs but a new matching file at '{}' has been detected, invalidating cache.",
-                    path.display()
+                    abs_path.display()
                 );
                 return Ok(Err(Some(cache_entry)));
             }

@@ -13,7 +13,6 @@ use std::{
     hash::{Hash, Hasher},
     mem,
     sync::Arc,
-    time::Instant,
 };
 
 use derive_more::Display;
@@ -202,18 +201,11 @@ impl Key for SolvePixiEnvironmentKey {
     )]
     async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
         let spec = self.0.clone();
-        tracing::debug!(
-            env = %spec.env_ref,
-            hints_ptr = ?Arc::as_ptr(spec.installed_source_hints.as_arc()),
-            "SPEK::compute enter"
-        );
 
         let env_spec = spec
             .env_ref
             .resolve(ctx.global_data().workspace_env_registry());
-        tracing::debug!(env = %spec.env_ref, "SPEK::compute resolved env_spec");
         let channel_config = ctx.compute(&ChannelConfigKey).await;
-        tracing::debug!(env = %spec.env_ref, "SPEK::compute got channel_config");
 
         // Reporter lifecycle: fire `on_queued` now, `on_started`
         // when we call `.start()` below, `on_finished` when the
@@ -276,13 +268,6 @@ async fn compute_inner(
     env_spec: Arc<crate::EnvironmentSpec>,
     channel_config: Arc<rattler_conda_types::ChannelConfig>,
 ) -> Result<Arc<Vec<PixiRecord>>, SolvePixiEnvironmentError> {
-    let compute_started = Instant::now();
-    tracing::debug!(
-        env = %spec.env_ref,
-        platform = %env_spec.build_environment.host_platform,
-        "begin compute_inner for pixi env solve"
-    );
-
     // Derive a common exclude_newer cutoff so every transitive
     // source dep uses the same value.
     let exclude_newer = env_spec
@@ -290,13 +275,7 @@ async fn compute_inner(
         .clone()
         .unwrap_or_else(|| ResolvedExcludeNewer::from_datetime(chrono::Utc::now()));
 
-    let dev_sources_started = Instant::now();
     let dev_source_records = process_dev_sources(ctx, &spec).await?;
-    tracing::debug!(
-        elapsed_ms = dev_sources_started.elapsed().as_millis() as u64,
-        records = dev_source_records.len(),
-        "process_dev_sources completed"
-    );
 
     // Split explicit requirements into source and binary halves;
     // same for dev-source-contributed deps.
@@ -326,8 +305,6 @@ async fn compute_inner(
     // through every nested solve so a given source package gets the
     // same hint regardless of which branch of the recursion reached
     // it.
-    let walk_started = Instant::now();
-    let seed_count = seeds.len();
     let resolved = walk_and_resolve(
         ctx,
         seeds,
@@ -336,12 +313,6 @@ async fn compute_inner(
         &spec.installed_source_hints,
     )
     .await?;
-    tracing::debug!(
-        elapsed_ms = walk_started.elapsed().as_millis() as u64,
-        seeds = seed_count,
-        resolved_records = resolved.len(),
-        "walk_and_resolve source BFS completed"
-    );
 
     // Group resolved records by source location for SolveCondaKey.
     // Ordering matters: SolveCondaKey hashes `source_repodata`
@@ -381,7 +352,6 @@ async fn compute_inner(
     // these split halves.
     let _ = dev_source_binary_specs;
 
-    let started = Instant::now();
     let result = ctx
         .compute(&SolveCondaKey::new(SolveCondaSpec {
             source_specs,
@@ -414,12 +384,6 @@ async fn compute_inner(
             }
             SolveCondaKeyError::Gateway(a) => SolvePixiEnvironmentError::QueryError(a),
         })?;
-    tracing::debug!("top-level solve completed in {:?}", started.elapsed());
-    tracing::debug!(
-        elapsed_ms = compute_started.elapsed().as_millis() as u64,
-        env = %spec.env_ref,
-        "compute_inner finished for pixi env solve"
-    );
 
     Ok(Arc::new((*result).clone()))
 }
@@ -457,12 +421,6 @@ async fn walk_and_resolve(
     preferred_build_source: &Arc<BTreeMap<PackageName, PinnedSourceSpec>>,
     installed_source_hints: &PtrArc<InstalledSourceHints>,
 ) -> Result<Vec<Arc<pixi_record::SourceRecord>>, SolvePixiEnvironmentError> {
-    tracing::debug!(
-        env = %env_ref,
-        seeds = seeds.len(),
-        hints_ptr = ?Arc::as_ptr(installed_source_hints.as_arc()),
-        "walk_and_resolve: enter"
-    );
     let mut all_records: Vec<Arc<pixi_record::SourceRecord>> = Vec::new();
     let mut seen_sources: HashSet<(PackageName, SourceLocationSpec)> = HashSet::new();
 
@@ -488,20 +446,8 @@ async fn walk_and_resolve(
                 location: SourceLocationSpec,
                 parent: Option<PackageName>| {
         if !seen.insert((name.clone(), location.clone())) {
-            tracing::debug!(
-                name = %name.as_source(),
-                location = %location,
-                parent = ?parent.as_ref().map(|p| p.as_source().to_string()),
-                "walk_and_resolve: push skipped (already in seen)"
-            );
             return;
         }
-        tracing::debug!(
-            name = %name.as_source(),
-            location = %location,
-            parent = ?parent.as_ref().map(|p| p.as_source().to_string()),
-            "walk_and_resolve: push"
-        );
         let key = ResolveSourcePackageKey::new(ResolveSourcePackageSpec {
             package: name.clone(),
             source_location: location,
@@ -509,12 +455,7 @@ async fn walk_and_resolve(
             env_ref: env_ref.clone(),
             installed_source_hints: installed_source_hints.clone(),
         });
-        let log_name = name.clone();
         pending.push(p.compute(async move |sub_ctx: &mut ComputeCtx| {
-            tracing::debug!(
-                name = %log_name.as_source(),
-                "walk_and_resolve: branch starting cycle-guarded compute"
-            );
             // Per-push cycle guard. `sub_ctx` has a branch-local
             // guard stack; installing a guard here means edges
             // established by the `ctx.compute(&key)` below capture
@@ -526,30 +467,11 @@ async fn walk_and_resolve(
                 .with_cycle_guard(async |cctx| cctx.compute(&key).await)
                 .await;
             match guarded {
-                Ok(Ok(records)) => {
-                    tracing::debug!(
-                        name = %name.as_source(),
-                        records = records.len(),
-                        "walk_and_resolve: branch resolved Ok"
-                    );
-                    Ok((name, parent, records))
-                }
-                Ok(Err(e)) => {
-                    tracing::debug!(
-                        name = %name.as_source(),
-                        error = %e,
-                        "walk_and_resolve: branch resolved with SourceRecord error"
-                    );
-                    Err(SolvePixiEnvironmentError::from(
-                        crate::SourceMetadataError::SourceRecord(e),
-                    ))
-                }
+                Ok(Ok(records)) => Ok((name, parent, records)),
+                Ok(Err(e)) => Err(SolvePixiEnvironmentError::from(
+                    crate::SourceMetadataError::SourceRecord(e),
+                )),
                 Err(cycle) => {
-                    tracing::debug!(
-                        name = %name.as_source(),
-                        parent = ?parent.as_ref().map(|p| p.as_source().to_string()),
-                        "walk_and_resolve: branch hit cycle guard"
-                    );
                     let fallback_env = match env_ref {
                         EnvironmentRef::Derived { kind, .. } => match kind {
                             DerivedEnvKind::Build => CycleEnvironment::Build,
@@ -591,16 +513,7 @@ async fn walk_and_resolve(
     }
 
     while let Some(result) = pending.next().await {
-        tracing::debug!(
-            inflight_remaining = pending.len(),
-            "walk_and_resolve: pending.next yielded"
-        );
         let (parent_pkg, _parent_of_parent, records) = result?;
-        tracing::debug!(
-            parent = %parent_pkg.as_source(),
-            records = records.len(),
-            "walk_and_resolve: processing resolved branch"
-        );
 
         // Walk the assembled records' `.depends` (post run-exports)
         // for source refs and queue newly-seen pairs, tagging each
@@ -633,12 +546,6 @@ async fn walk_and_resolve(
 
         all_records.extend(records.iter().cloned());
     }
-    tracing::debug!(
-        env = %env_ref,
-        total_records = all_records.len(),
-        seen_unique = seen_sources.len(),
-        "walk_and_resolve: BFS drained"
-    );
 
     Ok(all_records)
 }
