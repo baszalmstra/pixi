@@ -4,6 +4,7 @@
 //! work units it composes. Source-record assembly is inlined into the
 //! orchestrator rather than promoted to its own Key, so the graph stays flat.
 
+pub mod backend_binary_fingerprint;
 pub mod resolve_source_package;
 pub(crate) mod resolve_source_record;
 pub mod solve_conda;
@@ -11,6 +12,9 @@ pub mod solve_pixi_environment;
 pub mod source_build;
 pub mod source_metadata;
 
+pub use backend_binary_fingerprint::{
+    BackendBinaryFingerprintError, BackendBinaryFingerprintKey, BackendBinaryFingerprintSpec,
+};
 pub use resolve_source_package::{ResolveSourcePackageKey, ResolveSourcePackageSpec};
 pub use solve_conda::{SolveCondaKey, SolveCondaKeyError, SolveCondaSpec};
 pub use solve_pixi_environment::{SolvePixiEnvironmentKey, SolvePixiEnvironmentSpec};
