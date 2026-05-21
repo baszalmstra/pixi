@@ -20,6 +20,23 @@ use crate::{
     url::RepositoryUrl,
 };
 
+/// Environment variable controlling whether Git LFS objects are fetched for
+/// Git sources by default. When set to a truthy value (anything other than
+/// empty/`0`/`false`), LFS blobs are downloaded after the regular `git fetch`.
+pub const PIXI_GIT_LFS_ENV: &str = "PIXI_GIT_LFS";
+
+/// Returns the default value for the LFS fetch flag, derived from the
+/// [`PIXI_GIT_LFS_ENV`] environment variable.
+pub fn lfs_enabled_from_env() -> bool {
+    match std::env::var(PIXI_GIT_LFS_ENV) {
+        Ok(value) => {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        }
+        Err(_) => false,
+    }
+}
+
 /// A remote Git source that can be checked out locally.
 pub struct GitSource {
     /// The Git reference from the manifest file.
@@ -30,6 +47,8 @@ pub struct GitSource {
     cache: PathBuf,
     /// The reporter to use for this source.
     reporter: Option<Arc<dyn Reporter>>,
+    /// Whether to fetch Git LFS objects for this source.
+    with_lfs: bool,
 }
 
 impl GitSource {
@@ -40,6 +59,7 @@ impl GitSource {
             client,
             cache: cache.into(),
             reporter: None,
+            with_lfs: lfs_enabled_from_env(),
         }
     }
 
@@ -50,6 +70,15 @@ impl GitSource {
             reporter: Some(reporter),
             ..self
         }
+    }
+
+    /// Explicitly enable or disable Git LFS fetching for this source.
+    ///
+    /// When not set, the default is taken from the [`PIXI_GIT_LFS_ENV`]
+    /// environment variable.
+    #[must_use]
+    pub fn with_lfs(self, with_lfs: bool) -> Self {
+        Self { with_lfs, ..self }
     }
 
     /// Fetch the underlying Git repository at the given revision.
@@ -100,6 +129,7 @@ impl GitSource {
                     &self.git.reference,
                     locked_rev.map(GitOid::from),
                     &self.client,
+                    self.with_lfs,
                 )?;
 
                 (db, GitSha::from(actual_rev), task)
@@ -124,7 +154,7 @@ impl GitSource {
             actual_rev,
             checkout_path.display()
         );
-        db.copy_to(actual_rev.into(), &checkout_path)?;
+        db.copy_to(actual_rev.into(), &checkout_path, self.with_lfs)?;
 
         // Report the checkout operation to the reporter.
         if let Some(task) = task

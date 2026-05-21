@@ -26,6 +26,7 @@ use crate::{
 const CHECKOUT_READY_LOCK: &str = ".ok";
 pub const GIT_DIR: &str = "GIT_DIR";
 pub const GIT_TERMINAL_PROMPT: &str = "GIT_TERMINAL_PROMPT";
+pub const GIT_LFS_SKIP_SMUDGE: &str = "GIT_LFS_SKIP_SMUDGE";
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum GitBinaryError {
@@ -42,6 +43,32 @@ pub static GIT: LazyLock<Result<PathBuf, GitBinaryError>> = LazyLock::new(|| {
         e => GitBinaryError::Other(e),
     })
 });
+
+/// A global cache that probes whether `git lfs` is available on the system.
+///
+/// Runs `git lfs version` once and caches the result. If `git-lfs` is not
+/// installed (or the probe fails), this returns `false` and callers should
+/// skip LFS operations.
+pub static GIT_LFS_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
+    let Ok(git) = GIT.as_ref() else {
+        return false;
+    };
+    Command::new(git)
+        .arg("lfs")
+        .arg("version")
+        .env(GIT_TERMINAL_PROMPT, "0")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+});
+
+/// Returns the env value that should be set for `GIT_LFS_SKIP_SMUDGE` given
+/// whether LFS is enabled for this fetch. When LFS is disabled we forcibly
+/// skip the smudge filter so a globally-installed git-lfs does not download
+/// blobs that the caller did not ask for.
+fn lfs_skip_smudge_env(with_lfs: bool) -> &'static str {
+    if with_lfs { "0" } else { "1" }
+}
 
 /// Strategy when fetching refspecs for a [`GitReference`]
 enum RefspecStrategy {
@@ -224,11 +251,12 @@ impl GitRemote {
         reference: &GitReference,
         locked_rev: Option<GitOid>,
         client: &LazyClient,
+        with_lfs: bool,
     ) -> Result<(GitDatabase, GitOid), GitError> {
         let locked_ref = locked_rev.map(|oid| GitReference::FullCommit(oid.to_string()));
         let reference = locked_ref.as_ref().unwrap_or(reference);
         if let Some(mut db) = db {
-            fetch(&mut db.repo, self.url.as_str(), reference, client)?;
+            fetch(&mut db.repo, self.url.as_str(), reference, client, with_lfs)?;
 
             let resolved_commit_hash = match locked_rev {
                 Some(rev) => db.contains(rev).then_some(rev),
@@ -249,7 +277,7 @@ impl GitRemote {
 
         fs_err::create_dir_all(into)?;
         let mut repo = GitRepository::init(into)?;
-        fetch(&mut repo, self.url.as_str(), reference, client)?;
+        fetch(&mut repo, self.url.as_str(), reference, client, with_lfs)?;
         let rev = match locked_rev {
             Some(rev) => rev,
             None => reference.resolve(&repo)?,
@@ -279,7 +307,12 @@ pub(crate) struct GitDatabase {
 
 impl GitDatabase {
     /// Checkouts to a revision at `destination` from this database.
-    pub(crate) fn copy_to(&self, rev: GitOid, destination: &Path) -> Result<GitCheckout, GitError> {
+    pub(crate) fn copy_to(
+        &self,
+        rev: GitOid,
+        destination: &Path,
+        with_lfs: bool,
+    ) -> Result<GitCheckout, GitError> {
         // If the existing checkout exists, and it is fresh, use it.
         // A non-fresh checkout can happen if the checkout operation was
         // interrupted. In that case, the checkout gets deleted and a new
@@ -290,7 +323,7 @@ impl GitDatabase {
             .filter(GitCheckout::is_fresh)
         {
             Some(co) => co,
-            None => GitCheckout::clone_into(destination, self, rev)?,
+            None => GitCheckout::clone_into(destination, self, rev, with_lfs)?,
         };
         Ok(checkout)
     }
@@ -384,7 +417,12 @@ impl GitCheckout {
 
     /// Clone a repo for a `revision` into a local path from a `database`.
     /// This is a filesystem-to-filesystem clone.
-    fn clone_into(into: &Path, database: &GitDatabase, revision: GitOid) -> Result<Self, GitError> {
+    fn clone_into(
+        into: &Path,
+        database: &GitDatabase,
+        revision: GitOid,
+        with_lfs: bool,
+    ) -> Result<Self, GitError> {
         tracing::debug!("cloning into {:?} from {:?}", database.repo.path, into);
         let dirname = into.parent().expect("into path must have a parent");
         fs_err::create_dir_all(dirname)?;
@@ -403,13 +441,14 @@ impl GitCheckout {
             // have a HEAD checked out.
             .arg(dunce::simplified(&database.repo.path).display().to_string())
             .arg(dunce::simplified(into).display().to_string())
+            .env(GIT_LFS_SKIP_SMUDGE, lfs_skip_smudge_env(with_lfs))
             .output()?;
 
         tracing::debug!("output after cloning {:?}", output);
 
         let repo = GitRepository::open(into)?;
         let checkout = GitCheckout::new(revision, repo);
-        checkout.reset()?;
+        checkout.reset(with_lfs)?;
         Ok(checkout)
     }
 
@@ -437,17 +476,20 @@ impl GitCheckout {
     /// *doesn't* exist, and then once we're done we create the file.
     ///
     /// [`.ok`]: CHECKOUT_READY_LOCK
-    fn reset(&self) -> Result<(), GitError> {
+    fn reset(&self, with_lfs: bool) -> Result<(), GitError> {
         let ok_file = self.repo.path.join(CHECKOUT_READY_LOCK);
         let _ = fs_err::remove_file(&ok_file);
 
         tracing::debug!("reset {} to {}", self.repo.path.display(), self.revision);
+
+        let skip_smudge = lfs_skip_smudge_env(with_lfs);
 
         // Perform the hard reset.
         Command::new(GIT.as_ref().map_err(|e| e.clone())?)
             .arg("reset")
             .arg("--hard")
             .arg(self.revision.as_str())
+            .env(GIT_LFS_SKIP_SMUDGE, skip_smudge)
             .current_dir(&self.repo.path)
             .output()?;
 
@@ -457,6 +499,7 @@ impl GitCheckout {
             .arg("update")
             .arg("--recursive")
             .arg("--init")
+            .env(GIT_LFS_SKIP_SMUDGE, skip_smudge)
             .current_dir(&self.repo.path)
             .output()
             .map(drop)?;
@@ -479,6 +522,7 @@ pub(crate) fn fetch(
     remote_url: &str,
     reference: &GitReference,
     client: &LazyClient,
+    with_lfs: bool,
 ) -> Result<(), GitError> {
     let oid_to_fetch = match github_fast_path(repo, remote_url, reference, client) {
         Ok(FastPathRev::UpToDate) => return Ok(()),
@@ -568,14 +612,21 @@ pub(crate) fn fetch(
         repo.path.display()
     );
     let result = match refspec_strategy {
-        RefspecStrategy::All => fetch_with_cli(repo, remote_url, refspecs.as_slice(), tags),
+        RefspecStrategy::All => {
+            fetch_with_cli(repo, remote_url, refspecs.as_slice(), tags, with_lfs)
+        }
         RefspecStrategy::First => {
             // Try each refspec
             let mut errors = refspecs
                 .iter()
                 .map_while(|refspec| {
-                    let fetch_result =
-                        fetch_with_cli(repo, remote_url, std::slice::from_ref(refspec), tags);
+                    let fetch_result = fetch_with_cli(
+                        repo,
+                        remote_url,
+                        std::slice::from_ref(refspec),
+                        tags,
+                        with_lfs,
+                    );
 
                     // Stop after the first success and log failures
                     match fetch_result {
@@ -602,7 +653,46 @@ pub(crate) fn fetch(
         }
     };
     tracing::debug!("fetched with cli {:?}", result);
+
+    // After the git fetch succeeds, fetch any LFS objects required by the
+    // resolved revision so that subsequent checkouts can materialise the
+    // pointer files. This is best-effort: if `git-lfs` is not installed we
+    // log and continue, matching the behaviour of the regular fetch.
+    if result.is_ok() && with_lfs {
+        if !*GIT_LFS_AVAILABLE {
+            tracing::warn!(
+                "`git-lfs` is not installed; skipping LFS fetch for {remote_url}. \
+                 Install git-lfs to download LFS-tracked files."
+            );
+        } else if let Err(err) = fetch_lfs(repo, remote_url) {
+            tracing::warn!("failed to fetch LFS objects for {remote_url}: {err}");
+        }
+    }
+
     result
+}
+
+/// Fetches LFS objects for the repository at `repo` from `url`.
+///
+/// Runs `git lfs fetch <url>` against the local repository so that any
+/// LFS pointers reachable from the fetched refs have their corresponding
+/// blobs downloaded into the local `.git/lfs/objects/` store.
+fn fetch_lfs(repo: &mut GitRepository, url: &str) -> Result<(), GitError> {
+    tracing::debug!("fetching LFS objects for {url}");
+    let output = Command::new(GIT.as_ref().map_err(|err| err.clone())?)
+        .arg("lfs")
+        .arg("fetch")
+        .arg(url)
+        .env_remove(GIT_DIR)
+        .env(GIT_TERMINAL_PROMPT, "0")
+        .current_dir(&repo.path)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8(output.stderr)?;
+        return Err(GitError::LfsFetch(url.to_string(), stderr));
+    }
+    tracing::debug!("git lfs fetch output: {:?}", output);
+    Ok(())
 }
 
 /// Attempts to use `git` CLI installed on the system to fetch a repository.
@@ -611,6 +701,7 @@ fn fetch_with_cli(
     url: &str,
     refspecs: &[String],
     tags: bool,
+    with_lfs: bool,
 ) -> Result<(), GitError> {
     let mut cmd = Command::new(GIT.as_ref().map_err(|err| err.clone())?);
     cmd.arg("fetch");
@@ -630,6 +721,9 @@ fn fetch_with_cli(
         // non-existent remote fails fast instead of hanging waiting for
         // input on the controlling TTY.
         .env(GIT_TERMINAL_PROMPT, "0")
+        // Defer LFS blob downloads to the explicit `git lfs fetch` step so
+        // they only happen when the caller opted in.
+        .env(GIT_LFS_SKIP_SMUDGE, lfs_skip_smudge_env(with_lfs))
         .current_dir(&repo.path);
 
     // // We capture the output to avoid streaming it to the user's console during clones.
