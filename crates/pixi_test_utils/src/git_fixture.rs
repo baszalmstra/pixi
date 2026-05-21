@@ -7,8 +7,8 @@ use std::{collections::HashMap, path::Path};
 
 use tempfile::TempDir;
 
-/// Returns true if the file at `path` looks like a `.gitattributes` that
-/// configures any path to use the `lfs` filter.
+/// True if `path` looks like a gitattributes file (real or `dot-gitattributes`
+/// placeholder) with a non-commented `filter=lfs` line.
 fn gitattributes_uses_lfs(path: &Path) -> bool {
     let Ok(contents) = fs_err::read_to_string(path) else {
         return false;
@@ -19,8 +19,22 @@ fn gitattributes_uses_lfs(path: &Path) -> bool {
     })
 }
 
-/// Recursively scan `dir` for any `.gitattributes` file that uses the `lfs`
-/// filter.
+/// File name a fixture uses in place of `.gitattributes` so the outer repo
+/// (this one) doesn't interpret the LFS filter rules. Renamed back to
+/// `.gitattributes` when copied into the fixture's working repo.
+const GITATTRIBUTES_PLACEHOLDER: &str = "dot-gitattributes";
+
+/// Returns the in-repo name we should copy `entry` to: `.gitattributes` if
+/// the source is a `dot-gitattributes` placeholder, otherwise unchanged.
+fn dest_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    if name == std::ffi::OsStr::new(GITATTRIBUTES_PLACEHOLDER) {
+        std::ffi::OsString::from(".gitattributes")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// True if any gitattributes file under `dir` configures the lfs filter.
 fn dir_uses_lfs(dir: &Path) -> bool {
     let Ok(entries) = fs_err::read_dir(dir) else {
         return false;
@@ -31,16 +45,19 @@ fn dir_uses_lfs(dir: &Path) -> bool {
             if dir_uses_lfs(&path) {
                 return true;
             }
-        } else if path.file_name() == Some(std::ffi::OsStr::new(".gitattributes"))
-            && gitattributes_uses_lfs(&path)
-        {
-            return true;
+        } else {
+            let name = path.file_name();
+            let is_attrs = name == Some(std::ffi::OsStr::new(".gitattributes"))
+                || name == Some(std::ffi::OsStr::new(GITATTRIBUTES_PLACEHOLDER));
+            if is_attrs && gitattributes_uses_lfs(&path) {
+                return true;
+            }
         }
     }
     false
 }
 
-/// Returns true if `git lfs` is installed and usable.
+/// True if `git lfs version` succeeds.
 fn git_lfs_available() -> bool {
     std::process::Command::new("git")
         .args(["lfs", "version"])
@@ -65,13 +82,16 @@ fn cargo_workspace_dir() -> &'static Path {
 ///
 /// # Git LFS
 ///
-/// If any commit directory contains a `.gitattributes` file referencing the
-/// `lfs` filter (e.g. `*.bin filter=lfs diff=lfs merge=lfs -text`), the
-/// fixture is built with `git lfs install --local` so that matching files
-/// are stored as LFS pointers with the blob contents in
-/// `.git/lfs/objects/`. The fixture's [`uses_lfs`](Self::uses_lfs) field
-/// reflects this. `git-lfs` must be installed on the system, otherwise the
-/// fixture will panic.
+/// If any commit dir has a `.gitattributes` (or the `dot-gitattributes`
+/// placeholder — see below) with `filter=lfs`, the fixture runs
+/// `git lfs install --local` before commits so matching files are stored
+/// as LFS pointers with blobs in `.git/lfs/objects/`. Panics if `git-lfs`
+/// is not installed.
+///
+/// **`dot-gitattributes` convention**: a file named `dot-gitattributes`
+/// in a commit dir is renamed to `.gitattributes` when copied into the
+/// fixture repo. This lets you ship LFS-flavoured attribute rules in
+/// fixtures without having the outer (this) repo apply them too.
 ///
 /// # Example fixture structure
 ///
@@ -116,9 +136,7 @@ pub struct GitRepoFixture {
     /// Map of tag names to commit hashes.
     pub tags: HashMap<String, String>,
 
-    /// True if this fixture was built with Git LFS enabled. Set automatically
-    /// when any commit dir contains a `.gitattributes` referencing the `lfs`
-    /// filter.
+    /// True if `git lfs install --local` was run for this fixture.
     pub uses_lfs: bool,
 }
 
@@ -165,6 +183,15 @@ impl GitRepoFixture {
             .current_dir(&repo_path)
             .output()
             .expect("failed to configure git name");
+        // Defeat any global commit/tag signing config so the fixture is
+        // self-contained on hosts that mandate signed commits.
+        for key in ["commit.gpgsign", "tag.gpgsign"] {
+            std::process::Command::new("git")
+                .args(["config", key, "false"])
+                .current_dir(&repo_path)
+                .output()
+                .unwrap_or_else(|err| panic!("failed to unset {key}: {err}"));
+        }
 
         // Get commit directories sorted by name
         let mut commit_dirs: Vec<_> = fs_err::read_dir(fixture_base)
@@ -174,11 +201,7 @@ impl GitRepoFixture {
             .collect();
         commit_dirs.sort_by_key(|e| e.file_name());
 
-        // Auto-detect LFS: if any commit dir contains a `.gitattributes` that
-        // configures the `lfs` filter, install git-lfs hooks in this repo so
-        // subsequent `git add` calls write LFS pointers (with the blob contents
-        // stored in `.git/lfs/objects/`). This produces a "real" LFS repo
-        // suitable for testing the LFS fetch path.
+        // Auto-detect LFS via `filter=lfs` in any fixture .gitattributes.
         let uses_lfs = commit_dirs.iter().any(|d| dir_uses_lfs(&d.path()));
         if uses_lfs {
             assert!(
@@ -296,12 +319,13 @@ impl GitRepoFixture {
     }
 }
 
-/// Recursively copy directory contents from src to dst.
+/// Recursively copy directory contents from src to dst, renaming
+/// `dot-gitattributes` to `.gitattributes` along the way.
 fn copy_dir_contents(src: &Path, dst: &Path) {
     for entry in fs_err::read_dir(src).expect("failed to read fixture dir") {
         let entry = entry.expect("failed to read dir entry");
         let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
+        let dst_path = dst.join(dest_name(&entry.file_name()));
 
         if src_path.is_dir() {
             fs_err::create_dir_all(&dst_path).expect("failed to create dir");

@@ -20,19 +20,10 @@ use crate::{
     url::RepositoryUrl,
 };
 
-/// Environment variable controlling whether Git LFS objects are fetched for
-/// Git sources by default.
-///
-/// * Truthy values (`1`, `true`, `yes`, `on`) → `Some(true)`: always fetch LFS.
-/// * Falsy values (`0`, `false`, `no`, `off`) → `Some(false)`: never fetch LFS.
-/// * Unset or empty → `None`: leave the decision to the caller / git config.
+/// Tri-state default for LFS fetching. Accepts `1`/`0`, `true`/`false`,
+/// `yes`/`no`, `on`/`off` (case-insensitive). Unset/empty → `None`.
 pub const PIXI_GIT_LFS_ENV: &str = "PIXI_GIT_LFS";
 
-/// Reads [`PIXI_GIT_LFS_ENV`] and returns its tri-state value.
-///
-/// `Some(true)`/`Some(false)` mean the user explicitly opted in/out;
-/// `None` means the variable is unset and the caller should fall back to
-/// whatever its own default is.
 pub fn lfs_enabled_from_env() -> Option<bool> {
     let raw = std::env::var(PIXI_GIT_LFS_ENV).ok()?;
     let value = raw.trim();
@@ -53,10 +44,8 @@ pub fn lfs_enabled_from_env() -> Option<bool> {
     {
         return Some(true);
     }
-    // Unknown value: treat as enabled, but log so the user can spot typos.
     tracing::warn!(
-        "unrecognised value for {PIXI_GIT_LFS_ENV}: {raw:?}; treating as enabled. \
-         Expected one of: 1/0, true/false, yes/no, on/off."
+        "unrecognised value for {PIXI_GIT_LFS_ENV}: {raw:?}; treating as enabled"
     );
     Some(true)
 }
@@ -71,14 +60,8 @@ pub struct GitSource {
     cache: PathBuf,
     /// The reporter to use for this source.
     reporter: Option<Arc<dyn Reporter>>,
-    /// Whether to fetch Git LFS objects for this source.
-    ///
-    /// * `Some(true)`  — always fetch LFS (and let the smudge filter run on
-    ///   checkout).
-    /// * `Some(false)` — never fetch LFS, and force `GIT_LFS_SKIP_SMUDGE=1`
-    ///   on the git subprocesses that touch the working tree.
-    /// * `None`        — no opinion: don't fetch LFS, and don't override
-    ///   `GIT_LFS_SKIP_SMUDGE` either, deferring to the user's git config.
+    /// `Some(true)` = fetch LFS, `Some(false)` = skip + force-skip smudge,
+    /// `None` = no opinion (don't touch `GIT_LFS_SKIP_SMUDGE`).
     lfs: Option<bool>,
 }
 
@@ -103,13 +86,7 @@ impl GitSource {
         }
     }
 
-    /// Explicitly enable or disable Git LFS fetching for this source.
-    ///
-    /// Sets the tri-state LFS preference:
-    /// * `Some(true)`  → always fetch LFS.
-    /// * `Some(false)` → never fetch LFS, and force `GIT_LFS_SKIP_SMUDGE=1`.
-    /// * `None`        → no opinion; defer to the user's git config and the
-    ///   [`PIXI_GIT_LFS_ENV`] environment variable.
+    /// Override the LFS preference. See [`PIXI_GIT_LFS_ENV`] for tri-state semantics.
     #[must_use]
     pub fn with_lfs(self, lfs: Option<bool>) -> Self {
         Self { lfs, ..self }
@@ -142,10 +119,7 @@ impl GitSource {
                     self.git.repository,
                     rev
                 );
-                // The regular fetch path is skipped here, so LFS objects
-                // wouldn't otherwise be (re)validated. Do it explicitly when
-                // the caller asked for LFS, so a cached DB without LFS blobs
-                // still ends up populated.
+                // Cache hit skips remote.checkout, so LFS wouldn't fire.
                 if self.lfs == Some(true) {
                     db.ensure_lfs(remote.url().as_str(), rev.into());
                 }
@@ -229,10 +203,8 @@ pub struct Fetch {
     /// The path to the checked-out repository.
     path: PathBuf,
 
-    /// Outcome of the most recent `git lfs fsck` for this source:
-    /// `Some(true)` means LFS objects validated, `Some(false)` means LFS
-    /// was requested but `git-lfs` is missing or `fsck` reported problems,
-    /// and `None` means LFS was never requested.
+    /// `Some(true)` = fsck passed, `Some(false)` = LFS attempted but failed,
+    /// `None` = LFS never requested.
     lfs_ready: Option<bool>,
 }
 
@@ -253,8 +225,6 @@ impl Fetch {
         self.path
     }
 
-    /// Returns the LFS validation state for this fetch. See
-    /// [`Fetch::lfs_ready`] field docs for the meaning of each variant.
     pub fn lfs_ready(&self) -> Option<bool> {
         self.lfs_ready
     }
@@ -271,10 +241,7 @@ pub fn cache_digest(url: &RepositoryUrl) -> String {
 mod tests {
     use super::*;
 
-    /// Wraps env-var manipulation so concurrent tests in this module don't
-    /// race on the process-global env. Cargo runs unit tests in parallel by
-    /// default; serialising with a mutex avoids flaky behaviour when each
-    /// test sets/unsets the same variable.
+    /// Serialised env-var swap to keep parallel tests from racing.
     fn with_env<R>(value: Option<&str>, body: impl FnOnce() -> R) -> R {
         use std::sync::Mutex;
         static LOCK: Mutex<()> = Mutex::new(());

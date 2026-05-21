@@ -44,11 +44,7 @@ pub static GIT: LazyLock<Result<PathBuf, GitBinaryError>> = LazyLock::new(|| {
     })
 });
 
-/// A global cache that probes whether `git lfs` is available on the system.
-///
-/// Runs `git lfs version` once and caches the result. If `git-lfs` is not
-/// installed (or the probe fails), this returns `false` and callers should
-/// skip LFS operations.
+/// `true` if `git lfs version` succeeds on the system. Cached once.
 pub static GIT_LFS_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
     let Ok(git) = GIT.as_ref() else {
         return false;
@@ -62,14 +58,8 @@ pub static GIT_LFS_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
         .unwrap_or(false)
 });
 
-/// Returns the value to assign to `GIT_LFS_SKIP_SMUDGE` for the given LFS
-/// preference, or `None` if the variable should be left untouched.
-///
-/// * `Some(true)`  → `"0"` (let the smudge filter run, materialise LFS files)
-/// * `Some(false)` → `"1"` (skip the smudge filter even if git-lfs is set up
-///   globally)
-/// * `None`        → don't set the variable at all, deferring to the user's
-///   git config / environment.
+/// Value for `GIT_LFS_SKIP_SMUDGE`, or `None` to leave the var unset.
+/// `Some(true)` → "0" (run smudge), `Some(false)` → "1" (skip smudge).
 fn lfs_skip_smudge_env(lfs: Option<bool>) -> Option<&'static str> {
     lfs.map(|on| if on { "0" } else { "1" })
 }
@@ -319,28 +309,19 @@ impl GitRemote {
 pub(crate) struct GitDatabase {
     /// Underlying Git repository instance for this database.
     repo: GitRepository,
-    /// Outcome of the most recent `git lfs fsck` run for this database:
-    /// `Some(true)`  → LFS objects validated successfully,
-    /// `Some(false)` → LFS fetch was attempted but `git lfs fsck` reported
-    /// problems (or `git-lfs` wasn't available), and
-    /// `None`        → LFS was never requested for this database.
+    /// `Some(true)` = fsck passed, `Some(false)` = fsck failed or git-lfs
+    /// missing, `None` = LFS never requested.
     lfs_ready: Option<bool>,
 }
 
 impl GitDatabase {
-    /// Returns the LFS validation state from the most recent fetch, if any.
-    /// See [`GitDatabase::lfs_ready`] field for the meaning of each variant.
     pub(crate) fn lfs_ready(&self) -> Option<bool> {
         self.lfs_ready
     }
 
-    /// Fetches LFS objects for `revision` from `url` and records the
-    /// validation result on [`GitDatabase::lfs_ready`].
-    ///
-    /// This is meant for the cached-DB code path in [`crate::source::GitSource`]
-    /// where [`GitRemote::checkout`] is skipped because the commit is already
-    /// present, but the caller still wants the LFS blobs validated/fetched
-    /// against this database.
+    /// Fetch + fsck LFS objects for `revision`, recording the result on
+    /// [`Self::lfs_ready`]. Used by the cached-DB path where
+    /// [`GitRemote::checkout`] is skipped.
     pub(crate) fn ensure_lfs(&mut self, url: &str, revision: GitOid) {
         self.lfs_ready = maybe_fetch_lfs(&mut self.repo, url, revision);
     }
@@ -436,15 +417,9 @@ impl GitRepository {
         result.parse().map_err(GitError::OidParse)
     }
 
-    /// Runs `git lfs fsck --objects <revision>` and returns whether the LFS
-    /// objects reachable from `revision` validate successfully.
-    ///
-    /// Returns `false` if the git binary can't be located, if `git-lfs` isn't
-    /// installed, if the fsck command fails to spawn, or if it exits non-zero.
-    /// This is purely informational: a `false` result is logged at warn level
-    /// but does not propagate as an error, since the LFS objects may still be
-    /// usable for the consumer's purposes (or the consumer may handle the
-    /// failure itself by inspecting [`GitDatabase::lfs_ready`]).
+    /// `git lfs fsck --objects <revision>`. Returns `true` iff fsck passes;
+    /// any failure (missing git, missing lfs, non-zero exit) is warned and
+    /// returns `false`. Result is informational — see [`GitDatabase::lfs_ready`].
     fn lfs_fsck_objects(&self, revision: GitOid) -> bool {
         let Ok(git) = GIT.as_ref() else {
             return false;
@@ -733,18 +708,8 @@ pub(crate) fn fetch(
     result
 }
 
-/// Best-effort wrapper around [`fetch_lfs`]: logs and continues if `git-lfs`
-/// isn't available or the LFS fetch itself fails, so that a missing/broken
-/// LFS install never breaks the regular git checkout flow.
-///
-/// Returns the LFS-readiness state to record on the database:
-///
-/// * `Some(true)`  — LFS fetch succeeded and `git lfs fsck` validated the
-///   objects reachable from `revision`.
-/// * `Some(false)` — LFS fetch was attempted but either `git-lfs` is not
-///   installed, the fetch failed, or `git lfs fsck` reported problems.
-/// * `None`        — never returned by this function; reserved for callers
-///   that didn't request LFS at all.
+/// Best-effort `fetch_lfs`: warns and continues on missing git-lfs or fetch
+/// failure. Returns the value to record in [`GitDatabase::lfs_ready`].
 fn maybe_fetch_lfs(repo: &mut GitRepository, url: &str, revision: GitOid) -> Option<bool> {
     if !*GIT_LFS_AVAILABLE {
         tracing::warn!(
@@ -762,22 +727,11 @@ fn maybe_fetch_lfs(repo: &mut GitRepository, url: &str, revision: GitOid) -> Opt
     }
 }
 
-/// Fetches LFS objects required by `revision` for the repository at `repo`,
-/// then validates them with `git lfs fsck`.
-///
-/// Runs `git lfs fetch <url> <revision>` against the local repository so that
-/// LFS pointers reachable from the resolved commit have their corresponding
-/// blobs downloaded into the local `.git/lfs/objects/` store. Targeting the
-/// specific revision (rather than only the default branch) means LFS objects
-/// on feature branches or tags are fetched too.
-///
-/// `GIT_LFS_SKIP_SMUDGE` is explicitly unset on this command — pixi may have
-/// inherited it from its parent environment (or set it on previous git
-/// subprocesses), and we want the smudge filter to run during this fetch.
-///
-/// Returns `true` if `git lfs fsck` reports the objects for `revision` are
-/// valid, `false` if `fsck` reports problems. The fetch itself failing is
-/// reported via `Err` rather than `Ok(false)`.
+/// `git lfs fetch <url> <revision>` then `git lfs fsck --objects <revision>`.
+/// Scoping to the resolved rev (not just HEAD) means LFS objects on feature
+/// branches and tags are fetched too. Returns the fsck result; the bool of
+/// `Ok` is `true` if fsck passes. `GIT_LFS_SKIP_SMUDGE` is removed from the
+/// env so an inherited value can't suppress smudge mid-fetch.
 fn fetch_lfs(repo: &mut GitRepository, url: &str, revision: GitOid) -> Result<bool, GitError> {
     tracing::debug!("fetching LFS objects for {url} at {revision}");
     let output = Command::new(GIT.as_ref().map_err(|err| err.clone())?)
