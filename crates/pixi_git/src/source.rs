@@ -110,19 +110,20 @@ impl GitSource {
         };
 
         let remote = GitRemote::new(&remote);
+        let lfs_requested = self.lfs == Some(true);
         let (db, actual_rev, task) = match (self.git.precise, remote.db_at(&db_path).ok()) {
-            // If we have a locked revision, and we have a preexisting database
-            // which has that revision, then no update needs to happen.
-            (Some(rev), Some(mut db)) if db.contains(rev.into()) => {
+            // Cache hit: the DB has the commit and, if LFS was requested,
+            // its LFS objects validate. Skip the regular fetch + checkout.
+            (Some(rev), Some(db))
+                if db.contains(rev.into())
+                    && (!lfs_requested || db.contains_lfs_artifacts(rev.into())) =>
+            {
                 tracing::debug!(
                     "Using existing Git source `{}` pointed at `{}`",
                     self.git.repository,
                     rev
                 );
-                // Cache hit skips remote.checkout, so LFS wouldn't fire.
-                if self.lfs == Some(true) {
-                    db.ensure_lfs(remote.url().as_str(), rev.into());
-                }
+                let db = db.with_lfs_ready(lfs_requested.then_some(true));
                 (db, rev, None)
             }
 
@@ -187,7 +188,7 @@ impl GitSource {
             },
             commit: actual_rev,
             path: checkout_path,
-            lfs_ready: db.lfs_ready(),
+            lfs_ready: db.lfs_ready() == Some(true),
         })
     }
 }
@@ -203,9 +204,9 @@ pub struct Fetch {
     /// The path to the checked-out repository.
     path: PathBuf,
 
-    /// `Some(true)` = fsck passed, `Some(false)` = LFS attempted but failed,
-    /// `None` = LFS never requested.
-    lfs_ready: Option<bool>,
+    /// True iff LFS was requested for this fetch and `git lfs fsck` passed.
+    /// `false` means either LFS wasn't requested or it wasn't ready.
+    lfs_ready: bool,
 }
 
 impl Fetch {
@@ -225,8 +226,8 @@ impl Fetch {
         self.path
     }
 
-    pub fn lfs_ready(&self) -> Option<bool> {
-        self.lfs_ready
+    pub fn lfs_ready(&self) -> &bool {
+        &self.lfs_ready
     }
 }
 

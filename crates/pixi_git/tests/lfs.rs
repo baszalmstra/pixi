@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use pixi_git::{GitUrl, source::GitSource};
+use pixi_git::{GitUrl, sha::GitSha, source::GitSource};
 use pixi_test_utils::GitRepoFixture;
 use rattler_networking::LazyClient;
 use reqwest_middleware::ClientWithMiddleware;
@@ -83,7 +83,7 @@ fn fetch_without_lfs_leaves_pointer() {
         .fetch()
         .expect("fetch should succeed");
 
-    assert_eq!(fetch.lfs_ready(), None, "LFS was not requested");
+    assert_eq!(*fetch.lfs_ready(), false, "LFS was not requested");
     let data = fetch.path().join("data.bin");
     assert!(data.is_file(), "data.bin missing from checkout");
     assert!(
@@ -111,8 +111,8 @@ fn fetch_with_lfs_materialises_blob() {
         .expect("fetch should succeed");
 
     assert_eq!(
-        fetch.lfs_ready(),
-        Some(true),
+        *fetch.lfs_ready(),
+        true,
         "fsck should pass for a healthy LFS fixture"
     );
 
@@ -127,4 +127,36 @@ fn fetch_with_lfs_materialises_blob() {
         got, original,
         "checked-out data.bin should match fixture source"
     );
+}
+
+/// Second fetch against a warm cache (same `cache` dir, same precise rev)
+/// hits the cached-DB branch in `GitSource::fetch`. With LFS requested, the
+/// branch also requires `db.contains_lfs_artifacts(rev)`; it does after the
+/// first fetch populated `.git/lfs/objects/`, so the second fetch returns
+/// `lfs_ready == true` without touching the remote.
+#[test]
+fn cached_fetch_with_lfs_artifacts_is_ready() {
+    if !require_git_lfs("cached_fetch_with_lfs_artifacts_is_ready") {
+        return;
+    }
+    let repo = GitRepoFixture::new("lfs-sample");
+    let cache = tempfile::tempdir().unwrap();
+    let head: GitSha = repo.latest_commit().parse().unwrap();
+
+    let make_source = || {
+        let url = GitUrl::try_from(repo.base_url.clone())
+            .unwrap()
+            .with_precise(head);
+        GitSource::new(url, panic_client(), cache.path()).with_lfs(Some(true))
+    };
+
+    // Warm the cache.
+    let first = make_source().fetch().expect("first fetch should succeed");
+    assert_eq!(*first.lfs_ready(), true);
+
+    // Second fetch should reuse the DB and skip the network entirely while
+    // still reporting LFS as ready.
+    let second = make_source().fetch().expect("cached fetch should succeed");
+    assert_eq!(*second.lfs_ready(), true);
+    assert_eq!(second.commit(), first.commit());
 }

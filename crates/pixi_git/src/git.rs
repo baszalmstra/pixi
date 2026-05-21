@@ -44,19 +44,42 @@ pub static GIT: LazyLock<Result<PathBuf, GitBinaryError>> = LazyLock::new(|| {
     })
 });
 
-/// `true` if `git lfs version` succeeds on the system. Cached once.
-pub static GIT_LFS_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
-    let Ok(git) = GIT.as_ref() else {
-        return false;
-    };
-    Command::new(git)
-        .arg("lfs")
-        .arg("version")
-        .env(GIT_TERMINAL_PROMPT, "0")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-});
+/// Cached `git lfs` invoker. Probes `git lfs version` once; on success
+/// callers get a `GitLfs` whose [`GitLfs::cmd`] returns a fresh `Command`
+/// pre-set to `git lfs ...` with the terminal prompt disabled. Mirrors uv's
+/// `GIT_LFS` static.
+pub static GIT_LFS: LazyLock<Result<GitLfs, GitBinaryError>> = LazyLock::new(GitLfs::probe);
+
+/// Pre-configured `git lfs` command builder. Kept opaque so the git path is
+/// resolved exactly once.
+#[derive(Debug, Clone)]
+pub struct GitLfs {
+    git: PathBuf,
+}
+
+impl GitLfs {
+    fn probe() -> Result<Self, GitBinaryError> {
+        let git = GIT.as_ref().map_err(|e| e.clone())?.clone();
+        let ok = Command::new(&git)
+            .args(["lfs", "version"])
+            .env(GIT_TERMINAL_PROMPT, "0")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            Ok(Self { git })
+        } else {
+            Err(GitBinaryError::GitNotFound)
+        }
+    }
+
+    /// Fresh `git lfs` command with `GIT_TERMINAL_PROMPT=0` already set.
+    pub fn cmd(&self) -> Command {
+        let mut c = Command::new(&self.git);
+        c.arg("lfs").env(GIT_TERMINAL_PROMPT, "0");
+        c
+    }
+}
 
 /// Value for `GIT_LFS_SKIP_SMUDGE`, or `None` to leave the var unset.
 /// `Some(true)` → "0" (run smudge), `Some(false)` → "1" (skip smudge).
@@ -258,16 +281,16 @@ impl GitRemote {
             };
 
             if let Some(rev) = resolved_commit_hash {
-                if lfs == Some(true) {
-                    db.lfs_ready = maybe_fetch_lfs(&mut db.repo, self.url.as_str(), rev);
-                }
-                return Ok((db, rev));
+                let ready = if lfs == Some(true) {
+                    maybe_fetch_lfs(&mut db.repo, self.url.as_str(), rev)
+                } else {
+                    None
+                };
+                return Ok((db.with_lfs_ready(ready), rev));
             }
         }
 
         // Otherwise start from scratch to handle corrupt git repositories.
-        // After our fetch (which is interpreted as a clone now) we do the same
-        // resolution to figure out what we cloned.
         if into.exists() {
             fs_err::remove_dir_all(into)?;
         }
@@ -280,13 +303,20 @@ impl GitRemote {
             None => reference.resolve(&repo)?,
         };
 
-        let lfs_ready = if lfs == Some(true) {
+        let ready = if lfs == Some(true) {
             maybe_fetch_lfs(&mut repo, self.url.as_str(), rev)
         } else {
             None
         };
 
-        Ok((GitDatabase { repo, lfs_ready }, rev))
+        Ok((
+            GitDatabase {
+                repo,
+                lfs_ready: None,
+            }
+            .with_lfs_ready(ready),
+            rev,
+        ))
     }
 
     /// Creates a [`GitDatabase`] of this remote at `db_path`.
@@ -319,11 +349,19 @@ impl GitDatabase {
         self.lfs_ready
     }
 
-    /// Fetch + fsck LFS objects for `revision`, recording the result on
-    /// [`Self::lfs_ready`]. Used by the cached-DB path where
-    /// [`GitRemote::checkout`] is skipped.
-    pub(crate) fn ensure_lfs(&mut self, url: &str, revision: GitOid) {
-        self.lfs_ready = maybe_fetch_lfs(&mut self.repo, url, revision);
+    /// Builder: set [`Self::lfs_ready`] and return self. Mirrors uv's
+    /// `with_lfs_ready` so callers can chain after a fetch or cache hit.
+    #[must_use]
+    pub(crate) fn with_lfs_ready(mut self, value: Option<bool>) -> Self {
+        self.lfs_ready = value;
+        self
+    }
+
+    /// True if the LFS objects reachable from `revision` are already present
+    /// and valid in this database (i.e. `git lfs fsck --objects` passes).
+    /// Used to decide whether a cached DB satisfies an LFS-aware request.
+    pub(crate) fn contains_lfs_artifacts(&self, revision: GitOid) -> bool {
+        self.repo.lfs_fsck_objects(revision)
     }
 
     /// Checkouts to a revision at `destination` from this database.
@@ -418,19 +456,18 @@ impl GitRepository {
     }
 
     /// `git lfs fsck --objects <revision>`. Returns `true` iff fsck passes;
-    /// any failure (missing git, missing lfs, non-zero exit) is warned and
-    /// returns `false`. Result is informational — see [`GitDatabase::lfs_ready`].
+    /// any failure (missing git-lfs, non-zero exit) is warned and returns
+    /// `false`. Informational — see [`GitDatabase::lfs_ready`].
     fn lfs_fsck_objects(&self, revision: GitOid) -> bool {
-        let Ok(git) = GIT.as_ref() else {
+        let Ok(lfs) = GIT_LFS.as_ref() else {
             return false;
         };
-        let output = Command::new(git)
-            .arg("lfs")
+        let output = lfs
+            .cmd()
             .arg("fsck")
             .arg("--objects")
             .arg(revision.as_str())
             .env_remove(GIT_DIR)
-            .env(GIT_TERMINAL_PROMPT, "0")
             .current_dir(&self.path)
             .output();
         match output {
@@ -711,14 +748,17 @@ pub(crate) fn fetch(
 /// Best-effort `fetch_lfs`: warns and continues on missing git-lfs or fetch
 /// failure. Returns the value to record in [`GitDatabase::lfs_ready`].
 fn maybe_fetch_lfs(repo: &mut GitRepository, url: &str, revision: GitOid) -> Option<bool> {
-    if !*GIT_LFS_AVAILABLE {
-        tracing::warn!(
-            "`git-lfs` is not installed; skipping LFS fetch for {url}. \
-             Install git-lfs to download LFS-tracked files."
-        );
-        return Some(false);
-    }
-    match fetch_lfs(repo, url, revision) {
+    let lfs = match GIT_LFS.as_ref() {
+        Ok(lfs) => lfs,
+        Err(_) => {
+            tracing::warn!(
+                "`git-lfs` is not installed; skipping LFS fetch for {url}. \
+                 Install git-lfs to download LFS-tracked files."
+            );
+            return Some(false);
+        }
+    };
+    match fetch_lfs(lfs, repo, url, revision) {
         Ok(fsck_ok) => Some(fsck_ok),
         Err(err) => {
             tracing::warn!("failed to fetch LFS objects for {url} at {revision}: {err}");
@@ -732,16 +772,20 @@ fn maybe_fetch_lfs(repo: &mut GitRepository, url: &str, revision: GitOid) -> Opt
 /// branches and tags are fetched too. Returns the fsck result; the bool of
 /// `Ok` is `true` if fsck passes. `GIT_LFS_SKIP_SMUDGE` is removed from the
 /// env so an inherited value can't suppress smudge mid-fetch.
-fn fetch_lfs(repo: &mut GitRepository, url: &str, revision: GitOid) -> Result<bool, GitError> {
+fn fetch_lfs(
+    lfs: &GitLfs,
+    repo: &mut GitRepository,
+    url: &str,
+    revision: GitOid,
+) -> Result<bool, GitError> {
     tracing::debug!("fetching LFS objects for {url} at {revision}");
-    let output = Command::new(GIT.as_ref().map_err(|err| err.clone())?)
-        .arg("lfs")
+    let output = lfs
+        .cmd()
         .arg("fetch")
         .arg(url)
         .arg(revision.as_str())
         .env_remove(GIT_DIR)
         .env_remove(GIT_LFS_SKIP_SMUDGE)
-        .env(GIT_TERMINAL_PROMPT, "0")
         .current_dir(&repo.path)
         .output()?;
     if !output.status.success() {
