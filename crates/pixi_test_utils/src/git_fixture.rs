@@ -7,6 +7,48 @@ use std::{collections::HashMap, path::Path};
 
 use tempfile::TempDir;
 
+/// Returns true if the file at `path` looks like a `.gitattributes` that
+/// configures any path to use the `lfs` filter.
+fn gitattributes_uses_lfs(path: &Path) -> bool {
+    let Ok(contents) = fs_err::read_to_string(path) else {
+        return false;
+    };
+    contents.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#') && line.contains("filter=lfs")
+    })
+}
+
+/// Recursively scan `dir` for any `.gitattributes` file that uses the `lfs`
+/// filter.
+fn dir_uses_lfs(dir: &Path) -> bool {
+    let Ok(entries) = fs_err::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if dir_uses_lfs(&path) {
+                return true;
+            }
+        } else if path.file_name() == Some(std::ffi::OsStr::new(".gitattributes"))
+            && gitattributes_uses_lfs(&path)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true if `git lfs` is installed and usable.
+fn git_lfs_available() -> bool {
+    std::process::Command::new("git")
+        .args(["lfs", "version"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
 /// Returns the path to the Cargo workspace root.
 fn cargo_workspace_dir() -> &'static Path {
     Path::new(env!("CARGO_WORKSPACE_DIR"))
@@ -20,6 +62,16 @@ fn cargo_workspace_dir() -> &'static Path {
 ///
 /// If a commit message starts with `v` (e.g., `v0.1.0`), a git tag is created
 /// for that commit.
+///
+/// # Git LFS
+///
+/// If any commit directory contains a `.gitattributes` file referencing the
+/// `lfs` filter (e.g. `*.bin filter=lfs diff=lfs merge=lfs -text`), the
+/// fixture is built with `git lfs install --local` so that matching files
+/// are stored as LFS pointers with the blob contents in
+/// `.git/lfs/objects/`. The fixture's [`uses_lfs`](Self::uses_lfs) field
+/// reflects this. `git-lfs` must be installed on the system, otherwise the
+/// fixture will panic.
 ///
 /// # Example fixture structure
 ///
@@ -63,6 +115,11 @@ pub struct GitRepoFixture {
 
     /// Map of tag names to commit hashes.
     pub tags: HashMap<String, String>,
+
+    /// True if this fixture was built with Git LFS enabled. Set automatically
+    /// when any commit dir contains a `.gitattributes` referencing the `lfs`
+    /// filter.
+    pub uses_lfs: bool,
 }
 
 impl GitRepoFixture {
@@ -116,6 +173,25 @@ impl GitRepoFixture {
             .filter(|e| e.path().is_dir())
             .collect();
         commit_dirs.sort_by_key(|e| e.file_name());
+
+        // Auto-detect LFS: if any commit dir contains a `.gitattributes` that
+        // configures the `lfs` filter, install git-lfs hooks in this repo so
+        // subsequent `git add` calls write LFS pointers (with the blob contents
+        // stored in `.git/lfs/objects/`). This produces a "real" LFS repo
+        // suitable for testing the LFS fetch path.
+        let uses_lfs = commit_dirs.iter().any(|d| dir_uses_lfs(&d.path()));
+        if uses_lfs {
+            assert!(
+                git_lfs_available(),
+                "git-lfs is required for fixture '{repo_name}' (its .gitattributes uses filter=lfs) \
+                 but `git lfs version` failed. Install git-lfs to run this test."
+            );
+            std::process::Command::new("git")
+                .args(["lfs", "install", "--local"])
+                .current_dir(&repo_path)
+                .output()
+                .expect("failed to run `git lfs install --local`");
+        }
 
         let mut commits = Vec::new();
         let mut tags = HashMap::new();
@@ -175,6 +251,7 @@ impl GitRepoFixture {
             base_url,
             commits,
             tags,
+            uses_lfs,
         }
     }
 
@@ -232,5 +309,48 @@ fn copy_dir_contents(src: &Path, dst: &Path) {
         } else {
             fs_err::copy(&src_path, &dst_path).expect("failed to copy file");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_lfs_filter() {
+        let tmp = TempDir::new().unwrap();
+        fs_err::write(
+            tmp.path().join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        assert!(dir_uses_lfs(tmp.path()));
+    }
+
+    #[test]
+    fn ignores_commented_lfs_lines() {
+        let tmp = TempDir::new().unwrap();
+        fs_err::write(
+            tmp.path().join(".gitattributes"),
+            "# *.bin filter=lfs diff=lfs merge=lfs -text\n*.txt text\n",
+        )
+        .unwrap();
+        assert!(!dir_uses_lfs(tmp.path()));
+    }
+
+    #[test]
+    fn ignores_non_lfs_gitattributes() {
+        let tmp = TempDir::new().unwrap();
+        fs_err::write(tmp.path().join(".gitattributes"), "*.txt text\n").unwrap();
+        assert!(!dir_uses_lfs(tmp.path()));
+    }
+
+    #[test]
+    fn detects_lfs_in_nested_dir() {
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("a/b");
+        fs_err::create_dir_all(&nested).unwrap();
+        fs_err::write(nested.join(".gitattributes"), "data/* filter=lfs\n").unwrap();
+        assert!(dir_uses_lfs(tmp.path()));
     }
 }
