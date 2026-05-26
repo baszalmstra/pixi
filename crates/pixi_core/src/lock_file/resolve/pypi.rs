@@ -1022,7 +1022,7 @@ async fn lock_pypi_packages(
                 Dist::Built(dist) => {
                     fn wheel(
                         metadata: ResolutionMetadata,
-                        location: UrlOrPath,
+                        location: Verbatim<UrlOrPath>,
                         hash: Option<PackageHashes>,
                         index_url: Option<Url>,
                     ) -> miette::Result<LockedPypiRecord> {
@@ -1038,7 +1038,7 @@ async fn lock_pypi_packages(
                                         .context("cannot convert name")?,
                                     hash,
                                     index_url,
-                                    location: Verbatim::new(location),
+                                    location,
                                     version: locked_version.clone(),
                                     requires_python: metadata
                                         .requires_python
@@ -1076,7 +1076,7 @@ async fn lock_pypi_packages(
                             .context("cannot convert registry dist")?;
                             locked_packages.push(wheel(
                                 metadata,
-                                url_or_path,
+                                Verbatim::new(url_or_path),
                                 hash,
                                 Some((*best_wheel.index).clone()),
                             )?);
@@ -1089,32 +1089,37 @@ async fn lock_pypi_packages(
 
                             locked_packages.push(wheel(
                                 metadata,
-                                UrlOrPath::Url(direct_url),
+                                Verbatim::new(UrlOrPath::Url(direct_url)),
                                 None,
                                 None,
                             )?);
                         }
                         BuiltDist::Path(dist) => {
-                            locked_packages.push(wheel(
-                                metadata,
-                                UrlOrPath::Path(
-                                    process_uv_path_url(
-                                        &dist.url,
-                                        &dist.install_path,
-                                        abs_project_root,
-                                    )
-                                    .into_diagnostic()?,
-                                ),
-                                None,
-                                None,
-                            )?);
+                            // Preserve the original `given` (e.g. `./wheels/foo.whl`) so the
+                            // lockfile records the relative path as written by the user
+                            // rather than only the computed relative path. See #2802.
+                            let install_path = process_uv_path_url(
+                                &dist.url,
+                                &dist.install_path,
+                                abs_project_root,
+                            )
+                            .into_diagnostic()?;
+                            let location = if let Some(given) = dist.url.given() {
+                                Verbatim::new_with_given(
+                                    UrlOrPath::Path(install_path),
+                                    given.to_string(),
+                                )
+                            } else {
+                                Verbatim::new(UrlOrPath::Path(install_path))
+                            };
+                            locked_packages.push(wheel(metadata, location, None, None)?);
                         }
                     }
                 }
                 Dist::Source(source) => {
                     fn wheel(
                         metadata: uv_distribution::Metadata,
-                        location: UrlOrPath,
+                        location: Verbatim<UrlOrPath>,
                         hash: Option<PackageHashes>,
                         index_url: Option<Url>,
                     ) -> miette::Result<LockedPypiRecord> {
@@ -1130,7 +1135,7 @@ async fn lock_pypi_packages(
                                         .context("cannot convert name")?,
                                     hash,
                                     index_url,
-                                    location: Verbatim::new(location),
+                                    location,
                                     version: locked_version.clone(),
                                     requires_python: metadata
                                         .requires_python
@@ -1167,23 +1172,26 @@ async fn lock_pypi_packages(
                     // otherwise try to construct it from the source
                     match source {
                         SourceDist::Registry(reg) => {
-                            locked_packages.push(wheel(
-                                metadata,
+                            let url_or_path =
                                 get_url_or_path(&reg.index, &reg.file.url, abs_project_root)
                                     .into_diagnostic()
-                                    .context("cannot convert registry sdist")?,
+                                    .context("cannot convert registry sdist")?;
+                            locked_packages.push(wheel(
+                                metadata,
+                                Verbatim::new(url_or_path),
                                 hash,
                                 Some((*reg.index).clone()),
                             )?);
                         }
                         SourceDist::DirectUrl(direct) => {
                             let url = direct.url.to_url();
+                            let direct_url: UrlOrPath = Url::parse(&format!("direct+{url}"))
+                                .into_diagnostic()
+                                .context("could not create direct-url")?
+                                .into();
                             locked_packages.push(wheel(
                                 metadata,
-                                Url::parse(&format!("direct+{url}"))
-                                    .into_diagnostic()
-                                    .context("could not create direct-url")?
-                                    .into(),
+                                Verbatim::new(direct_url),
                                 hash,
                                 None,
                             )?);
@@ -1200,7 +1208,7 @@ async fn lock_pypi_packages(
                                 into_pinned_git_spec(git.clone(), original_reference);
                             locked_packages.push(wheel(
                                 metadata,
-                                pinned_git_spec.into_locked_git_url().to_url().into(),
+                                Verbatim::new(pinned_git_spec.into_locked_git_url().to_url().into()),
                                 hash,
                                 None,
                             )?);
@@ -1218,11 +1226,18 @@ async fn lock_pypi_packages(
                             )
                             .into_diagnostic()?;
 
-                            // Create the url for the lock file. This is based on the passed in URL
-                            // instead of from the source path to copy the path that was passed in
-                            // from the requirement.
-                            let url_or_path = UrlOrPath::Path(install_path);
-                            locked_packages.push(wheel(metadata, url_or_path, hash, None)?);
+                            // Preserve the original `given` (e.g. `./dist/foo.tar.gz`) so the
+                            // lockfile records the relative path as written by the user
+                            // rather than only the computed relative path. See #2802.
+                            let location = if let Some(given) = path.url.given() {
+                                Verbatim::new_with_given(
+                                    UrlOrPath::Path(install_path),
+                                    given.to_string(),
+                                )
+                            } else {
+                                Verbatim::new(UrlOrPath::Path(install_path))
+                            };
+                            locked_packages.push(wheel(metadata, location, hash, None)?);
                         }
                         SourceDist::Directory(dir) => {
                             // process the path or url that we get back from uv
