@@ -5,16 +5,73 @@ use std::{
 
 use itertools::Itertools;
 use pixi_record::{PixiRecord, SourceRecord};
-use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceSpec};
+use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceLocationSpec, SourceSpec};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::{
-    ChannelUrl, GenericVirtualPackage, MatchSpec, Platform, RepoDataRecord, Version,
+    Channel, ChannelUrl, GenericVirtualPackage, MatchSpec, NamelessMatchSpec,
+    ParseMatchSpecOptions, Platform, RepoDataRecord, Version,
     package::{ArchiveIdentifier, CondaArchiveType, DistArchiveIdentifier},
 };
 use rattler_repodata_gateway::RepoData;
 use rattler_solve::{ChannelPriority, SolveStrategy, SolverImpl};
 use tokio::task::JoinError;
 use url::Url;
+
+/// Synthetic channel under which all source records are placed. A
+/// matching channel pin gets injected into every matchspec built from a
+/// `SourceSpec`, so a binary spec carrying a real channel cannot be
+/// silently satisfied by a record that was meant to be a source build —
+/// the solver surfaces the mismatch as an unsatisfiable conflict.
+const SOURCE_CHANNEL_NAME: &str = "__pixi_source__";
+
+/// Synthetic channel object used to tag source records and source-spec
+/// matchspecs. The channel resolves through the rattler default
+/// `ChannelConfig`, so the canonical name we set on records here matches
+/// what the solver computes when it re-parses a depend string.
+fn source_channel() -> std::sync::Arc<Channel> {
+    use std::sync::OnceLock;
+    static SOURCE_CHANNEL: OnceLock<std::sync::Arc<Channel>> = OnceLock::new();
+    SOURCE_CHANNEL
+        .get_or_init(|| {
+            let config = rattler_conda_types::ChannelConfig::default_with_root_dir(
+                std::path::PathBuf::from("/"),
+            );
+            std::sync::Arc::new(Channel::from_name(SOURCE_CHANNEL_NAME, &config))
+        })
+        .clone()
+}
+
+/// Attach the synthetic source channel to a nameless matchspec.
+fn with_source_channel(mut spec: NamelessMatchSpec) -> NamelessMatchSpec {
+    spec.channel = Some(source_channel());
+    spec
+}
+
+/// For each depend whose name appears in `sources`, re-emit it with the
+/// synthetic source channel pinned so that only a record from that
+/// channel can satisfy it.
+fn rewrite_source_depends(
+    depends: &[String],
+    sources: &std::collections::BTreeMap<String, SourceLocationSpec>,
+) -> Vec<String> {
+    depends
+        .iter()
+        .map(|dep| {
+            let Ok(spec) = MatchSpec::from_str(dep, ParseMatchSpecOptions::lenient()) else {
+                return dep.clone();
+            };
+            let needs_channel = spec
+                .name
+                .as_exact()
+                .is_some_and(|n| sources.contains_key(n.as_normalized()));
+            if !needs_channel {
+                return dep.clone();
+            }
+            let (name, nameless) = spec.into_nameless();
+            MatchSpec::from_nameless(with_source_channel(nameless), name).to_string()
+        })
+        .collect()
+}
 
 use crate::SourceMetadata;
 
@@ -142,11 +199,16 @@ impl SolveCondaEnvironmentSpec {
                 .collect();
 
             // Create direct dependencies on the source packages to feed to the solver.
+            // Pin to the synthetic source channel so a binary spec for the same name
+            // cannot silently satisfy it.
             let source_match_specs = self
                 .source_specs
                 .into_specs()
                 .map(|(name, spec)| {
-                    MatchSpec::from_nameless(spec.to_nameless_match_spec(), name.into())
+                    MatchSpec::from_nameless(
+                        with_source_channel(spec.to_nameless_match_spec()),
+                        name.into(),
+                    )
                 })
                 .collect::<Vec<_>>();
 
@@ -188,11 +250,17 @@ impl SolveCondaEnvironmentSpec {
             let mut url_to_dev_source = HashMap::new();
 
             // Add source records
+            let source_channel_canonical = source_channel().canonical_name();
             for source_metadata in &self.source_repodata {
                 for record in &source_metadata.records {
                     let url = unique_url(record);
+                    // Rewrite source-typed run-deps so the solver only accepts a
+                    // matching source record (not a same-name binary candidate).
+                    let mut package_record = record.data.package_record.clone();
+                    package_record.depends =
+                        rewrite_source_depends(&package_record.depends, &record.data.sources);
                     let repodata_record = RepoDataRecord {
-                        package_record: record.data.package_record.clone(),
+                        package_record,
                         url: url.clone(),
                         identifier: DistArchiveIdentifier {
                             identifier: ArchiveIdentifier {
@@ -202,7 +270,7 @@ impl SolveCondaEnvironmentSpec {
                             },
                             archive_type: CondaArchiveType::Conda.into(),
                         },
-                        channel: None,
+                        channel: Some(source_channel_canonical.clone()),
                     };
                     let mut record = SourceRecord::clone(record);
                     record.build_source = source_metadata.source.build_source().cloned();
@@ -413,4 +481,58 @@ pub enum SolveCondaEnvironmentError {
     /// fails.
     #[error(transparent)]
     Gateway(#[from] rattler_repodata_gateway::GatewayError),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use pixi_spec::{PathSourceSpec, SourceLocationSpec};
+    use rattler_conda_types::NamelessMatchSpec;
+
+    use super::*;
+
+    #[test]
+    fn source_channel_canonical_name_is_stable() {
+        // The canonical name has to survive a stringify → re-parse round trip
+        // using the default ChannelConfig that rattler-solve applies to depend
+        // strings.
+        let chan = source_channel();
+        let parsed = rattler_conda_types::Channel::from_str(
+            chan.name.as_deref().unwrap(),
+            &rattler_conda_types::ChannelConfig::default_with_root_dir(
+                std::env::current_dir().unwrap(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(parsed.canonical_name(), chan.canonical_name());
+    }
+
+    #[test]
+    fn with_source_channel_sets_the_synthetic_channel() {
+        let tagged = with_source_channel(NamelessMatchSpec::default());
+        let chan = tagged.channel.expect("channel should be set");
+        assert_eq!(chan.canonical_name(), source_channel().canonical_name());
+    }
+
+    #[test]
+    fn rewrite_depends_pins_only_source_entries() {
+        let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
+        sources.insert(
+            "xgcm".to_string(),
+            SourceLocationSpec::Path(PathSourceSpec {
+                path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
+            }),
+        );
+        let depends = vec!["xgcm".to_string(), "numpy >=1.0".to_string()];
+        let rewritten = rewrite_source_depends(&depends, &sources);
+
+        // numpy is unchanged because it's not in the sources map.
+        assert_eq!(rewritten[1], "numpy >=1.0");
+
+        // xgcm gets the synthetic source channel.
+        let spec = MatchSpec::from_str(&rewritten[0], ParseMatchSpecOptions::lenient()).unwrap();
+        let chan = spec.channel.expect("xgcm should be channel-tagged");
+        assert_eq!(chan.canonical_name(), source_channel().canonical_name());
+    }
 }
