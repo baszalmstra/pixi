@@ -5,11 +5,21 @@
 # and builds a conda package via `R CMD INSTALL`. Combined with a git
 # source this lets you install any R package hosted on GitHub.
 
+# ---------------------------------------------------------------------------
+# Workspace: the consumer side. Defines the channels and platforms the
+# resulting environment is solved for. `preview = ["pixi-build"]` opts in to
+# the (still-preview) source-build feature.
+# ---------------------------------------------------------------------------
 [workspace]
 channels = ["https://prefix.dev/conda-forge"]
 platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
 preview = ["pixi-build"]
 
+# ---------------------------------------------------------------------------
+# Package: what we're building. The source is fetched from GitHub and handed
+# to the pixi-build-r backend, which reads the upstream DESCRIPTION file for
+# metadata and dependencies.
+# ---------------------------------------------------------------------------
 [package]
 name = "r-highr"
 version = "0.9"
@@ -26,10 +36,16 @@ channels = [
   "https://prefix.dev/conda-forge",
 ]
 
+# ---------------------------------------------------------------------------
+# Dependencies: r-base for the runtime, and a path-dependency on the package
+# we just declared so the workspace installs the freshly built conda package.
+# ---------------------------------------------------------------------------
 [dependencies]
 r-base = ">=4.3,<5"
 r-highr = { path = "." }
 
+# ---------------------------------------------------------------------------
+# Tasks: smoke-test that the package built from GitHub is importable.
+# ---------------------------------------------------------------------------
 [tasks]
-# Smoke-test that the package built from GitHub is importable.
 check = "Rscript -e 'library(highr); cat(as.character(packageVersion(\"highr\")), \"\\n\")'"
