@@ -8,8 +8,8 @@ use pixi_record::{PixiRecord, SourceRecord};
 use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceLocationSpec, SourceSpec};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::{
-    Channel, ChannelUrl, GenericVirtualPackage, MatchSpec, NamelessMatchSpec, PackageName,
-    ParseMatchSpecOptions, Platform, RepoDataRecord, Version,
+    ChannelUrl, GenericVirtualPackage, MatchSpec, PackageName, ParseMatchSpecOptions, Platform,
+    RepoDataRecord, Version,
     package::{ArchiveIdentifier, CondaArchiveType, DistArchiveIdentifier},
 };
 use rattler_repodata_gateway::RepoData;
@@ -17,46 +17,19 @@ use rattler_solve::{ChannelPriority, SolveStrategy, SolverImpl};
 use tokio::task::JoinError;
 use url::Url;
 
-/// Synthetic channel under which all source records are placed. A
-/// matching channel pin gets injected into every matchspec built from a
-/// `SourceSpec`, so a binary spec carrying a real channel cannot be
-/// silently satisfied by a record that was meant to be a source build —
-/// the solver surfaces the mismatch as an unsatisfiable conflict.
-///
-/// The `.invalid` TLD (RFC 2606) guarantees no real channel can collide.
-const SOURCE_CHANNEL_URL: &str = "https://pixi-source.invalid/";
-
-/// Synthetic channel object used to tag source records and source-spec
-/// matchspecs. Built once from a URL; round-tripping through a depend
-/// string and rattler's default `ChannelConfig` lands on the same
-/// canonical name, so the solver matches our records to our matchspecs.
-fn source_channel() -> std::sync::Arc<Channel> {
-    use std::sync::OnceLock;
-    static SOURCE_CHANNEL: OnceLock<std::sync::Arc<Channel>> = OnceLock::new();
-    SOURCE_CHANNEL
-        .get_or_init(|| {
-            let url = Url::parse(SOURCE_CHANNEL_URL).expect("source channel URL is valid");
-            std::sync::Arc::new(Channel::from_url(url))
-        })
-        .clone()
-}
-
-/// Attach the synthetic source channel to a nameless matchspec.
-fn with_source_channel(mut spec: NamelessMatchSpec) -> NamelessMatchSpec {
-    spec.channel = Some(source_channel());
-    spec
-}
-
 /// In-place rewrite: for each depend whose name appears in `sources`,
-/// replace it with a matchspec pinned to the synthetic source channel
-/// so only a record from that channel can satisfy it. Short-circuits
-/// when `sources` is empty (the typical case — most source records
-/// declare no source-typed run-deps) so the entire scan is skipped.
-/// On each entry the fast name-only scan rules out the miss path
-/// without ever invoking the full matchspec parser.
+/// pin the matchspec's URL to the resolved source record's unique URL
+/// so the solver cannot satisfy that transitive dep with a same-name
+/// binary record from another channel — `MatchSpec::matches<RepoDataRecord>`
+/// enforces URL equality, unlike the channel field which is only filtered
+/// against top-level specs.
+///
+/// Short-circuits when `sources` is empty (the typical source record).
+/// The fast name-only scan rules out the miss path before the full parse.
 fn rewrite_source_depends(
     depends: &mut [String],
     sources: &std::collections::BTreeMap<String, SourceLocationSpec>,
+    source_urls_by_name: &std::collections::BTreeMap<String, Url>,
 ) {
     if sources.is_empty() {
         return;
@@ -66,11 +39,18 @@ fn rewrite_source_depends(
         if !sources.contains_key(name.as_ref()) {
             continue;
         }
+        // Without a resolved source URL we can't pin; leave the dep
+        // alone. The walk in SolvePixiEnvironmentKey is supposed to
+        // resolve every name in `sources`, so this is defensive.
+        let Some(url) = source_urls_by_name.get(name.as_ref()) else {
+            continue;
+        };
         let Ok(spec) = MatchSpec::from_str(dep, ParseMatchSpecOptions::lenient()) else {
             continue;
         };
-        let (name, nameless) = spec.into_nameless();
-        *dep = MatchSpec::from_nameless(with_source_channel(nameless), name).to_string();
+        let (name, mut nameless) = spec.into_nameless();
+        nameless.url = Some(url.clone());
+        *dep = MatchSpec::from_nameless(nameless, name).to_string();
     }
 }
 
@@ -200,16 +180,11 @@ impl SolveCondaEnvironmentSpec {
                 .collect();
 
             // Create direct dependencies on the source packages to feed to the solver.
-            // Pin to the synthetic source channel so a binary spec for the same name
-            // cannot silently satisfy it.
             let source_match_specs = self
                 .source_specs
                 .into_specs()
                 .map(|(name, spec)| {
-                    MatchSpec::from_nameless(
-                        with_source_channel(spec.to_nameless_match_spec()),
-                        name.into(),
-                    )
+                    MatchSpec::from_nameless(spec.to_nameless_match_spec(), name.into())
                 })
                 .collect::<Vec<_>>();
 
@@ -250,32 +225,49 @@ impl SolveCondaEnvironmentSpec {
             let mut url_to_source_package = HashMap::new();
             let mut url_to_dev_source = HashMap::new();
 
-            // Add source records
-            let source_channel_canonical = source_channel().canonical_name();
+            // Add source records. Two-pass so the depend rewrite can pin
+            // each source-typed run-dep to the unique URL of its resolved
+            // source record (the URL is derived from name+version+build+
+            // manifest, all known in the first pass).
+            let mut source_urls_by_name: std::collections::BTreeMap<String, Url> =
+                std::collections::BTreeMap::new();
+            let mut staged: Vec<(Url, &Arc<SourceRecord>, &SourceMetadata)> = Vec::new();
             for source_metadata in &self.source_repodata {
                 for record in &source_metadata.records {
                     let url = unique_url(record);
-                    // Rewrite source-typed run-deps so the solver only accepts a
-                    // matching source record (not a same-name binary candidate).
-                    let mut package_record = record.data.package_record.clone();
-                    rewrite_source_depends(&mut package_record.depends, &record.data.sources);
-                    let repodata_record = RepoDataRecord {
-                        package_record,
-                        url: url.clone(),
-                        identifier: DistArchiveIdentifier {
-                            identifier: ArchiveIdentifier {
-                                name: record.package_record().name.as_normalized().to_string(),
-                                version: record.package_record().version.to_string(),
-                                build_string: format!("{}_source", record.package_record().build),
-                            },
-                            archive_type: CondaArchiveType::Conda.into(),
-                        },
-                        channel: Some(source_channel_canonical.clone()),
-                    };
-                    let mut record = SourceRecord::clone(record);
-                    record.build_source = source_metadata.source.build_source().cloned();
-                    url_to_source_package.insert(url, (record, repodata_record));
+                    // First URL per name wins. Variants of the same source
+                    // package share a name; the pin's purpose is to reject
+                    // binary candidates of that name, and any source URL is
+                    // sufficient evidence that the name is a source build.
+                    source_urls_by_name
+                        .entry(record.package_record().name.as_normalized().to_string())
+                        .or_insert_with(|| url.clone());
+                    staged.push((url, record, source_metadata));
                 }
+            }
+            for (url, record, source_metadata) in staged {
+                let mut package_record = record.data.package_record.clone();
+                rewrite_source_depends(
+                    &mut package_record.depends,
+                    &record.data.sources,
+                    &source_urls_by_name,
+                );
+                let repodata_record = RepoDataRecord {
+                    package_record,
+                    url: url.clone(),
+                    identifier: DistArchiveIdentifier {
+                        identifier: ArchiveIdentifier {
+                            name: record.package_record().name.as_normalized().to_string(),
+                            version: record.package_record().version.to_string(),
+                            build_string: format!("{}_source", record.package_record().build),
+                        },
+                        archive_type: CondaArchiveType::Conda.into(),
+                    },
+                    channel: None,
+                };
+                let mut owned_record = SourceRecord::clone(record);
+                owned_record.build_source = source_metadata.source.build_source().cloned();
+                url_to_source_package.insert(url, (owned_record, repodata_record));
             }
 
             // Collect all dev source names for filtering
@@ -488,37 +480,22 @@ mod tests {
     use std::collections::BTreeMap;
 
     use pixi_spec::{PathSourceSpec, SourceLocationSpec};
-    use rattler_conda_types::NamelessMatchSpec;
 
     use super::*;
 
-    #[test]
-    fn source_channel_canonical_name_is_stable() {
-        // The matchspec serializer emits the channel via `channel.name()`,
-        // which for our URL-based channel returns the base URL string.
-        // The solver re-parses that through the default `ChannelConfig`,
-        // and the resulting channel must canonicalize to the same string
-        // as the one we attached.
-        let chan = source_channel();
-        let parsed = rattler_conda_types::Channel::from_str(
-            chan.name(),
-            &rattler_conda_types::ChannelConfig::default_with_root_dir(
-                std::env::current_dir().unwrap(),
-            ),
-        )
-        .unwrap();
-        assert_eq!(parsed.canonical_name(), chan.canonical_name());
+    fn fake_source_url(name: &str) -> Url {
+        Url::parse(&format!("file:///pixi-src/{name}.tar?build=1")).unwrap()
+    }
+
+    fn source_urls(names: &[&str]) -> BTreeMap<String, Url> {
+        names
+            .iter()
+            .map(|n| ((*n).to_string(), fake_source_url(n)))
+            .collect()
     }
 
     #[test]
-    fn with_source_channel_sets_the_synthetic_channel() {
-        let tagged = with_source_channel(NamelessMatchSpec::default());
-        let chan = tagged.channel.expect("channel should be set");
-        assert_eq!(chan.canonical_name(), source_channel().canonical_name());
-    }
-
-    #[test]
-    fn rewrite_depends_pins_only_source_entries() {
+    fn rewrite_depends_pins_url_for_source_entries() {
         let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
         sources.insert(
             "xgcm".to_string(),
@@ -526,16 +503,16 @@ mod tests {
                 path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
             }),
         );
+        let urls = source_urls(&["xgcm"]);
         let mut depends = vec!["xgcm".to_string(), "numpy >=1.0".to_string()];
-        rewrite_source_depends(&mut depends, &sources);
+        rewrite_source_depends(&mut depends, &sources, &urls);
 
         // numpy is unchanged because it's not in the sources map.
         assert_eq!(depends[1], "numpy >=1.0");
 
-        // xgcm gets the synthetic source channel.
+        // xgcm is URL-pinned to the resolved source record.
         let spec = MatchSpec::from_str(&depends[0], ParseMatchSpecOptions::lenient()).unwrap();
-        let chan = spec.channel.expect("xgcm should be channel-tagged");
-        assert_eq!(chan.canonical_name(), source_channel().canonical_name());
+        assert_eq!(spec.url.as_ref(), Some(&fake_source_url("xgcm")));
     }
 
     #[test]
@@ -543,20 +520,23 @@ mod tests {
         // Empty `sources` is the common case; the function must not allocate
         // or mutate anything.
         let sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
+        let urls = source_urls(&["anything"]);
         let original = vec!["numpy >=1.0".to_string(), "scipy".to_string()];
         let mut depends = original.clone();
-        rewrite_source_depends(&mut depends, &sources);
+        rewrite_source_depends(&mut depends, &sources, &urls);
         assert_eq!(depends, original);
     }
 
     /// Regression for https://github.com/prefix-dev/pixi/issues/6161.
     ///
-    /// A source package's source-typed run-dep with its own version
-    /// constraint must keep the constraint after rewriting and also
-    /// carry the source channel pin, so a binary spec with a different
-    /// channel cannot silently satisfy the same name.
+    /// A source-typed run-dep with its own version constraint must keep
+    /// the constraint after rewriting and additionally carry a URL pin
+    /// to the resolved source record. `MatchSpec::matches<RepoDataRecord>`
+    /// checks URL equality, so a binary record from a different channel
+    /// can no longer silently satisfy the same name during transitive
+    /// dependency resolution.
     #[test]
-    fn rewrite_preserves_version_and_pins_channel_for_versioned_source_dep() {
+    fn rewrite_preserves_version_and_pins_url_for_versioned_source_dep() {
         let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
         sources.insert(
             "xgcm".to_string(),
@@ -564,34 +544,34 @@ mod tests {
                 path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
             }),
         );
+        let urls = source_urls(&["xgcm"]);
         let mut depends = vec!["xgcm >=0.9".to_string()];
-        rewrite_source_depends(&mut depends, &sources);
+        rewrite_source_depends(&mut depends, &sources, &urls);
 
         let spec = MatchSpec::from_str(&depends[0], ParseMatchSpecOptions::lenient()).unwrap();
-        let source_chan = spec
-            .channel
-            .as_ref()
-            .expect("channel should be pinned")
-            .canonical_name();
-        assert_eq!(source_chan, source_channel().canonical_name());
+        assert_eq!(spec.url.as_ref(), Some(&fake_source_url("xgcm")));
         assert!(
             spec.version.is_some(),
             "version constraint must survive the rewrite: {}",
             depends[0]
         );
+    }
 
-        // A binary spec for the same name pointing at a different channel
-        // must not have the same canonical name as the source channel —
-        // this is the property that lets the solver surface the
-        // conflict instead of silently picking the binary.
-        let binary = MatchSpec::from_str(
-            "xgcm[version=\"0.9.*\",channel=conda-forge]",
-            ParseMatchSpecOptions::lenient(),
-        )
-        .unwrap();
-        assert_ne!(
-            binary.channel.unwrap().canonical_name(),
-            source_chan,
+    #[test]
+    fn rewrite_leaves_dep_alone_when_url_unknown() {
+        // If the source URL map doesn't have a URL for the name (e.g.
+        // resolution failed upstream), we cannot pin and must leave the
+        // depend untouched rather than emit a nonsense matchspec.
+        let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
+        sources.insert(
+            "missing".to_string(),
+            SourceLocationSpec::Path(PathSourceSpec {
+                path: typed_path::Utf8TypedPathBuf::from("./missing"),
+            }),
         );
+        let urls: BTreeMap<String, Url> = BTreeMap::new();
+        let mut depends = vec!["missing >=1".to_string()];
+        rewrite_source_depends(&mut depends, &sources, &urls);
+        assert_eq!(depends[0], "missing >=1");
     }
 }
