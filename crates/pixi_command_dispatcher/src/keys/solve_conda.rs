@@ -180,6 +180,12 @@ pub enum SolveCondaKeyError {
 
     #[error(transparent)]
     Gateway(Arc<GatewayError>),
+
+    #[error(
+        "package '{package}' is required as both a source build and a binary; \
+         either remove the binary spec or the source-typed dependency"
+    )]
+    SourceBinaryConflict { package: String },
 }
 
 impl From<SolveCondaEnvironmentError> for SolveCondaKeyError {
@@ -190,6 +196,9 @@ impl From<SolveCondaEnvironmentError> for SolveCondaKeyError {
                 SolveCondaKeyError::SpecConversion(Arc::new(e))
             }
             SolveCondaEnvironmentError::Gateway(e) => SolveCondaKeyError::Gateway(Arc::new(e)),
+            SolveCondaEnvironmentError::SourceBinaryConflict { package } => {
+                SolveCondaKeyError::SourceBinaryConflict { package }
+            }
         }
     }
 }

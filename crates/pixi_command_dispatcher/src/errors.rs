@@ -232,6 +232,12 @@ pub enum SolvePixiEnvironmentError {
     #[error("failed to solve the environment")]
     SolveError(#[source] Arc<rattler_solve::SolveError>),
 
+    #[error(
+        "package '{package}' is required as both a source build and a binary; \
+         either remove the binary spec or the source-typed dependency"
+    )]
+    SourceBinaryConflict { package: String },
+
     #[error(transparent)]
     SpecConversionError(Arc<SpecConversionError>),
 
@@ -326,6 +332,9 @@ impl From<SolveCondaEnvironmentError> for SolvePixiEnvironmentError {
             }
             SolveCondaEnvironmentError::Gateway(err) => {
                 SolvePixiEnvironmentError::QueryError(Arc::new(err))
+            }
+            SolveCondaEnvironmentError::SourceBinaryConflict { package } => {
+                SolvePixiEnvironmentError::SourceBinaryConflict { package }
             }
         }
     }

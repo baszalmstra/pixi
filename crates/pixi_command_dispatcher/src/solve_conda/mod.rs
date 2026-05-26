@@ -5,54 +5,16 @@ use std::{
 
 use itertools::Itertools;
 use pixi_record::{PixiRecord, SourceRecord};
-use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceLocationSpec, SourceSpec};
+use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceSpec};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::{
-    ChannelUrl, GenericVirtualPackage, MatchSpec, PackageName, ParseMatchSpecOptions, Platform,
-    RepoDataRecord, Version,
+    ChannelUrl, GenericVirtualPackage, MatchSpec, Platform, RepoDataRecord, Version,
     package::{ArchiveIdentifier, CondaArchiveType, DistArchiveIdentifier},
 };
 use rattler_repodata_gateway::RepoData;
 use rattler_solve::{ChannelPriority, SolveStrategy, SolverImpl};
 use tokio::task::JoinError;
 use url::Url;
-
-/// In-place rewrite: for each depend whose name appears in `sources`,
-/// pin the matchspec's URL to the resolved source record's unique URL
-/// so the solver cannot satisfy that transitive dep with a same-name
-/// binary record from another channel — `MatchSpec::matches<RepoDataRecord>`
-/// enforces URL equality, unlike the channel field which is only filtered
-/// against top-level specs.
-///
-/// Short-circuits when `sources` is empty (the typical source record).
-/// The fast name-only scan rules out the miss path before the full parse.
-fn rewrite_source_depends(
-    depends: &mut [String],
-    sources: &std::collections::BTreeMap<String, SourceLocationSpec>,
-    source_urls_by_name: &std::collections::BTreeMap<String, Url>,
-) {
-    if sources.is_empty() {
-        return;
-    }
-    for dep in depends.iter_mut() {
-        let name = PackageName::normalized_name_from_matchspec_str(dep);
-        if !sources.contains_key(name.as_ref()) {
-            continue;
-        }
-        // Without a resolved source URL we can't pin; leave the dep
-        // alone. The walk in SolvePixiEnvironmentKey is supposed to
-        // resolve every name in `sources`, so this is defensive.
-        let Some(url) = source_urls_by_name.get(name.as_ref()) else {
-            continue;
-        };
-        let Ok(spec) = MatchSpec::from_str(dep, ParseMatchSpecOptions::lenient()) else {
-            continue;
-        };
-        let (name, mut nameless) = spec.into_nameless();
-        nameless.url = Some(url.clone());
-        *dep = MatchSpec::from_nameless(nameless, name).to_string();
-    }
-}
 
 use crate::SourceMetadata;
 
@@ -168,6 +130,24 @@ impl SolveCondaEnvironmentSpec {
                 .dedup()
                 .collect::<HashSet<_>>();
 
+            // A binary spec for a name that also has a source record in this
+            // env is a manifest-level contradiction the solver cannot
+            // resolve: rattler picks one record per name, and that record
+            // can't simultaneously be source-built (because a source dep
+            // requires it) and a binary archive from the requested channel.
+            // Surface the conflict here with the package name; otherwise
+            // the solver silently picks the binary, leaving a lock file the
+            // satisfiability check immediately rejects.
+            if let Some((name, _)) = self
+                .binary_specs
+                .iter_specs()
+                .find(|(n, _)| package_names_from_source.contains(n))
+            {
+                return Err(SolveCondaEnvironmentError::SourceBinaryConflict {
+                    package: name.as_source().to_string(),
+                });
+            }
+
             // Filter all installed packages
             let installed: Vec<rattler_conda_types::RepoDataRecord> = self
                 .installed
@@ -225,49 +205,27 @@ impl SolveCondaEnvironmentSpec {
             let mut url_to_source_package = HashMap::new();
             let mut url_to_dev_source = HashMap::new();
 
-            // Add source records. Two-pass so the depend rewrite can pin
-            // each source-typed run-dep to the unique URL of its resolved
-            // source record (the URL is derived from name+version+build+
-            // manifest, all known in the first pass).
-            let mut source_urls_by_name: std::collections::BTreeMap<String, Url> =
-                std::collections::BTreeMap::new();
-            let mut staged: Vec<(Url, &Arc<SourceRecord>, &SourceMetadata)> = Vec::new();
+            // Add source records
             for source_metadata in &self.source_repodata {
                 for record in &source_metadata.records {
                     let url = unique_url(record);
-                    // First URL per name wins. Variants of the same source
-                    // package share a name; the pin's purpose is to reject
-                    // binary candidates of that name, and any source URL is
-                    // sufficient evidence that the name is a source build.
-                    source_urls_by_name
-                        .entry(record.package_record().name.as_normalized().to_string())
-                        .or_insert_with(|| url.clone());
-                    staged.push((url, record, source_metadata));
-                }
-            }
-            for (url, record, source_metadata) in staged {
-                let mut package_record = record.data.package_record.clone();
-                rewrite_source_depends(
-                    &mut package_record.depends,
-                    &record.data.sources,
-                    &source_urls_by_name,
-                );
-                let repodata_record = RepoDataRecord {
-                    package_record,
-                    url: url.clone(),
-                    identifier: DistArchiveIdentifier {
-                        identifier: ArchiveIdentifier {
-                            name: record.package_record().name.as_normalized().to_string(),
-                            version: record.package_record().version.to_string(),
-                            build_string: format!("{}_source", record.package_record().build),
+                    let repodata_record = RepoDataRecord {
+                        package_record: record.data.package_record.clone(),
+                        url: url.clone(),
+                        identifier: DistArchiveIdentifier {
+                            identifier: ArchiveIdentifier {
+                                name: record.package_record().name.as_normalized().to_string(),
+                                version: record.package_record().version.to_string(),
+                                build_string: format!("{}_source", record.package_record().build),
+                            },
+                            archive_type: CondaArchiveType::Conda.into(),
                         },
-                        archive_type: CondaArchiveType::Conda.into(),
-                    },
-                    channel: None,
-                };
-                let mut owned_record = SourceRecord::clone(record);
-                owned_record.build_source = source_metadata.source.build_source().cloned();
-                url_to_source_package.insert(url, (owned_record, repodata_record));
+                        channel: None,
+                    };
+                    let mut record = SourceRecord::clone(record);
+                    record.build_source = source_metadata.source.build_source().cloned();
+                    url_to_source_package.insert(url, (record, repodata_record));
+                }
             }
 
             // Collect all dev source names for filtering
@@ -473,105 +431,125 @@ pub enum SolveCondaEnvironmentError {
     /// fails.
     #[error(transparent)]
     Gateway(#[from] rattler_repodata_gateway::GatewayError),
+
+    /// The same package name is required as both a source build (via a
+    /// top-level source spec or a source-typed run-dep of another
+    /// source package) and as a binary spec in the same environment.
+    /// Pixi installs one record per name, so these cannot coexist.
+    #[error(
+        "package '{package}' is required as both a source build and a binary; \
+         either remove the binary spec or the source-typed dependency"
+    )]
+    SourceBinaryConflict { package: String },
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use pixi_spec::{PathSourceSpec, SourceLocationSpec};
-
     use super::*;
+    use pixi_record::{FullSourceRecordData, SourceRecord as PixiSourceRecord};
+    use pixi_spec::PathBinarySpec;
+    use rattler_conda_types::{PackageRecord, VersionWithSource};
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
 
-    fn fake_source_url(name: &str) -> Url {
-        Url::parse(&format!("file:///pixi-src/{name}.tar?build=1")).unwrap()
-    }
-
-    fn source_urls(names: &[&str]) -> BTreeMap<String, Url> {
-        names
-            .iter()
-            .map(|n| ((*n).to_string(), fake_source_url(n)))
-            .collect()
-    }
-
-    #[test]
-    fn rewrite_depends_pins_url_for_source_entries() {
-        let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
-        sources.insert(
-            "xgcm".to_string(),
-            SourceLocationSpec::Path(PathSourceSpec {
-                path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
-            }),
-        );
-        let urls = source_urls(&["xgcm"]);
-        let mut depends = vec!["xgcm".to_string(), "numpy >=1.0".to_string()];
-        rewrite_source_depends(&mut depends, &sources, &urls);
-
-        // numpy is unchanged because it's not in the sources map.
-        assert_eq!(depends[1], "numpy >=1.0");
-
-        // xgcm is URL-pinned to the resolved source record.
-        let spec = MatchSpec::from_str(&depends[0], ParseMatchSpecOptions::lenient()).unwrap();
-        assert_eq!(spec.url.as_ref(), Some(&fake_source_url("xgcm")));
-    }
-
-    #[test]
-    fn rewrite_skips_when_no_sources() {
-        // Empty `sources` is the common case; the function must not allocate
-        // or mutate anything.
-        let sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
-        let urls = source_urls(&["anything"]);
-        let original = vec!["numpy >=1.0".to_string(), "scipy".to_string()];
-        let mut depends = original.clone();
-        rewrite_source_depends(&mut depends, &sources, &urls);
-        assert_eq!(depends, original);
+    fn source_metadata_with(name: &str, build: &str) -> Arc<SourceMetadata> {
+        use pixi_record::{PinnedPathSpec, PinnedSourceSpec};
+        let pinned_source = PinnedSourceSpec::Path(PinnedPathSpec {
+            path: typed_path::Utf8TypedPathBuf::from(format!("/tmp/{name}")),
+        });
+        let pkg = PackageRecord {
+            subdir: "linux-64".to_string(),
+            ..PackageRecord::new(
+                rattler_conda_types::PackageName::new_unchecked(name),
+                VersionWithSource::from_str("1.0.0").unwrap(),
+                build.to_string(),
+            )
+        };
+        let record: PixiSourceRecord = PixiSourceRecord {
+            data: FullSourceRecordData {
+                package_record: pkg,
+                sources: BTreeMap::new(),
+            },
+            manifest_source: pinned_source.clone(),
+            build_source: None,
+            variants: BTreeMap::new(),
+            identifier_hash: None,
+            build_packages: Vec::new(),
+            host_packages: Vec::new(),
+        };
+        Arc::new(SourceMetadata {
+            source: crate::build::PinnedSourceCodeLocation::new(pinned_source, None),
+            records: vec![Arc::new(record)],
+        })
     }
 
     /// Regression for https://github.com/prefix-dev/pixi/issues/6161.
     ///
-    /// A source-typed run-dep with its own version constraint must keep
-    /// the constraint after rewriting and additionally carry a URL pin
-    /// to the resolved source record. `MatchSpec::matches<RepoDataRecord>`
-    /// checks URL equality, so a binary record from a different channel
-    /// can no longer silently satisfy the same name during transitive
-    /// dependency resolution.
-    #[test]
-    fn rewrite_preserves_version_and_pins_url_for_versioned_source_dep() {
-        let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
-        sources.insert(
-            "xgcm".to_string(),
-            SourceLocationSpec::Path(PathSourceSpec {
-                path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
-            }),
-        );
-        let urls = source_urls(&["xgcm"]);
-        let mut depends = vec!["xgcm >=0.9".to_string()];
-        rewrite_source_depends(&mut depends, &sources, &urls);
+    /// When the same name appears both in the source repodata and in
+    /// binary_specs, the solve must surface the conflict explicitly
+    /// instead of silently picking the binary (which then makes the
+    /// satisfiability check reject the freshly produced lock file).
+    #[tokio::test]
+    async fn source_and_binary_for_same_name_is_rejected() {
+        let spec = SolveCondaEnvironmentSpec {
+            source_repodata: vec![source_metadata_with("xgcm", "0")],
+            binary_specs: DependencyMap::from_iter([(
+                rattler_conda_types::PackageName::new_unchecked("xgcm"),
+                BinarySpec::Path(PathBinarySpec {
+                    path: typed_path::Utf8TypedPathBuf::from("/tmp/xgcm.conda"),
+                }),
+            )]),
+            ..SolveCondaEnvironmentSpec::default()
+        };
 
-        let spec = MatchSpec::from_str(&depends[0], ParseMatchSpecOptions::lenient()).unwrap();
-        assert_eq!(spec.url.as_ref(), Some(&fake_source_url("xgcm")));
-        assert!(
-            spec.version.is_some(),
-            "version constraint must survive the rewrite: {}",
-            depends[0]
-        );
+        let config = Arc::new(rattler_conda_types::ChannelConfig::default_with_root_dir(
+            std::path::PathBuf::from("/"),
+        ));
+        let err = spec
+            .solve_on_blocking_pool(config)
+            .await
+            .expect_err("conflict must error");
+        match err {
+            SolveCondaBlockingError::Solve(SolveCondaEnvironmentError::SourceBinaryConflict {
+                package,
+            }) => assert_eq!(package, "xgcm"),
+            other => panic!("expected SourceBinaryConflict, got {other:?}"),
+        }
     }
 
-    #[test]
-    fn rewrite_leaves_dep_alone_when_url_unknown() {
-        // If the source URL map doesn't have a URL for the name (e.g.
-        // resolution failed upstream), we cannot pin and must leave the
-        // depend untouched rather than emit a nonsense matchspec.
-        let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
-        sources.insert(
-            "missing".to_string(),
-            SourceLocationSpec::Path(PathSourceSpec {
-                path: typed_path::Utf8TypedPathBuf::from("./missing"),
-            }),
-        );
-        let urls: BTreeMap<String, Url> = BTreeMap::new();
-        let mut depends = vec!["missing >=1".to_string()];
-        rewrite_source_depends(&mut depends, &sources, &urls);
-        assert_eq!(depends[0], "missing >=1");
+    /// The conflict check must fire even when the source package was
+    /// resolved with multiple variants (same name, different builds →
+    /// different `unique_url`s). The conflict is on the name, not the URL.
+    #[tokio::test]
+    async fn conflict_check_handles_multi_variant_sources() {
+        // Two variants of the same source package.
+        let mut metas = vec![];
+        for build in ["py311", "py312"] {
+            metas.push(source_metadata_with("xgcm", build));
+        }
+        let spec = SolveCondaEnvironmentSpec {
+            source_repodata: metas,
+            binary_specs: DependencyMap::from_iter([(
+                rattler_conda_types::PackageName::new_unchecked("xgcm"),
+                BinarySpec::Path(PathBinarySpec {
+                    path: typed_path::Utf8TypedPathBuf::from("/tmp/xgcm.conda"),
+                }),
+            )]),
+            ..SolveCondaEnvironmentSpec::default()
+        };
+
+        let config = Arc::new(rattler_conda_types::ChannelConfig::default_with_root_dir(
+            std::path::PathBuf::from("/"),
+        ));
+        let err = spec
+            .solve_on_blocking_pool(config)
+            .await
+            .expect_err("conflict must still fire for multi-variant source");
+        assert!(matches!(
+            err,
+            SolveCondaBlockingError::Solve(SolveCondaEnvironmentError::SourceBinaryConflict {
+                ..
+            })
+        ));
     }
 }

@@ -386,6 +386,9 @@ async fn compute_inner(
                 SolvePixiEnvironmentError::SpecConversionError(a)
             }
             SolveCondaKeyError::Gateway(a) => SolvePixiEnvironmentError::QueryError(a),
+            SolveCondaKeyError::SourceBinaryConflict { package } => {
+                SolvePixiEnvironmentError::SourceBinaryConflict { package }
+            }
         })?;
     tracing::debug!("top-level solve completed in {:?}", started.elapsed());
 
