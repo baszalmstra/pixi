@@ -47,28 +47,31 @@ fn with_source_channel(mut spec: NamelessMatchSpec) -> NamelessMatchSpec {
     spec
 }
 
-/// For each depend whose name appears in `sources`, re-emit it with the
-/// synthetic source channel pinned so that only a record from that
-/// channel can satisfy it. Uses the fast name-only scan first to skip
-/// the full matchspec parse for the common case (no source override).
+/// In-place rewrite: for each depend whose name appears in `sources`,
+/// replace it with a matchspec pinned to the synthetic source channel
+/// so only a record from that channel can satisfy it. Short-circuits
+/// when `sources` is empty (the typical case — most source records
+/// declare no source-typed run-deps) so the entire scan is skipped.
+/// On each entry the fast name-only scan rules out the miss path
+/// without ever invoking the full matchspec parser.
 fn rewrite_source_depends(
-    depends: &[String],
+    depends: &mut [String],
     sources: &std::collections::BTreeMap<String, SourceLocationSpec>,
-) -> Vec<String> {
-    depends
-        .iter()
-        .map(|dep| {
-            let name = PackageName::normalized_name_from_matchspec_str(dep);
-            if !sources.contains_key(name.as_ref()) {
-                return dep.clone();
-            }
-            let Ok(spec) = MatchSpec::from_str(dep, ParseMatchSpecOptions::lenient()) else {
-                return dep.clone();
-            };
-            let (name, nameless) = spec.into_nameless();
-            MatchSpec::from_nameless(with_source_channel(nameless), name).to_string()
-        })
-        .collect()
+) {
+    if sources.is_empty() {
+        return;
+    }
+    for dep in depends.iter_mut() {
+        let name = PackageName::normalized_name_from_matchspec_str(dep);
+        if !sources.contains_key(name.as_ref()) {
+            continue;
+        }
+        let Ok(spec) = MatchSpec::from_str(dep, ParseMatchSpecOptions::lenient()) else {
+            continue;
+        };
+        let (name, nameless) = spec.into_nameless();
+        *dep = MatchSpec::from_nameless(with_source_channel(nameless), name).to_string();
+    }
 }
 
 use crate::SourceMetadata;
@@ -255,8 +258,7 @@ impl SolveCondaEnvironmentSpec {
                     // Rewrite source-typed run-deps so the solver only accepts a
                     // matching source record (not a same-name binary candidate).
                     let mut package_record = record.data.package_record.clone();
-                    package_record.depends =
-                        rewrite_source_depends(&package_record.depends, &record.data.sources);
+                    rewrite_source_depends(&mut package_record.depends, &record.data.sources);
                     let repodata_record = RepoDataRecord {
                         package_record,
                         url: url.clone(),
@@ -524,16 +526,27 @@ mod tests {
                 path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
             }),
         );
-        let depends = vec!["xgcm".to_string(), "numpy >=1.0".to_string()];
-        let rewritten = rewrite_source_depends(&depends, &sources);
+        let mut depends = vec!["xgcm".to_string(), "numpy >=1.0".to_string()];
+        rewrite_source_depends(&mut depends, &sources);
 
         // numpy is unchanged because it's not in the sources map.
-        assert_eq!(rewritten[1], "numpy >=1.0");
+        assert_eq!(depends[1], "numpy >=1.0");
 
         // xgcm gets the synthetic source channel.
-        let spec = MatchSpec::from_str(&rewritten[0], ParseMatchSpecOptions::lenient()).unwrap();
+        let spec = MatchSpec::from_str(&depends[0], ParseMatchSpecOptions::lenient()).unwrap();
         let chan = spec.channel.expect("xgcm should be channel-tagged");
         assert_eq!(chan.canonical_name(), source_channel().canonical_name());
+    }
+
+    #[test]
+    fn rewrite_skips_when_no_sources() {
+        // Empty `sources` is the common case; the function must not allocate
+        // or mutate anything.
+        let sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
+        let original = vec!["numpy >=1.0".to_string(), "scipy".to_string()];
+        let mut depends = original.clone();
+        rewrite_source_depends(&mut depends, &sources);
+        assert_eq!(depends, original);
     }
 
     /// Regression for https://github.com/prefix-dev/pixi/issues/6161.
@@ -551,10 +564,10 @@ mod tests {
                 path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
             }),
         );
-        let depends = vec!["xgcm >=0.9".to_string()];
-        let rewritten = rewrite_source_depends(&depends, &sources);
+        let mut depends = vec!["xgcm >=0.9".to_string()];
+        rewrite_source_depends(&mut depends, &sources);
 
-        let spec = MatchSpec::from_str(&rewritten[0], ParseMatchSpecOptions::lenient()).unwrap();
+        let spec = MatchSpec::from_str(&depends[0], ParseMatchSpecOptions::lenient()).unwrap();
         let source_chan = spec
             .channel
             .as_ref()
@@ -564,7 +577,7 @@ mod tests {
         assert!(
             spec.version.is_some(),
             "version constraint must survive the rewrite: {}",
-            rewritten[0]
+            depends[0]
         );
 
         // A binary spec for the same name pointing at a different channel
