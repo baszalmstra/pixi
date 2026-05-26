@@ -6,8 +6,8 @@
 # source this lets you install any R package hosted on GitHub.
 
 [package.build.source]
-git = "https://github.com/r-lib/lifecycle.git"
-tag = "v1.0.4"
+git = "https://github.com/yihui/highr.git"
+tag = "v0.9"
 
 [package.build.backend]
 name = "pixi-build-r"
@@ -18,8 +18,8 @@ channels = [
 ]
 
 [package]
-name = "r-lifecycle"
-version = "1.0.4"
+name = "r-highr"
+version = "0.9"
 
 [workspace]
 channels = ["https://prefix.dev/conda-forge"]
@@ -28,8 +28,8 @@ preview = ["pixi-build"]
 
 [dependencies]
 r-base = ">=4.3,<5"
-r-lifecycle = { path = "." }
+r-highr = { path = "." }
 
 [tasks]
 # Smoke-test that the package built from GitHub is importable.
-check = "Rscript -e 'library(lifecycle); cat(as.character(packageVersion(\"lifecycle\")), \"\\n\")'"
+check = "Rscript -e 'library(highr); cat(as.character(packageVersion(\"highr\")), \"\\n\")'"
