@@ -1,0 +1,35 @@
+# Building an R package straight from a GitHub repository.
+#
+# The `pixi-build-r` backend parses the upstream `DESCRIPTION` file,
+# maps R packages to their conda-forge equivalents (e.g. `cli` -> `r-cli`)
+# and builds a conda package via `R CMD INSTALL`. Combined with a git
+# source this lets you install any R package hosted on GitHub.
+
+[package.build.source]
+git = "https://github.com/r-lib/lifecycle.git"
+tag = "v1.0.4"
+
+[package.build.backend]
+name = "pixi-build-r"
+version = "*"
+channels = [
+  "https://prefix.dev/pixi-build-backends",
+  "https://prefix.dev/conda-forge",
+]
+
+[package]
+name = "r-lifecycle"
+version = "1.0.4"
+
+[workspace]
+channels = ["https://prefix.dev/conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
+preview = ["pixi-build"]
+
+[dependencies]
+r-base = ">=4.3,<5"
+r-lifecycle = { path = "." }
+
+[tasks]
+# Smoke-test that the package built from GitHub is importable.
+check = "Rscript -e 'library(lifecycle); cat(as.character(packageVersion(\"lifecycle\")), \"\\n\")'"
