@@ -2706,3 +2706,105 @@ host-lib = "*"
     version: 0.4.2
     "###);
 }
+
+/// Regression for https://github.com/prefix-dev/pixi/issues/6161.
+///
+/// When a source package's `[package.run-dependencies]` declares a
+/// source-typed dep on a package that is also pinned as a binary in a
+/// feature's `[dependencies]` (with an explicit channel), `pixi lock`
+/// previously produced a lock-file the satisfiability check immediately
+/// rejected with "required source package '...' is locked as binary".
+///
+/// After the fix the source dep is pinned to a synthetic source channel
+/// in the solver inputs, so the conflict surfaces as a solver error
+/// instead of being papered over.
+#[tokio::test]
+async fn test_source_runtime_dep_conflicts_with_binary_pin() {
+    setup_tracing();
+
+    // The mock channel only carries the binary `dep-x`. The conflict is
+    // between this binary candidate (selected by the feature's binary
+    // spec) and the source `dep-x` declared as a run-dep of `my-package`.
+    let mut package_database = MockRepoData::default();
+    package_database.add_package(Package::build("dep-x", "0.9.0").finish());
+    let channel = package_database.into_channel().await.unwrap();
+
+    let backend_override = BackendOverride::from_memory(PassthroughBackend::instantiator());
+    let pixi = PixiControl::new()
+        .unwrap()
+        .with_backend_override(backend_override);
+
+    // Source package my-package declares a source run-dep on dep-x.
+    let my_pkg_dir = pixi.workspace_path().join("my-package");
+    fs::create_dir_all(&my_pkg_dir).unwrap();
+    fs::write(
+        my_pkg_dir.join("pixi.toml"),
+        r#"
+[package]
+name = "my-package"
+version = "1.0.0"
+
+[package.build]
+backend = { name = "passthrough", version = "*" }
+
+[package.run-dependencies]
+dep-x = { path = "../dep-x" }
+"#,
+    )
+    .unwrap();
+
+    // Source package dep-x at a version that does not match the
+    // feature's binary pin.
+    let dep_x_dir = pixi.workspace_path().join("dep-x");
+    fs::create_dir_all(&dep_x_dir).unwrap();
+    fs::write(
+        dep_x_dir.join("pixi.toml"),
+        r#"
+[package]
+name = "dep-x"
+version = "0.10.0"
+
+[package.build]
+backend = { name = "passthrough", version = "*" }
+"#,
+    )
+    .unwrap();
+
+    // Workspace pulls in my-package as a path source. The conflict
+    // feature additionally pins dep-x as a binary from the mock channel.
+    let manifest = format!(
+        r#"
+[workspace]
+channels = ["{channel}"]
+platforms = ["{platform}"]
+preview = ["pixi-build"]
+
+[dependencies]
+my-package = {{ path = "./my-package" }}
+
+[feature.conflict.dependencies]
+dep-x = {{ version = "0.9.*", channel = "{channel}" }}
+
+[environments]
+conflict = {{ features = ["conflict"] }}
+"#,
+        channel = channel.url(),
+        platform = Platform::current(),
+    );
+    fs::write(pixi.manifest_path(), manifest).unwrap();
+
+    let err = pixi.update_lock_file().await.expect_err(
+        "lock must fail: dep-x is required as a source dep by my-package and as a \
+         binary by the conflict feature; both cannot be satisfied at once",
+    );
+
+    // The error must mention dep-x — whatever layer raises it (solver
+    // unsat with two channel pins, or satisfiability rejecting a binary
+    // record for a name expected as source), the package name is the
+    // common signal the user needs to diagnose the conflict.
+    let rendered = format_diagnostic(err.as_ref());
+    assert!(
+        rendered.contains("dep-x"),
+        "error should mention dep-x; got:\n{rendered}"
+    );
+}
