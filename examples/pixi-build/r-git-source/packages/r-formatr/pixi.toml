@@ -1,0 +1,24 @@
+# r-formatr: built from https://github.com/yihui/formatR at tag v1.14.
+# `pixi-build-r` reads the upstream DESCRIPTION file for metadata and
+# dependencies; nothing R-specific needs to be repeated here.
+
+[package]
+name = "r-formatr"
+version = "1.14"
+
+[package.build.source]
+git = "https://github.com/yihui/formatR.git"
+tag = "v1.14"
+
+[package.build.backend]
+name = "pixi-build-r"
+version = "*"
+channels = [
+  "https://prefix.dev/pixi-build-backends",
+  "https://prefix.dev/conda-forge",
+]
+
+# Pin r-base at build-time so the resulting conda package's runtime r-base
+# pin matches the version selected by the workspace (see ../../pixi.toml).
+[package.host-dependencies]
+r-base = ">=4.5,<4.6"

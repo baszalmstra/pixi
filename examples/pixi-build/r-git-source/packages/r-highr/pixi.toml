@@ -1,0 +1,24 @@
+# r-highr: built from https://github.com/yihui/highr at tag v0.9.
+# `pixi-build-r` reads the upstream DESCRIPTION file for metadata and
+# dependencies; nothing R-specific needs to be repeated here.
+
+[package]
+name = "r-highr"
+version = "0.9"
+
+[package.build.source]
+git = "https://github.com/yihui/highr.git"
+tag = "v0.9"
+
+[package.build.backend]
+name = "pixi-build-r"
+version = "*"
+channels = [
+  "https://prefix.dev/pixi-build-backends",
+  "https://prefix.dev/conda-forge",
+]
+
+# Pin r-base at build-time so the resulting conda package's runtime r-base
+# pin matches the version selected by the workspace (see ../../pixi.toml).
+[package.host-dependencies]
+r-base = ">=4.5,<4.6"
