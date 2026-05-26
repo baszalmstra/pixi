@@ -8,7 +8,7 @@ use pixi_record::{PixiRecord, SourceRecord};
 use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceLocationSpec, SourceSpec};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::{
-    Channel, ChannelUrl, GenericVirtualPackage, MatchSpec, NamelessMatchSpec,
+    Channel, ChannelUrl, GenericVirtualPackage, MatchSpec, NamelessMatchSpec, PackageName,
     ParseMatchSpecOptions, Platform, RepoDataRecord, Version,
     package::{ArchiveIdentifier, CondaArchiveType, DistArchiveIdentifier},
 };
@@ -22,21 +22,21 @@ use url::Url;
 /// `SourceSpec`, so a binary spec carrying a real channel cannot be
 /// silently satisfied by a record that was meant to be a source build —
 /// the solver surfaces the mismatch as an unsatisfiable conflict.
-const SOURCE_CHANNEL_NAME: &str = "__pixi_source__";
+///
+/// The `.invalid` TLD (RFC 2606) guarantees no real channel can collide.
+const SOURCE_CHANNEL_URL: &str = "https://pixi-source.invalid/";
 
 /// Synthetic channel object used to tag source records and source-spec
-/// matchspecs. The channel resolves through the rattler default
-/// `ChannelConfig`, so the canonical name we set on records here matches
-/// what the solver computes when it re-parses a depend string.
+/// matchspecs. Built once from a URL; round-tripping through a depend
+/// string and rattler's default `ChannelConfig` lands on the same
+/// canonical name, so the solver matches our records to our matchspecs.
 fn source_channel() -> std::sync::Arc<Channel> {
     use std::sync::OnceLock;
     static SOURCE_CHANNEL: OnceLock<std::sync::Arc<Channel>> = OnceLock::new();
     SOURCE_CHANNEL
         .get_or_init(|| {
-            let config = rattler_conda_types::ChannelConfig::default_with_root_dir(
-                std::path::PathBuf::from("/"),
-            );
-            std::sync::Arc::new(Channel::from_name(SOURCE_CHANNEL_NAME, &config))
+            let url = Url::parse(SOURCE_CHANNEL_URL).expect("source channel URL is valid");
+            std::sync::Arc::new(Channel::from_url(url))
         })
         .clone()
 }
@@ -49,7 +49,8 @@ fn with_source_channel(mut spec: NamelessMatchSpec) -> NamelessMatchSpec {
 
 /// For each depend whose name appears in `sources`, re-emit it with the
 /// synthetic source channel pinned so that only a record from that
-/// channel can satisfy it.
+/// channel can satisfy it. Uses the fast name-only scan first to skip
+/// the full matchspec parse for the common case (no source override).
 fn rewrite_source_depends(
     depends: &[String],
     sources: &std::collections::BTreeMap<String, SourceLocationSpec>,
@@ -57,16 +58,13 @@ fn rewrite_source_depends(
     depends
         .iter()
         .map(|dep| {
+            let name = PackageName::normalized_name_from_matchspec_str(dep);
+            if !sources.contains_key(name.as_ref()) {
+                return dep.clone();
+            }
             let Ok(spec) = MatchSpec::from_str(dep, ParseMatchSpecOptions::lenient()) else {
                 return dep.clone();
             };
-            let needs_channel = spec
-                .name
-                .as_exact()
-                .is_some_and(|n| sources.contains_key(n.as_normalized()));
-            if !needs_channel {
-                return dep.clone();
-            }
             let (name, nameless) = spec.into_nameless();
             MatchSpec::from_nameless(with_source_channel(nameless), name).to_string()
         })
@@ -494,12 +492,14 @@ mod tests {
 
     #[test]
     fn source_channel_canonical_name_is_stable() {
-        // The canonical name has to survive a stringify → re-parse round trip
-        // using the default ChannelConfig that rattler-solve applies to depend
-        // strings.
+        // The matchspec serializer emits the channel via `channel.name()`,
+        // which for our URL-based channel returns the base URL string.
+        // The solver re-parses that through the default `ChannelConfig`,
+        // and the resulting channel must canonicalize to the same string
+        // as the one we attached.
         let chan = source_channel();
         let parsed = rattler_conda_types::Channel::from_str(
-            chan.name.as_deref().unwrap(),
+            chan.name(),
             &rattler_conda_types::ChannelConfig::default_with_root_dir(
                 std::env::current_dir().unwrap(),
             ),
@@ -534,5 +534,51 @@ mod tests {
         let spec = MatchSpec::from_str(&rewritten[0], ParseMatchSpecOptions::lenient()).unwrap();
         let chan = spec.channel.expect("xgcm should be channel-tagged");
         assert_eq!(chan.canonical_name(), source_channel().canonical_name());
+    }
+
+    /// Regression for https://github.com/prefix-dev/pixi/issues/6161.
+    ///
+    /// A source package's source-typed run-dep with its own version
+    /// constraint must keep the constraint after rewriting and also
+    /// carry the source channel pin, so a binary spec with a different
+    /// channel cannot silently satisfy the same name.
+    #[test]
+    fn rewrite_preserves_version_and_pins_channel_for_versioned_source_dep() {
+        let mut sources: BTreeMap<String, SourceLocationSpec> = BTreeMap::new();
+        sources.insert(
+            "xgcm".to_string(),
+            SourceLocationSpec::Path(PathSourceSpec {
+                path: typed_path::Utf8TypedPathBuf::from("./xgcm"),
+            }),
+        );
+        let depends = vec!["xgcm >=0.9".to_string()];
+        let rewritten = rewrite_source_depends(&depends, &sources);
+
+        let spec = MatchSpec::from_str(&rewritten[0], ParseMatchSpecOptions::lenient()).unwrap();
+        let source_chan = spec
+            .channel
+            .as_ref()
+            .expect("channel should be pinned")
+            .canonical_name();
+        assert_eq!(source_chan, source_channel().canonical_name());
+        assert!(
+            spec.version.is_some(),
+            "version constraint must survive the rewrite: {}",
+            rewritten[0]
+        );
+
+        // A binary spec for the same name pointing at a different channel
+        // must not have the same canonical name as the source channel —
+        // this is the property that lets the solver surface the
+        // conflict instead of silently picking the binary.
+        let binary = MatchSpec::from_str(
+            "xgcm[version=\"0.9.*\",channel=conda-forge]",
+            ParseMatchSpecOptions::lenient(),
+        )
+        .unwrap();
+        assert_ne!(
+            binary.channel.unwrap().canonical_name(),
+            source_chan,
+        );
     }
 }
