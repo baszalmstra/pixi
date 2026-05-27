@@ -318,7 +318,7 @@ pub fn into_pixi_reference(git_reference: uv_git_types::GitReference) -> PixiRef
 pub fn into_pinned_git_spec(
     dist: GitSourceDist,
     original_reference: Option<PixiReference>,
-    original_lfs: Option<bool>,
+    original_lfs: Option<pixi_git::GitLfs>,
 ) -> PinnedGitSpec {
     // Necessary to convert between our gitsha and uv gitsha.
     let git_sha = PixiGitSha::from_str(

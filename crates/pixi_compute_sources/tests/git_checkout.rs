@@ -8,6 +8,7 @@ mod common;
 
 use common::{EngineConfig, LifecycleReporter, build_test_engine};
 use pixi_compute_sources::GitSourceCheckoutExt;
+use pixi_git::GitLfs;
 use pixi_record::PinnedSourceSpec;
 use pixi_spec::{GitSpec, Subdirectory};
 use pixi_test_utils::GitRepoFixture;
@@ -84,7 +85,7 @@ async fn pin_and_checkout_git_with_lfs() {
         git: repo.base_url.clone(),
         rev: None,
         subdirectory: Subdirectory::default(),
-        lfs: Some(true),
+        lfs: Some(GitLfs::Enabled),
     };
 
     let checkout = engine
@@ -97,7 +98,7 @@ async fn pin_and_checkout_git_with_lfs() {
     // re-validate LFS objects (`db.contains_lfs_artifacts` in `GitSource`).
     match checkout.pinned {
         PinnedSourceSpec::Git(pinned) => {
-            assert_eq!(pinned.source.lfs, Some(true));
+            assert_eq!(pinned.source.lfs, Some(GitLfs::Enabled));
         }
         other => panic!("expected git pinned spec, got {other:?}"),
     }

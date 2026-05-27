@@ -17,7 +17,7 @@ use std::{
 use url::Url;
 
 use crate::{
-    GitError,
+    GitError, GitLfs,
     sha::{GitOid, GitSha},
 };
 
@@ -45,19 +45,20 @@ pub static GIT: LazyLock<Result<PathBuf, GitBinaryError>> = LazyLock::new(|| {
 });
 
 /// Cached `git lfs` invoker. Probes `git lfs version` once; on success
-/// callers get a `GitLfs` whose [`GitLfs::cmd`] returns a fresh `Command`
-/// pre-set to `git lfs ...` with the terminal prompt disabled. Mirrors uv's
-/// `GIT_LFS` static.
-pub static GIT_LFS: LazyLock<Result<GitLfs, GitBinaryError>> = LazyLock::new(GitLfs::probe);
+/// callers get a [`GitLfsBin`] whose [`GitLfsBin::cmd`] returns a fresh
+/// `Command` pre-set to `git lfs ...` with the terminal prompt disabled.
+/// Mirrors uv's `GIT_LFS` static.
+pub static GIT_LFS: LazyLock<Result<GitLfsBin, GitBinaryError>> = LazyLock::new(GitLfsBin::probe);
 
 /// Pre-configured `git lfs` command builder. Kept opaque so the git path is
-/// resolved exactly once.
+/// resolved exactly once. Distinct from the policy enum [`crate::GitLfs`],
+/// which says *whether* to fetch LFS; this type says *how* to invoke it.
 #[derive(Debug, Clone)]
-pub struct GitLfs {
+pub struct GitLfsBin {
     git: PathBuf,
 }
 
-impl GitLfs {
+impl GitLfsBin {
     fn probe() -> Result<Self, GitBinaryError> {
         let git = GIT.as_ref().map_err(|e| e.clone())?.clone();
         let ok = Command::new(&git)
@@ -82,9 +83,9 @@ impl GitLfs {
 }
 
 /// Value for `GIT_LFS_SKIP_SMUDGE`, or `None` to leave the var unset.
-/// `Some(true)` → "0" (run smudge), `Some(false)` → "1" (skip smudge).
-fn lfs_skip_smudge_env(lfs: Option<bool>) -> Option<&'static str> {
-    lfs.map(|on| if on { "0" } else { "1" })
+/// `Enabled` → "0" (run smudge), `Disabled` → "1" (skip smudge).
+fn lfs_skip_smudge_env(lfs: Option<GitLfs>) -> Option<&'static str> {
+    lfs.map(|policy| if policy.is_enabled() { "0" } else { "1" })
 }
 
 /// Strategy when fetching refspecs for a [`GitReference`]
@@ -268,7 +269,7 @@ impl GitRemote {
         reference: &GitReference,
         locked_rev: Option<GitOid>,
         client: &LazyClient,
-        lfs: Option<bool>,
+        lfs: Option<GitLfs>,
     ) -> Result<(GitDatabase, GitOid), GitError> {
         let locked_ref = locked_rev.map(|oid| GitReference::FullCommit(oid.to_string()));
         let reference = locked_ref.as_ref().unwrap_or(reference);
@@ -281,7 +282,7 @@ impl GitRemote {
             };
 
             if let Some(rev) = resolved_commit_hash {
-                let ready = (lfs == Some(true))
+                let ready = (lfs == Some(GitLfs::Enabled))
                     .then(|| maybe_fetch_lfs(&mut db.repo, self.url.as_str(), rev))
                     .flatten();
                 return Ok((db.with_lfs_ready(ready), rev));
@@ -301,7 +302,7 @@ impl GitRemote {
             None => reference.resolve(&repo)?,
         };
 
-        let ready = (lfs == Some(true))
+        let ready = (lfs == Some(GitLfs::Enabled))
             .then(|| maybe_fetch_lfs(&mut repo, self.url.as_str(), rev))
             .flatten();
 
@@ -365,7 +366,7 @@ impl GitDatabase {
         &self,
         rev: GitOid,
         destination: &Path,
-        lfs: Option<bool>,
+        lfs: Option<GitLfs>,
     ) -> Result<GitCheckout, GitError> {
         // If the existing checkout exists, and it is fresh, use it.
         // A non-fresh checkout can happen if the checkout operation was
@@ -510,7 +511,7 @@ impl GitCheckout {
         into: &Path,
         database: &GitDatabase,
         revision: GitOid,
-        lfs: Option<bool>,
+        lfs: Option<GitLfs>,
     ) -> Result<Self, GitError> {
         tracing::debug!("cloning into {:?} from {:?}", database.repo.path, into);
         let dirname = into.parent().expect("into path must have a parent");
@@ -564,7 +565,7 @@ impl GitCheckout {
     /// *doesn't* exist, and then once we're done we create the file.
     ///
     /// [`.ok`]: CHECKOUT_READY_LOCK
-    fn reset(&self, lfs: Option<bool>) -> Result<(), GitError> {
+    fn reset(&self, lfs: Option<GitLfs>) -> Result<(), GitError> {
         let ok_file = self.repo.path.join(CHECKOUT_READY_LOCK);
         let _ = fs_err::remove_file(&ok_file);
 
@@ -769,7 +770,7 @@ fn maybe_fetch_lfs(repo: &mut GitRepository, url: &str, revision: GitOid) -> Opt
 /// `Ok` is `true` if fsck passes. `GIT_LFS_SKIP_SMUDGE` is removed from the
 /// env so an inherited value can't suppress smudge mid-fetch.
 fn fetch_lfs(
-    lfs: &GitLfs,
+    lfs: &GitLfsBin,
     repo: &mut GitRepository,
     url: &str,
     revision: GitOid,

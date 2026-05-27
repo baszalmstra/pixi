@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use pixi_git::git;
+use pixi_git::{GitLfs, git};
 use serde::{Serialize, Serializer};
 use thiserror::Error;
 use url::Url;
@@ -23,10 +23,10 @@ pub struct GitSpec {
     pub subdirectory: Subdirectory,
 
     /// Whether to fetch git LFS objects for this checkout. `None` defers to
-    /// the `PIXI_GIT_LFS` env var; `Some(true)` / `Some(false)` is an
-    /// explicit override.
+    /// [`GitLfs::from_env`]; `Some(_)` is an explicit override. Serialised
+    /// as a plain bool to match `lfs = true/false` in TOML.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lfs: Option<bool>,
+    pub lfs: Option<GitLfs>,
 }
 
 impl Display for GitSpec {
@@ -38,7 +38,7 @@ impl Display for GitSpec {
         if !self.subdirectory.is_empty() {
             write!(f, " in {}", self.subdirectory)?;
         }
-        if self.lfs == Some(true) {
+        if self.lfs == Some(GitLfs::Enabled) {
             write!(f, " (lfs)")?;
         }
         Ok(())

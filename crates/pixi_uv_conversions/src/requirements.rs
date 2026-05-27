@@ -55,10 +55,10 @@ fn create_uv_url(
 
 /// Map a pixi-side LFS preference (tri-state) to uv's binary enum. uv only
 /// distinguishes "fetch LFS" from "don't"; we treat `None` (env-default) the
-/// same as `Some(false)`, since uv does its own git checkout outside of
+/// same as `Some(Disabled)`, since uv does its own git checkout outside of
 /// `pixi_git`'s `PIXI_GIT_LFS` plumbing.
-pub fn to_uv_git_lfs(lfs: Option<bool>) -> uv_git_types::GitLfs {
-    if lfs == Some(true) {
+pub fn to_uv_git_lfs(lfs: Option<pixi_git::GitLfs>) -> uv_git_types::GitLfs {
+    if lfs == Some(pixi_git::GitLfs::Enabled) {
         uv_git_types::GitLfs::Enabled
     } else {
         uv_git_types::GitLfs::Disabled

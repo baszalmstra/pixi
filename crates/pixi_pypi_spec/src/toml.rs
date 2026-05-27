@@ -163,7 +163,7 @@ impl RawPyPiRequirement {
                                 .map(pixi_spec::Subdirectory::try_from)
                                 .transpose()?
                                 .unwrap_or_default(),
-                            lfs: self.lfs,
+                            lfs: self.lfs.map(pixi_git::GitLfs::from),
                         },
                     },
                     self.extras,
@@ -388,7 +388,7 @@ impl From<PixiPypiSpec> for toml_edit::Value {
                 if let Some(lfs) = lfs {
                     table.insert(
                         "lfs",
-                        toml_edit::Value::Boolean(toml_edit::Formatted::new(*lfs)),
+                        toml_edit::Value::Boolean(toml_edit::Formatted::new(lfs.is_enabled())),
                     );
                 }
                 insert_extras(&mut table, extras);
@@ -442,6 +442,7 @@ mod test {
     use crate::{PixiPypiSource, PixiPypiSpec};
     use insta::assert_snapshot;
     use pep508_rs::ExtraName;
+    use pixi_git::GitLfs;
     use pixi_spec::{GitReference, GitSpec};
     use pixi_test_utils::format_parse_error;
     use pixi_toml::TomlIndexMap;
@@ -797,7 +798,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: None,
                     subdirectory: Default::default(),
-                    lfs: Some(true),
+                    lfs: Some(GitLfs::Enabled),
                 },
             })
         );
@@ -817,7 +818,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Branch("main".to_string())),
                     subdirectory: Default::default(),
-                    lfs: Some(false),
+                    lfs: Some(GitLfs::Disabled),
                 },
             })
         );

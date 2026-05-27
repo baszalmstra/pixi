@@ -649,7 +649,7 @@ impl TomlSpec {
                         git,
                         rev,
                         subdirectory,
-                        lfs: loc.lfs,
+                        lfs: loc.lfs.map(pixi_git::GitLfs::from),
                     })
                 }
                 (None, None, None) => {
@@ -1168,7 +1168,7 @@ impl TomlLocationSpec {
                     git,
                     rev,
                     subdirectory,
-                    lfs: self.lfs,
+                    lfs: self.lfs.map(pixi_git::GitLfs::from),
                 })
             }
             (_, _, _) => return Err(SourceLocationSpecError::MultipleIdentifiers),
@@ -1671,7 +1671,7 @@ mod test {
         }))
         .expect("parse should succeed");
         let git = spec.as_git().expect("expected a git spec");
-        assert_eq!(git.lfs, Some(true));
+        assert_eq!(git.lfs, Some(pixi_git::GitLfs::Enabled));
     }
 
     /// `lfs` without `git` is rejected the same way `branch` / `rev` / `tag`

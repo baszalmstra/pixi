@@ -12,41 +12,13 @@ use std::{
 use tracing::instrument;
 
 use crate::{
-    GitError, GitUrl, Reporter,
+    GitError, GitLfs, GitUrl, Reporter,
     credentials::GIT_STORE,
     git::GitRemote,
     resolver::RepositoryReference,
     sha::{GitOid, GitSha},
     url::RepositoryUrl,
 };
-
-/// Tri-state default for LFS fetching. Accepts `1`/`0`, `true`/`false`,
-/// `yes`/`no`, `on`/`off` (case-insensitive). Unset/empty → `None`.
-pub const PIXI_GIT_LFS_ENV: &str = "PIXI_GIT_LFS";
-
-pub fn lfs_enabled_from_env() -> Option<bool> {
-    let raw = std::env::var(PIXI_GIT_LFS_ENV).ok()?;
-    let value = raw.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if value == "0"
-        || value.eq_ignore_ascii_case("false")
-        || value.eq_ignore_ascii_case("no")
-        || value.eq_ignore_ascii_case("off")
-    {
-        return Some(false);
-    }
-    if value == "1"
-        || value.eq_ignore_ascii_case("true")
-        || value.eq_ignore_ascii_case("yes")
-        || value.eq_ignore_ascii_case("on")
-    {
-        return Some(true);
-    }
-    tracing::warn!("unrecognised value for {PIXI_GIT_LFS_ENV}: {raw:?}; treating as enabled");
-    Some(true)
-}
 
 /// A remote Git source that can be checked out locally.
 pub struct GitSource {
@@ -58,20 +30,20 @@ pub struct GitSource {
     cache: PathBuf,
     /// The reporter to use for this source.
     reporter: Option<Arc<dyn Reporter>>,
-    /// `Some(true)` = fetch LFS, `Some(false)` = skip + force-skip smudge,
-    /// `None` = no opinion (don't touch `GIT_LFS_SKIP_SMUDGE`).
-    lfs: Option<bool>,
+    /// `Some(Enabled)` = fetch LFS, `Some(Disabled)` = skip + force-skip
+    /// smudge, `None` = no opinion (don't touch `GIT_LFS_SKIP_SMUDGE`).
+    lfs: Option<GitLfs>,
 }
 
 impl GitSource {
     /// Initialize a new Git source.
     ///
-    /// LFS preference is read from [`GitUrl::lfs`]; if unset there, the
-    /// `PIXI_GIT_LFS` env var is consulted via [`lfs_enabled_from_env`].
-    /// Callers wanting an explicit override should set it on the [`GitUrl`]
-    /// before constructing the source, or use [`Self::with_lfs`].
+    /// LFS preference is read from [`GitUrl::lfs`]; if unset there,
+    /// [`GitLfs::from_env`] is consulted (`PIXI_GIT_LFS`). Callers wanting
+    /// an explicit override should set it on the [`GitUrl`] before
+    /// constructing the source, or use [`Self::with_lfs`].
     pub fn new(git: GitUrl, client: LazyClient, cache: impl Into<PathBuf>) -> Self {
-        let lfs = git.lfs().or_else(lfs_enabled_from_env);
+        let lfs = git.lfs().or_else(GitLfs::from_env);
         Self {
             git,
             client,
@@ -90,13 +62,12 @@ impl GitSource {
         }
     }
 
-    /// Override the LFS preference. See [`PIXI_GIT_LFS_ENV`] for tri-state semantics.
-    /// Prefer setting `lfs` on the [`GitUrl`] itself via
-    /// [`GitUrl::with_lfs`] so it travels through dedup keys; this builder is
-    /// kept for cases where you want to override the URL's preference at the
-    /// source level.
+    /// Override the LFS preference. Prefer setting `lfs` on the [`GitUrl`]
+    /// itself via [`GitUrl::with_lfs`] so it travels through dedup keys;
+    /// this builder is kept for cases where you want to override the URL's
+    /// preference at the source level.
     #[must_use]
-    pub fn with_lfs(self, lfs: Option<bool>) -> Self {
+    pub fn with_lfs(self, lfs: Option<GitLfs>) -> Self {
         Self { lfs, ..self }
     }
 
@@ -118,7 +89,7 @@ impl GitSource {
         };
 
         let remote = GitRemote::new(&remote);
-        let lfs_requested = self.lfs == Some(true);
+        let lfs_requested = self.lfs == Some(GitLfs::Enabled);
         let (db, actual_rev, task) = match (self.git.precise, remote.db_at(&db_path).ok()) {
             // Cache hit: the DB has the commit and, if LFS was requested,
             // its LFS objects validate. Skip the regular fetch + checkout.
@@ -244,57 +215,4 @@ pub fn cache_digest(url: &RepositoryUrl) -> String {
     url.hash(&mut hasher);
     let hash = hasher.finish();
     format!("{hash:x}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Serialised env-var swap to keep parallel tests from racing.
-    fn with_env<R>(value: Option<&str>, body: impl FnOnce() -> R) -> R {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var(PIXI_GIT_LFS_ENV).ok();
-        // SAFETY: tests are serialised by LOCK above.
-        match value {
-            Some(v) => unsafe { std::env::set_var(PIXI_GIT_LFS_ENV, v) },
-            None => unsafe { std::env::remove_var(PIXI_GIT_LFS_ENV) },
-        }
-        let out = body();
-        match previous {
-            Some(v) => unsafe { std::env::set_var(PIXI_GIT_LFS_ENV, v) },
-            None => unsafe { std::env::remove_var(PIXI_GIT_LFS_ENV) },
-        }
-        out
-    }
-
-    #[test]
-    fn env_unset_is_none() {
-        with_env(None, || assert_eq!(lfs_enabled_from_env(), None));
-    }
-
-    #[test]
-    fn env_empty_is_none() {
-        with_env(Some(""), || assert_eq!(lfs_enabled_from_env(), None));
-        with_env(Some("   "), || assert_eq!(lfs_enabled_from_env(), None));
-    }
-
-    #[test]
-    fn env_truthy_is_some_true() {
-        for v in ["1", "true", "TRUE", "yes", "YES", "on", "ON"] {
-            with_env(Some(v), || {
-                assert_eq!(lfs_enabled_from_env(), Some(true), "value={v}")
-            });
-        }
-    }
-
-    #[test]
-    fn env_falsy_is_some_false() {
-        for v in ["0", "false", "FALSE", "no", "NO", "off", "OFF"] {
-            with_env(Some(v), || {
-                assert_eq!(lfs_enabled_from_env(), Some(false), "value={v}")
-            });
-        }
-    }
 }

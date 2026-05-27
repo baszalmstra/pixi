@@ -1,4 +1,5 @@
 use pixi_core::environment::LockFileUsage;
+use pixi_git::GitLfs;
 use pixi_manifest::FeatureName;
 use pixi_spec::GitReference;
 use rattler_conda_types::Platform;
@@ -21,8 +22,7 @@ pub struct GitOptions {
     pub git: Option<Url>,
     pub reference: GitReference,
     pub subdir: Option<String>,
-    /// Fetch git LFS objects (`Some(true/false)`) or defer to the
-    /// `PIXI_GIT_LFS` env var (`None`).
+    /// Fetch git LFS objects, or defer to the `PIXI_GIT_LFS` env var (`None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lfs: Option<bool>,
+    pub lfs: Option<GitLfs>,
 }

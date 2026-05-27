@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 use miette::IntoDiagnostic;
 use pixi_git::{
-    GitUrl,
+    GitLfs, GitUrl,
     sha::GitSha,
     url::{RepositoryUrl, redact_credentials},
 };
@@ -317,7 +317,7 @@ pub struct PinnedGitCheckout {
     /// file so reinstalls can re-validate LFS artifacts; `None` means LFS
     /// was not requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lfs: Option<bool>,
+    pub lfs: Option<GitLfs>,
 }
 
 impl PinnedGitCheckout {
@@ -333,7 +333,7 @@ impl PinnedGitCheckout {
 
     /// Sets the LFS flag.
     #[must_use]
-    pub fn with_lfs(mut self, lfs: Option<bool>) -> Self {
+    pub fn with_lfs(mut self, lfs: Option<GitLfs>) -> Self {
         self.lfs = lfs;
         self
     }
@@ -382,8 +382,8 @@ impl PinnedGitCheckout {
                 }
                 "lfs" => {
                     let parsed = match val.as_ref() {
-                        "true" | "1" => true,
-                        "false" | "0" => false,
+                        "true" | "1" => GitLfs::Enabled,
+                        "false" | "0" => GitLfs::Disabled,
                         other => {
                             return Err(miette::miette!("invalid lfs value in URL: {other}"));
                         }
@@ -478,7 +478,7 @@ impl PinnedGitSpec {
         // an absent `?lfs=` query pair.
         if let Some(lfs) = self.source.lfs {
             url.query_pairs_mut()
-                .append_pair("lfs", if lfs { "true" } else { "false" });
+                .append_pair("lfs", if lfs.is_enabled() { "true" } else { "false" });
         }
 
         // Put the precise commit in the fragment.
@@ -997,7 +997,7 @@ impl From<PinnedGitSpec> for GitSpec {
 mod tests {
     use std::str::FromStr;
 
-    use pixi_git::sha::GitSha;
+    use pixi_git::{GitLfs, sha::GitSha};
     use pixi_spec::{GitReference, GitSpec, Subdirectory};
     use url::Url;
 
@@ -1667,7 +1667,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456abc123def456abc123def456abc1").unwrap(),
                 subdirectory: Subdirectory::default(),
                 reference: GitReference::Branch("main".to_string()),
-                lfs: Some(true),
+                lfs: Some(GitLfs::Enabled),
             },
         };
 
@@ -1679,7 +1679,7 @@ mod tests {
         );
 
         let parsed = PinnedGitCheckout::from_locked_url(&url).unwrap();
-        assert_eq!(parsed.lfs, Some(true));
+        assert_eq!(parsed.lfs, Some(GitLfs::Enabled));
         assert_eq!(parsed.reference, GitReference::Branch("main".to_string()));
     }
 

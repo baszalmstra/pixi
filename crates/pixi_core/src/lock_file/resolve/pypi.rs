@@ -1017,7 +1017,7 @@ async fn lock_pypi_packages(
     downloads_semaphore: Arc<tokio::sync::Semaphore>,
     abs_project_root: &Path,
     original_git_references: &HashMap<uv_normalize::PackageName, pixi_spec::GitReference>,
-    original_git_lfs: &HashMap<uv_normalize::PackageName, bool>,
+    original_git_lfs: &HashMap<uv_normalize::PackageName, pixi_git::GitLfs>,
 ) -> miette::Result<LockedPypiRecords> {
     let mut locked_packages = Vec::with_capacity(resolution.len());
     let database =

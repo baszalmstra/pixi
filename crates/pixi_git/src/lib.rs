@@ -9,10 +9,13 @@ use sha::{GitSha, OidParseError};
 
 pub mod credentials;
 pub mod git;
+pub mod lfs;
 pub mod resolver;
 pub mod sha;
 pub mod source;
 pub mod url;
+
+pub use lfs::{GitLfs, PIXI_GIT_LFS_ENV};
 
 /// The query parameter used to specify the type of reference in a Git URL.
 pub const GIT_URL_QUERY_REV_TYPE: &str = "rev_type";
@@ -33,12 +36,11 @@ pub struct GitUrl {
     reference: GitReference,
     /// The precise commit to use, if known.
     precise: Option<GitSha>,
-    /// LFS preference for this URL. Mirrors uv's `GitUrl` design: `Some(true/false)`
-    /// is an explicit caller override, `None` defers to the `PIXI_GIT_LFS` env
-    /// var (resolved at fetch time by [`source::GitSource::new`]). Part of
-    /// `Hash`/`Eq` so two requests for the same commit with different lfs
-    /// preferences get distinct dedup keys.
-    lfs: Option<bool>,
+    /// LFS preference for this URL. Mirrors uv's `GitUrl` design: `Some(_)`
+    /// is an explicit caller override, `None` defers to [`GitLfs::from_env`]
+    /// at fetch time. Part of `Hash`/`Eq` so two requests for the same
+    /// commit with different lfs preferences get distinct dedup keys.
+    lfs: Option<GitLfs>,
 }
 
 impl GitUrl {
@@ -79,7 +81,7 @@ impl GitUrl {
 
     /// Set the LFS preference. See [`GitUrl::lfs`] for tri-state semantics.
     #[must_use]
-    pub fn with_lfs(mut self, lfs: Option<bool>) -> Self {
+    pub fn with_lfs(mut self, lfs: Option<GitLfs>) -> Self {
         self.lfs = lfs;
         self
     }
@@ -99,9 +101,9 @@ impl GitUrl {
         self.precise
     }
 
-    /// Return the LFS preference: `Some(true)` / `Some(false)` is an explicit
-    /// override, `None` defers to the `PIXI_GIT_LFS` env var at fetch time.
-    pub fn lfs(&self) -> Option<bool> {
+    /// Return the LFS preference: `Some(_)` is an explicit override, `None`
+    /// defers to [`GitLfs::from_env`] at fetch time.
+    pub fn lfs(&self) -> Option<GitLfs> {
         self.lfs
     }
 }

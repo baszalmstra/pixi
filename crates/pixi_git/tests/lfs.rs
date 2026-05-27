@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use pixi_git::{GitUrl, sha::GitSha, source::GitSource};
+use pixi_git::{GitLfs, GitUrl, sha::GitSha, source::GitSource};
 use pixi_test_utils::GitRepoFixture;
 use rattler_networking::LazyClient;
 use reqwest_middleware::ClientWithMiddleware;
@@ -79,7 +79,7 @@ fn fetch_without_lfs_leaves_pointer() {
     // git-lfs has nothing to fetch from a brand-new clone, so files end up
     // as the pointer.
     let fetch = GitSource::new(git_url, panic_client(), cache.path())
-        .with_lfs(Some(false))
+        .with_lfs(Some(GitLfs::Disabled))
         .fetch()
         .expect("fetch should succeed");
 
@@ -106,7 +106,7 @@ fn fetch_with_lfs_materialises_blob() {
 
     let git_url = GitUrl::try_from(repo.base_url.clone()).unwrap();
     let fetch = GitSource::new(git_url, panic_client(), cache.path())
-        .with_lfs(Some(true))
+        .with_lfs(Some(GitLfs::Enabled))
         .fetch()
         .expect("fetch should succeed");
 
@@ -146,7 +146,7 @@ fn cached_fetch_with_lfs_artifacts_is_ready() {
         let url = GitUrl::try_from(repo.base_url.clone())
             .unwrap()
             .with_precise(head);
-        GitSource::new(url, panic_client(), cache.path()).with_lfs(Some(true))
+        GitSource::new(url, panic_client(), cache.path()).with_lfs(Some(GitLfs::Enabled))
     };
 
     // Warm the cache.
