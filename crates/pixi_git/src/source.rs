@@ -65,13 +65,19 @@ pub struct GitSource {
 
 impl GitSource {
     /// Initialize a new Git source.
+    ///
+    /// LFS preference is read from [`GitUrl::lfs`]; if unset there, the
+    /// `PIXI_GIT_LFS` env var is consulted via [`lfs_enabled_from_env`].
+    /// Callers wanting an explicit override should set it on the [`GitUrl`]
+    /// before constructing the source, or use [`Self::with_lfs`].
     pub fn new(git: GitUrl, client: LazyClient, cache: impl Into<PathBuf>) -> Self {
+        let lfs = git.lfs().or_else(lfs_enabled_from_env);
         Self {
             git,
             client,
             cache: cache.into(),
             reporter: None,
-            lfs: lfs_enabled_from_env(),
+            lfs,
         }
     }
 
@@ -85,6 +91,10 @@ impl GitSource {
     }
 
     /// Override the LFS preference. See [`PIXI_GIT_LFS_ENV`] for tri-state semantics.
+    /// Prefer setting `lfs` on the [`GitUrl`] itself via
+    /// [`GitUrl::with_lfs`] so it travels through dedup keys; this builder is
+    /// kept for cases where you want to override the URL's preference at the
+    /// source level.
     #[must_use]
     pub fn with_lfs(self, lfs: Option<bool>) -> Self {
         Self { lfs, ..self }

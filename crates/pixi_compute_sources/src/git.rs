@@ -96,30 +96,20 @@ impl LifecycleKind for GitReporterLifecycle {
 }
 
 /// Dedup key for a git checkout. Keyed on the full [`GitUrl`]: URL,
-/// reference, AND `precise` commit, so a caller asking for a specific
-/// commit doesn't collide with one asking only for the branch.
+/// reference, `precise` commit, AND LFS preference (LFS is part of
+/// `GitUrl`'s `Hash`/`Eq`). So a caller asking for a specific commit
+/// doesn't collide with one asking only for the branch, and a caller
+/// asking with LFS doesn't get blocked on a non-LFS sibling's result.
 /// Stripping `precise` from the key let `checkout_pinned_source(A)`
 /// silently return the branch's HEAD instead of commit `A`
 /// (prefix-dev/pixi#6073).
-///
-/// The LFS flag is also part of the key: two callers asking for the same
-/// commit with different `lfs` preferences get distinct compute futures, so
-/// neither blocks on the other's choice (the on-disk DB is still shared via
-/// the path-based lock in `GitResolver::fetch`).
 #[derive(Clone, Debug, Display, Hash, PartialEq, Eq)]
 #[display("{}@{}", _0.repository(), _0.reference())]
-pub struct CheckoutGit(GitUrl, Option<bool>);
+pub struct CheckoutGit(GitUrl);
 
 impl CheckoutGit {
     pub fn new(git_url: &GitUrl) -> Self {
-        Self(git_url.clone(), None)
-    }
-
-    /// Set the LFS preference for this checkout. `None` defers to the
-    /// `PIXI_GIT_LFS` env var; `Some(true/false)` is an explicit override.
-    pub fn with_lfs(mut self, lfs: Option<bool>) -> Self {
-        self.1 = lfs;
-        self
+        Self(git_url.clone())
     }
 }
 
@@ -150,16 +140,11 @@ impl Key for CheckoutGit {
 
         // Pass the original `GitUrl` straight through so the resolver
         // honours `precise` when set (pinned checkout) and advances to
-        // the branch HEAD when not (fresh resolve).
+        // the branch HEAD when not (fresh resolve). LFS preference rides
+        // along on the `GitUrl`.
         Arc::new(
             resolver
-                .fetch(
-                    self.0.clone(),
-                    client,
-                    cache_dir.into_std_path_buf(),
-                    None,
-                    self.1,
-                )
+                .fetch(self.0.clone(), client, cache_dir.into_std_path_buf(), None)
                 .await,
         )
     }
@@ -195,13 +180,13 @@ impl GitSourceCheckoutExt for ComputeCtx {
         let lfs = git_spec.lfs;
 
         let git_url = match GitUrl::try_from(git_spec.git).map_err(GitError::from) {
-            Ok(url) => url.with_reference(git_reference),
+            Ok(url) => url.with_reference(git_reference).with_lfs(lfs),
             Err(e) => {
                 return Either::Left(async move { Err(SourceCheckoutError::from(e)) });
             }
         };
 
-        let fut = self.compute(&CheckoutGit::new(&git_url).with_lfs(lfs));
+        let fut = self.compute(&CheckoutGit::new(&git_url));
         Either::Right(async move {
             let fetch = fut.await.as_ref().clone()?;
             let pinned = PinnedGitSpec {
@@ -225,9 +210,9 @@ impl GitSourceCheckoutExt for ComputeCtx {
             git_spec.git.clone(),
             git_spec.source.reference.clone().into(),
             git_spec.source.commit,
-        );
-        let lfs = git_spec.source.lfs;
-        let fut = self.compute(&CheckoutGit::new(&git_url).with_lfs(lfs));
+        )
+        .with_lfs(git_spec.source.lfs);
+        let fut = self.compute(&CheckoutGit::new(&git_url));
         async move {
             let fetch = fut.await.as_ref().clone()?;
             Ok(SourceCheckout::from_git(fetch, git_spec))

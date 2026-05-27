@@ -33,6 +33,12 @@ pub struct GitUrl {
     reference: GitReference,
     /// The precise commit to use, if known.
     precise: Option<GitSha>,
+    /// LFS preference for this URL. Mirrors uv's `GitUrl` design: `Some(true/false)`
+    /// is an explicit caller override, `None` defers to the `PIXI_GIT_LFS` env
+    /// var (resolved at fetch time by [`source::GitSource::new`]). Part of
+    /// `Hash`/`Eq` so two requests for the same commit with different lfs
+    /// preferences get distinct dedup keys.
+    lfs: Option<bool>,
 }
 
 impl GitUrl {
@@ -43,6 +49,7 @@ impl GitUrl {
             repository,
             reference,
             precise,
+            lfs: None,
         }
     }
 
@@ -52,6 +59,7 @@ impl GitUrl {
             repository,
             reference,
             precise: Some(precise),
+            lfs: None,
         }
     }
 
@@ -69,6 +77,13 @@ impl GitUrl {
         self
     }
 
+    /// Set the LFS preference. See [`GitUrl::lfs`] for tri-state semantics.
+    #[must_use]
+    pub fn with_lfs(mut self, lfs: Option<bool>) -> Self {
+        self.lfs = lfs;
+        self
+    }
+
     /// Return the [`Url`] of the Git repository.
     pub fn repository(&self) -> &Url {
         &self.repository
@@ -82,6 +97,12 @@ impl GitUrl {
     /// Return the precise commit, if known.
     pub fn precise(&self) -> Option<GitSha> {
         self.precise
+    }
+
+    /// Return the LFS preference: `Some(true)` / `Some(false)` is an explicit
+    /// override, `None` defers to the `PIXI_GIT_LFS` env var at fetch time.
+    pub fn lfs(&self) -> Option<bool> {
+        self.lfs
     }
 }
 
