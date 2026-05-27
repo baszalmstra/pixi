@@ -1,3 +1,4 @@
+use pixi_git::GitLfs;
 use pixi_pypi_spec::{PixiPypiSource, PixiPypiSpec, VersionOrStar};
 use pixi_spec::{GitReference, GitSpec};
 use rattler_lock::UrlOrPath;
@@ -53,12 +54,11 @@ fn create_uv_url(
     url.parse()
 }
 
-/// Map a pixi-side LFS preference (tri-state) to uv's binary enum. uv only
-/// distinguishes "fetch LFS" from "don't"; we treat `None` (env-default) the
-/// same as `Some(Disabled)`, since uv does its own git checkout outside of
-/// `pixi_git`'s `PIXI_GIT_LFS` plumbing.
-pub fn to_uv_git_lfs(lfs: Option<pixi_git::GitLfs>) -> uv_git_types::GitLfs {
-    if lfs == Some(pixi_git::GitLfs::Enabled) {
+/// Map pixi's [`GitLfs`] policy to uv's [`uv_git_types::GitLfs`]. Both are
+/// binary; the env-var fallback was resolved on the pixi side at
+/// manifest-input time.
+pub fn to_uv_git_lfs(lfs: GitLfs) -> uv_git_types::GitLfs {
+    if lfs.is_enabled() {
         uv_git_types::GitLfs::Enabled
     } else {
         uv_git_types::GitLfs::Disabled
@@ -376,7 +376,7 @@ mod tests {
                     "d099af3b1028b00c232d8eda28a997984ae5848b".to_string(),
                 )),
                 subdirectory: Default::default(),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
         let uv_req = as_uv_req(&pypi_req, "test", Path::new("")).unwrap();
@@ -405,7 +405,7 @@ mod tests {
                     "d099af3b1028b00c232d8eda28a997984ae5848b".to_string(),
                 )),
                 subdirectory: Default::default(),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
         let uv_req = as_uv_req(&pypi_req, "test", Path::new("")).unwrap();

@@ -428,22 +428,27 @@ pub struct GitSpec {
     /// Part of the source identity: an LFS checkout and a non-LFS checkout
     /// at the same commit produce different file trees (pointer files vs
     /// real blobs), so backends building from the URL need to know.
-    /// Defaults to `None` (unset) when the manifest didn't specify; the env
-    /// fallback is resolved on the pixi side before reaching the backend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lfs: Option<GitLfs>,
+    /// Defaults to [`GitLfs::Disabled`] and is skipped from serialisation
+    /// in that case, so existing wire payloads round-trip unchanged.
+    #[serde(default, skip_serializing_if = "is_lfs_disabled")]
+    pub lfs: GitLfs,
 }
 
-/// Whether to fetch git LFS objects when checking out a repository. Mirrors
-/// uv's `GitLfs` and pixi's `pixi_git::GitLfs`; wire-serialised as a bool
-/// (`lfs: true`/`lfs: false`) so existing manifests round-trip unchanged.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+fn is_lfs_disabled(lfs: &GitLfs) -> bool {
+    !lfs.is_enabled()
+}
+
+/// Whether to fetch git LFS objects when checking out a repository.
+/// Mirrors uv's `GitLfs` and pixi's `pixi_git::GitLfs`; wire-serialised
+/// as a bool. Defaults to [`GitLfs::Disabled`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum GitLfs {
+    /// Skip git-LFS; pointer files stay as pointers.
+    #[default]
+    Disabled,
     /// Fetch git-LFS objects; materialise pointer files to real blobs.
     Enabled,
-    /// Skip git-LFS; pointer files stay as pointers.
-    Disabled,
 }
 
 impl GitLfs {
@@ -849,7 +854,7 @@ impl Hash for GitSpec {
             .field("git", &self.git)
             .field("rev", &self.rev)
             .field("subdirectory", &self.subdirectory)
-            .field("lfs", &self.lfs.map(bool::from))
+            .field("lfs", &bool::from(self.lfs))
             .finish(state);
     }
 }

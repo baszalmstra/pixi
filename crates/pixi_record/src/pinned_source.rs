@@ -149,7 +149,7 @@ impl PinnedSourceSpec {
     /// ```
     /// use pixi_record::{PinnedSourceSpec, PinnedGitSpec, PinnedGitCheckout};
     /// use pixi_spec::{SourceSpec, SourceLocationSpec, GitSpec, GitReference};
-    /// use pixi_git::sha::GitSha;
+    /// use pixi_git::{GitLfs, sha::GitSha};
     /// use url::Url;
     /// use std::str::FromStr;
     ///
@@ -161,7 +161,7 @@ impl PinnedSourceSpec {
     ///         commit: GitSha::from_str("abc123def456")?,
     ///         subdirectory: Default::default(),
     ///         reference: GitReference::DefaultBranch,
-    ///         lfs: None,
+    ///         lfs: GitLfs::Disabled,
     ///     },
     /// });
     ///
@@ -169,7 +169,7 @@ impl PinnedSourceSpec {
     ///     git: Url::parse("https://github.com/user/repo.git")?,
     ///     rev: None,
     ///     subdirectory: Default::default(),
-    ///     lfs: None,
+    ///     lfs: GitLfs::Disabled,
     /// });
     ///
     /// assert!(pinned_git.matches_source_spec(&source_spec));
@@ -313,11 +313,17 @@ pub struct PinnedGitCheckout {
     /// The reference of the git checkout.
     #[serde(default, skip_serializing_if = "GitReference::is_default")]
     pub reference: GitReference,
-    /// Whether git LFS was requested for this checkout. Recorded in the lock
-    /// file so reinstalls can re-validate LFS artifacts; `None` means LFS
-    /// was not requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lfs: Option<GitLfs>,
+    /// Whether git LFS was requested for this checkout. Concrete (mirrors
+    /// uv): the manifest's tri-state was resolved at parse time, so what
+    /// gets pinned is exactly what was used. Locked URL only carries
+    /// `?lfs=true` when [`GitLfs::Enabled`]; absence parses back as
+    /// [`GitLfs::Disabled`].
+    #[serde(default, skip_serializing_if = "is_lfs_disabled")]
+    pub lfs: GitLfs,
+}
+
+fn is_lfs_disabled(lfs: &GitLfs) -> bool {
+    !lfs.is_enabled()
 }
 
 impl PinnedGitCheckout {
@@ -327,13 +333,13 @@ impl PinnedGitCheckout {
             commit,
             subdirectory,
             reference,
-            lfs: None,
+            lfs: GitLfs::Disabled,
         }
     }
 
     /// Sets the LFS flag.
     #[must_use]
-    pub fn with_lfs(mut self, lfs: Option<GitLfs>) -> Self {
+    pub fn with_lfs(mut self, lfs: GitLfs) -> Self {
         self.lfs = lfs;
         self
     }
@@ -410,7 +416,7 @@ impl PinnedGitCheckout {
                 .and_then(|s| Subdirectory::try_from(s).ok())
                 .unwrap_or_default(),
             reference: reference.expect("reference should be set"),
-            lfs,
+            lfs: lfs.unwrap_or(GitLfs::Disabled),
         })
     }
 }
@@ -474,11 +480,10 @@ impl PinnedGitSpec {
             GitReference::DefaultBranch => {}
         }
 
-        // Record an explicit lfs preference. `None` (unset) round-trips as
-        // an absent `?lfs=` query pair.
-        if let Some(lfs) = self.source.lfs {
-            url.query_pairs_mut()
-                .append_pair("lfs", if lfs.is_enabled() { "true" } else { "false" });
+        // Only write `?lfs=true` when enabled; absence parses back as
+        // Disabled (mirrors uv's lockfile pattern).
+        if self.source.lfs.is_enabled() {
+            url.query_pairs_mut().append_pair("lfs", "true");
         }
 
         // Put the precise commit in the fragment.
@@ -509,7 +514,7 @@ impl PinnedGitSpec {
                 commit: self.source.commit,
                 subdirectory: self.source.subdirectory.join(path.as_str()),
                 reference: self.source.reference.clone(),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         }
     }
@@ -1013,7 +1018,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::Rev("9de9e1b".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1021,7 +1026,7 @@ mod tests {
             git: Url::parse("https://github.com/example/repo.git").unwrap(),
             subdirectory: Default::default(),
             rev: Some(pixi_spec::GitReference::Rev("9de9e1b".to_string())),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec);
@@ -1034,7 +1039,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::Rev("9de9e1b".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1042,7 +1047,7 @@ mod tests {
             git: Url::parse("https://github.com/example/repo.git").unwrap(),
             subdirectory: Default::default(),
             rev: Some(pixi_spec::GitReference::Rev("9de9e1b".to_string())),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec_without_git_suffix.satisfies(&requested_git_spec);
@@ -1055,7 +1060,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::Rev("9de9e1b".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1063,7 +1068,7 @@ mod tests {
             git: Url::parse("https://github.com/example/repo").unwrap(),
             subdirectory: Default::default(),
             rev: Some(pixi_spec::GitReference::Rev("9de9e1b".to_string())),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec_without_suffix);
@@ -1076,7 +1081,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::Rev("9de9e1b".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1084,7 +1089,7 @@ mod tests {
             git: Url::parse("https://github.com/example/repo.git").unwrap(),
             subdirectory: Default::default(),
             rev: Some(pixi_spec::GitReference::Rev("9de9e1b".to_string())),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec);
@@ -1097,7 +1102,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::Rev("9de9e1b".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1105,7 +1110,7 @@ mod tests {
             git: Url::parse("git+https://github.com/example/repo.git").unwrap(),
             subdirectory: Default::default(),
             rev: Some(pixi_spec::GitReference::Rev("9de9e1b".to_string())),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec_with_prefix);
@@ -1123,7 +1128,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::Rev("9de9e1b".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1131,7 +1136,7 @@ mod tests {
             git: Url::parse("https://github.com/example/repo.git").unwrap(),
             subdirectory: Default::default(),
             rev: Some(pixi_spec::GitReference::Rev("d2e32".to_string())),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec).unwrap_err();
@@ -1146,7 +1151,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::Rev("9de9e1b".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1154,7 +1159,7 @@ mod tests {
             git: Url::parse("https://github.com/example/repo.git").unwrap(),
             subdirectory: Default::default(),
             rev: Some(pixi_spec::GitReference::Rev("9de9e1b".to_string())),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec).unwrap_err();
@@ -1169,7 +1174,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1179,7 +1184,7 @@ mod tests {
             // we are not specifying the rev
             // and request the default branch
             rev: None,
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec);
@@ -1194,7 +1199,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Subdirectory::try_from("some-subdir").unwrap(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1204,7 +1209,7 @@ mod tests {
             // we are not specifying the rev
             // and request the default branch
             rev: None,
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec).unwrap_err();
@@ -1220,7 +1225,7 @@ mod tests {
                 commit: GitSha::from_str("9de9e1b48cc421f05fc6aa6918cade3033a38c32").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1230,7 +1235,7 @@ mod tests {
             // we are not specifying the rev
             // and request the default branch
             rev: None,
-            lfs: None,
+            lfs: GitLfs::Disabled,
         };
 
         let result = locked_git_spec.satisfies(&requested_git_spec).unwrap_err();
@@ -1277,7 +1282,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1285,7 +1290,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo.git").unwrap(),
             rev: None,
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         // Should match despite .git suffix difference
@@ -1300,7 +1305,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1308,7 +1313,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: None,
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         // Should match despite .git suffix difference
@@ -1323,7 +1328,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1331,7 +1336,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo2").unwrap(),
             rev: None,
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         assert!(!pinned.matches_source_spec(&spec));
@@ -1345,7 +1350,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Subdirectory::try_from("subdir").unwrap(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1353,7 +1358,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: None,
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         // Should match - spec doesn't care about subdirectory
@@ -1368,7 +1373,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Subdirectory::try_from("subdir").unwrap(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1376,7 +1381,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: None,
             subdirectory: Subdirectory::try_from("subdir").unwrap(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         assert!(pinned.matches_source_spec(&spec));
@@ -1390,7 +1395,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Subdirectory::try_from("subdir1").unwrap(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1398,7 +1403,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: None,
             subdirectory: Subdirectory::try_from("subdir2").unwrap(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         assert!(!pinned.matches_source_spec(&spec));
@@ -1412,7 +1417,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1420,7 +1425,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: None,
             subdirectory: Subdirectory::try_from("subdir").unwrap(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         // Should not match - spec requires a subdirectory that pinned doesn't have
@@ -1481,7 +1486,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: None,
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         assert!(!pinned.matches_source_spec(&spec));
@@ -1495,7 +1500,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1540,7 +1545,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::Rev("v1.0.0".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1548,7 +1553,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: Some(GitReference::Rev("v2.0.0".to_string())),
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         assert!(!pinned.matches_source_spec(&spec));
@@ -1564,7 +1569,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::Branch("main".to_string()),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1572,7 +1577,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: Some(GitReference::Branch("main".to_string())),
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         assert!(pinned.matches_source_spec(&spec));
@@ -1586,7 +1591,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
 
@@ -1594,7 +1599,7 @@ mod tests {
             git: Url::parse("https://github.com/user/repo").unwrap(),
             rev: None,
             subdirectory: Default::default(),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         });
 
         // Should match - GitHub URLs are case-insensitive
@@ -1623,7 +1628,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456abc123def456abc123def456abc1").unwrap(),
                 subdirectory: Subdirectory::new("recipes").unwrap(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1644,7 +1649,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456abc123def456abc123def456abc1").unwrap(),
                 subdirectory: Subdirectory::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 
@@ -1667,7 +1672,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456abc123def456abc123def456abc1").unwrap(),
                 subdirectory: Subdirectory::default(),
                 reference: GitReference::Branch("main".to_string()),
-                lfs: Some(GitLfs::Enabled),
+                lfs: GitLfs::Enabled,
             },
         };
 
@@ -1679,7 +1684,7 @@ mod tests {
         );
 
         let parsed = PinnedGitCheckout::from_locked_url(&url).unwrap();
-        assert_eq!(parsed.lfs, Some(GitLfs::Enabled));
+        assert_eq!(parsed.lfs, GitLfs::Enabled);
         assert_eq!(parsed.reference, GitReference::Branch("main".to_string()));
     }
 
@@ -1694,7 +1699,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456abc123def456abc123def456abc1").unwrap(),
                 subdirectory: Subdirectory::default(),
                 reference: GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         };
 

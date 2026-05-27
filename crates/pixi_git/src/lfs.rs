@@ -1,7 +1,8 @@
 //! [`GitLfs`] preference: whether a git checkout should also fetch git-LFS
-//! objects. Mirrors `uv_git_types::GitLfs`'s two-variant shape; pixi keeps
-//! the "no opinion" state at the call site as `Option<GitLfs>` so the env
-//! var (`PIXI_GIT_LFS`) can act as a global default.
+//! objects. Mirrors `uv_git_types::GitLfs`'s two-variant shape, with
+//! [`From<Option<bool>>`] as the single tri-state → binary boundary that
+//! consults the `PIXI_GIT_LFS` env var when the manifest is silent (the
+//! same pattern uv uses for `UV_GIT_LFS`).
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -9,42 +10,47 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub const PIXI_GIT_LFS_ENV: &str = "PIXI_GIT_LFS";
 
 /// Whether to fetch git-LFS objects when checking out a repository.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Mirrors `uv_git_types::GitLfs`. Defaults to [`GitLfs::Disabled`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum GitLfs {
+    /// Force-skip the smudge filter; pointer files stay as pointers.
+    #[default]
+    Disabled,
     /// Run `git lfs fetch` / `git lfs fsck` and let smudge filters
     /// materialise pointer files.
     Enabled,
-    /// Force-skip the smudge filter; pointer files stay as pointers.
-    Disabled,
 }
 
 impl GitLfs {
     /// Parse [`PIXI_GIT_LFS_ENV`]. Accepts `1`/`0`, `true`/`false`,
-    /// `yes`/`no`, `on`/`off` (case-insensitive). Unset / empty → `None`;
-    /// unrecognised values are treated as `Enabled` with a tracing warning
-    /// (back-compat with the env-only landing in #6183).
-    pub fn from_env() -> Option<Self> {
-        let raw = std::env::var(PIXI_GIT_LFS_ENV).ok()?;
+    /// `yes`/`no`, `on`/`off` (case-insensitive). Unset / empty / unset →
+    /// [`GitLfs::Disabled`]; unrecognised values are treated as `Enabled`
+    /// with a tracing warning (back-compat with the env-only landing in
+    /// #6183).
+    pub fn from_env() -> Self {
+        let Ok(raw) = std::env::var(PIXI_GIT_LFS_ENV) else {
+            return Self::Disabled;
+        };
         let value = raw.trim();
         if value.is_empty() {
-            return None;
+            return Self::Disabled;
         }
         if value == "0"
             || value.eq_ignore_ascii_case("false")
             || value.eq_ignore_ascii_case("no")
             || value.eq_ignore_ascii_case("off")
         {
-            return Some(Self::Disabled);
+            return Self::Disabled;
         }
         if value == "1"
             || value.eq_ignore_ascii_case("true")
             || value.eq_ignore_ascii_case("yes")
             || value.eq_ignore_ascii_case("on")
         {
-            return Some(Self::Enabled);
+            return Self::Enabled;
         }
         tracing::warn!("unrecognised value for {PIXI_GIT_LFS_ENV}: {raw:?}; treating as enabled");
-        Some(Self::Enabled)
+        Self::Enabled
     }
 
     /// `true` for [`GitLfs::Enabled`].
@@ -62,6 +68,20 @@ impl From<bool> for GitLfs {
 impl From<GitLfs> for bool {
     fn from(lfs: GitLfs) -> Self {
         lfs.is_enabled()
+    }
+}
+
+/// Resolve the manifest-input tri-state (`lfs = true/false` or absent) to
+/// a concrete policy, consulting [`GitLfs::from_env`] when absent. Mirrors
+/// uv's `From<Option<bool>> for GitLfs`. All internal pixi types store
+/// the resolved binary value; tri-state only lives at this boundary.
+impl From<Option<bool>> for GitLfs {
+    fn from(value: Option<bool>) -> Self {
+        match value {
+            Some(true) => Self::Enabled,
+            Some(false) => Self::Disabled,
+            None => Self::from_env(),
+        }
     }
 }
 
@@ -113,21 +133,25 @@ mod tests {
     }
 
     #[test]
-    fn env_unset_is_none() {
-        with_env(None, || assert_eq!(GitLfs::from_env(), None));
+    fn env_unset_is_disabled() {
+        with_env(None, || assert_eq!(GitLfs::from_env(), GitLfs::Disabled));
     }
 
     #[test]
-    fn env_empty_is_none() {
-        with_env(Some(""), || assert_eq!(GitLfs::from_env(), None));
-        with_env(Some("   "), || assert_eq!(GitLfs::from_env(), None));
+    fn env_empty_is_disabled() {
+        with_env(Some(""), || {
+            assert_eq!(GitLfs::from_env(), GitLfs::Disabled)
+        });
+        with_env(Some("   "), || {
+            assert_eq!(GitLfs::from_env(), GitLfs::Disabled)
+        });
     }
 
     #[test]
     fn env_truthy_is_enabled() {
         for v in ["1", "true", "TRUE", "yes", "YES", "on", "ON"] {
             with_env(Some(v), || {
-                assert_eq!(GitLfs::from_env(), Some(GitLfs::Enabled), "value={v}")
+                assert_eq!(GitLfs::from_env(), GitLfs::Enabled, "value={v}")
             });
         }
     }
@@ -136,8 +160,22 @@ mod tests {
     fn env_falsy_is_disabled() {
         for v in ["0", "false", "FALSE", "no", "NO", "off", "OFF"] {
             with_env(Some(v), || {
-                assert_eq!(GitLfs::from_env(), Some(GitLfs::Disabled), "value={v}")
+                assert_eq!(GitLfs::from_env(), GitLfs::Disabled, "value={v}")
             });
         }
+    }
+
+    /// `From<Option<bool>>` is the single tri-state → binary boundary,
+    /// matching uv. `Some(_)` is honoured verbatim, `None` consults env.
+    #[test]
+    fn from_option_bool_resolves_env() {
+        assert_eq!(GitLfs::from(Some(true)), GitLfs::Enabled);
+        assert_eq!(GitLfs::from(Some(false)), GitLfs::Disabled);
+        with_env(Some("1"), || {
+            assert_eq!(GitLfs::from(None::<bool>), GitLfs::Enabled);
+        });
+        with_env(None, || {
+            assert_eq!(GitLfs::from(None::<bool>), GitLfs::Disabled);
+        });
     }
 }

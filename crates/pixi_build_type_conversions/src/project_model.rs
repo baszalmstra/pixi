@@ -78,10 +78,10 @@ fn to_pixi_spec_v1(
                         // pixi-side enum and protocol enum are bit-for-bit
                         // identical (both wire as bool); map across the
                         // boundary explicitly.
-                        lfs: lfs.map(|p| match p {
+                        lfs: match lfs {
                             pixi_git::GitLfs::Enabled => pbt::GitLfs::Enabled,
                             pixi_git::GitLfs::Disabled => pbt::GitLfs::Disabled,
-                        }),
+                        },
                     })
                 }
                 pixi_spec::SourceLocationSpec::Path(path_source_spec) => {

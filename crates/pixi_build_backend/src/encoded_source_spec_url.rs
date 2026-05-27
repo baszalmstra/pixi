@@ -63,10 +63,11 @@ impl From<EncodedSourceSpecUrl> for SourcePackageSpec {
             };
 
             let subdirectory = pairs.remove("subdirectory").map(|s| s.into_owned());
-            let lfs = pairs.remove("lfs").map(|v| match v.as_ref() {
-                "true" | "1" => pixi_build_types::GitLfs::Enabled,
+            // Absence parses as Disabled (mirrors uv's lockfile pattern).
+            let lfs = match pairs.remove("lfs").as_deref() {
+                Some("true" | "1") => pixi_build_types::GitLfs::Enabled,
                 _ => pixi_build_types::GitLfs::Disabled,
-            });
+            };
             GitSpec {
                 git: git_url,
                 rev,
@@ -114,8 +115,9 @@ impl From<SourcePackageSpec> for EncodedSourceSpecUrl {
                     }
                     _ => {}
                 }
-                if let Some(lfs) = git.lfs {
-                    query_pairs.append_pair("lfs", if lfs.is_enabled() { "true" } else { "false" });
+                // Only emit `lfs=true` when enabled (uv lockfile pattern).
+                if git.lfs.is_enabled() {
+                    query_pairs.append_pair("lfs", "true");
                 }
             }
             pixi_build_types::SourcePackageLocationSpec::Path(path) => {
@@ -160,14 +162,14 @@ mod test {
                 git: "https://github.com/some/repo.git".parse().unwrap(),
                 rev: Some(GitReference::Rev("1234567890abcdef".into())),
                 subdirectory: Some("subdir".into()),
-                lfs: None,
+                lfs: pixi_build_types::GitLfs::Disabled,
             }
             .into(),
             pixi_build_types::GitSpec {
                 git: "https://github.com/some/lfs-repo.git".parse().unwrap(),
                 rev: Some(GitReference::Branch("main".into())),
                 subdirectory: None,
-                lfs: Some(pixi_build_types::GitLfs::Enabled),
+                lfs: pixi_build_types::GitLfs::Enabled,
             }
             .into(),
             pixi_build_types::UrlSpec {

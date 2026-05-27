@@ -22,11 +22,17 @@ pub struct GitSpec {
     #[serde(skip_serializing_if = "Subdirectory::is_empty", default)]
     pub subdirectory: Subdirectory,
 
-    /// Whether to fetch git LFS objects for this checkout. `None` defers to
-    /// [`GitLfs::from_env`]; `Some(_)` is an explicit override. Serialised
-    /// as a plain bool to match `lfs = true/false` in TOML.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lfs: Option<GitLfs>,
+    /// Whether to fetch git LFS objects for this checkout. Concrete by the
+    /// time we hit this struct: the manifest's `lfs = true/false` (or its
+    /// absence + `PIXI_GIT_LFS`) was already resolved via
+    /// [`GitLfs::from`]`(Option<bool>)`. Serialised as a plain bool, and
+    /// skipped when [`GitLfs::Disabled`] so existing manifests don't churn.
+    #[serde(default, skip_serializing_if = "is_lfs_disabled")]
+    pub lfs: GitLfs,
+}
+
+fn is_lfs_disabled(lfs: &GitLfs) -> bool {
+    !lfs.is_enabled()
 }
 
 impl Display for GitSpec {
@@ -38,7 +44,7 @@ impl Display for GitSpec {
         if !self.subdirectory.is_empty() {
             write!(f, " in {}", self.subdirectory)?;
         }
-        if self.lfs == Some(GitLfs::Enabled) {
+        if self.lfs.is_enabled() {
             write!(f, " (lfs)")?;
         }
         Ok(())

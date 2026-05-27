@@ -369,16 +369,20 @@ pub async fn resolve_pypi(
         })
         .collect();
 
-    // Same idea as `original_git_references`, but for the `lfs` flag: uv doesn't
-    // know it, so we shuttle it from the manifest into the lock file ourselves.
+    // Same idea as `original_git_references`, but for the `lfs` flag: uv
+    // doesn't know it (it has its own `UV_GIT_LFS` env var), so we shuttle
+    // the manifest-side concrete policy into the lock file ourselves. Only
+    // `Enabled` entries make it into the map — the `into_pinned_git_spec`
+    // lookup defaults to `Disabled` when missing.
     let original_git_lfs: HashMap<_, _> = dependencies
         .iter()
         .filter_map(|(name, specs)| {
             specs.iter().find_map(|spec| {
-                spec.source
-                    .as_git()
-                    .and_then(|git_spec| git_spec.lfs)
-                    .map(|lfs| (name.clone(), lfs))
+                let git_spec = spec.source.as_git()?;
+                git_spec
+                    .lfs
+                    .is_enabled()
+                    .then(|| (name.clone(), git_spec.lfs))
             })
         })
         .collect();
@@ -1210,7 +1214,10 @@ async fn lock_pypi_packages(
                             let package_name = git.name.clone();
                             let original_reference =
                                 original_git_references.get(&package_name).cloned();
-                            let original_lfs = original_git_lfs.get(&package_name).copied();
+                            let original_lfs = original_git_lfs
+                                .get(&package_name)
+                                .copied()
+                                .unwrap_or(pixi_git::GitLfs::Disabled);
 
                             // convert resolved source dist into a pinned git spec
                             let pinned_git_spec =

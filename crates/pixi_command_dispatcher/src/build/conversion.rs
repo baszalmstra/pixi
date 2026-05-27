@@ -1,4 +1,5 @@
 use pixi_build_types::{BinaryPackageSpec, SourcePackageLocationSpec, SourcePackageSpec};
+use pixi_git::GitLfs;
 use pixi_spec::{BinarySpec, DetailedSpec, UrlBinarySpec};
 use rattler_conda_types::NamedChannelOrUrl;
 
@@ -66,7 +67,7 @@ pub fn from_source_package_location_spec(
                     .subdirectory
                     .and_then(|s| pixi_spec::Subdirectory::try_from(s).ok())
                     .unwrap_or_default(),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             })
         }
 

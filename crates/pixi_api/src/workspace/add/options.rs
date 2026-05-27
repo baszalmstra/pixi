@@ -22,7 +22,11 @@ pub struct GitOptions {
     pub git: Option<Url>,
     pub reference: GitReference,
     pub subdir: Option<String>,
-    /// Fetch git LFS objects, or defer to the `PIXI_GIT_LFS` env var (`None`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lfs: Option<GitLfs>,
+    /// Whether to fetch git LFS objects. Defaults to [`GitLfs::Disabled`].
+    #[serde(default, skip_serializing_if = "is_lfs_disabled")]
+    pub lfs: GitLfs,
+}
+
+fn is_lfs_disabled(lfs: &GitLfs) -> bool {
+    !lfs.is_enabled()
 }

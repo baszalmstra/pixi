@@ -36,32 +36,37 @@ pub struct GitUrl {
     reference: GitReference,
     /// The precise commit to use, if known.
     precise: Option<GitSha>,
-    /// LFS preference for this URL. Mirrors uv's `GitUrl` design: `Some(_)`
-    /// is an explicit caller override, `None` defers to [`GitLfs::from_env`]
-    /// at fetch time. Part of `Hash`/`Eq` so two requests for the same
-    /// commit with different lfs preferences get distinct dedup keys.
-    lfs: Option<GitLfs>,
+    /// LFS preference for this URL. Always concrete (mirrors uv); the env
+    /// var fallback was resolved at the manifest-input boundary via
+    /// [`GitLfs::from`]`(Option<bool>)`. Part of `Hash`/`Eq` so two requests
+    /// for the same commit with different lfs preferences get distinct
+    /// dedup keys.
+    lfs: GitLfs,
 }
 
 impl GitUrl {
     /// Create a new [`GitUrl`] from a repository URL and a reference.
+    /// Defaults LFS to [`GitLfs::Disabled`]; call [`Self::with_lfs`] to
+    /// override.
     pub fn from_reference(repository: Url, reference: GitReference) -> Self {
         let precise = reference.as_sha();
         Self {
             repository,
             reference,
             precise,
-            lfs: None,
+            lfs: GitLfs::Disabled,
         }
     }
 
     /// Create a new [`GitUrl`] from a repository URL and a precise commit.
+    /// Defaults LFS to [`GitLfs::Disabled`]; call [`Self::with_lfs`] to
+    /// override.
     pub fn from_commit(repository: Url, reference: GitReference, precise: GitSha) -> Self {
         Self {
             repository,
             reference,
             precise: Some(precise),
-            lfs: None,
+            lfs: GitLfs::Disabled,
         }
     }
 
@@ -79,9 +84,9 @@ impl GitUrl {
         self
     }
 
-    /// Set the LFS preference. See [`GitUrl::lfs`] for tri-state semantics.
+    /// Set the LFS preference.
     #[must_use]
-    pub fn with_lfs(mut self, lfs: Option<GitLfs>) -> Self {
+    pub fn with_lfs(mut self, lfs: GitLfs) -> Self {
         self.lfs = lfs;
         self
     }
@@ -101,9 +106,8 @@ impl GitUrl {
         self.precise
     }
 
-    /// Return the LFS preference: `Some(_)` is an explicit override, `None`
-    /// defers to [`GitLfs::from_env`] at fetch time.
-    pub fn lfs(&self) -> Option<GitLfs> {
+    /// Return the LFS preference (already resolved at construction).
+    pub fn lfs(&self) -> GitLfs {
         self.lfs
     }
 }

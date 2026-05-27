@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use pixi_git::GitLfs;
 use pixi_path::AbsPathBuf;
 
 use event_reporter::{EventReporter, WithEventReporter};
@@ -229,7 +230,7 @@ pub async fn simple_test() {
                     git: git_repo.url.parse().unwrap(),
                     rev: Some(GitReference::Rev(git_repo.commits[0].clone())),
                     subdirectory: Subdirectory::try_from("recipe").unwrap(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 }
                 .into(),
             )]),

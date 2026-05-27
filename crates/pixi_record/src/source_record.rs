@@ -27,7 +27,7 @@
 //! Use [`SourceRecord::map_data`] and [`SourceRecord::try_map_data`] for clean
 //! state transitions without field-by-field reconstruction.
 
-use pixi_git::sha::GitSha;
+use pixi_git::{GitLfs, sha::GitSha};
 use pixi_spec::{GitReference, SourceLocationSpec};
 use rattler_conda_types::{
     Flag, MatchSpec, Matches, NamelessMatchSpec, PackageName, PackageRecord, PackageUrl,
@@ -710,7 +710,7 @@ fn package_build_source_to_build_source(
                             .and_then(|s| pixi_spec::Subdirectory::try_from(s.to_string()).ok())
                             .unwrap_or_default(),
                         reference,
-                        lfs: None,
+                        lfs: GitLfs::Disabled,
                     },
                 }),
             )))
@@ -1165,7 +1165,7 @@ mod tests {
                     .unwrap(),
                 subdirectory: Default::default(),
                 reference: pixi_spec::GitReference::DefaultBranch,
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         })
     }

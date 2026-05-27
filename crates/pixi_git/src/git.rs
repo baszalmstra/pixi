@@ -82,10 +82,12 @@ impl GitLfsBin {
     }
 }
 
-/// Value for `GIT_LFS_SKIP_SMUDGE`, or `None` to leave the var unset.
-/// `Enabled` → "0" (run smudge), `Disabled` → "1" (skip smudge).
-fn lfs_skip_smudge_env(lfs: Option<GitLfs>) -> Option<&'static str> {
-    lfs.map(|policy| if policy.is_enabled() { "0" } else { "1" })
+/// Value for `GIT_LFS_SKIP_SMUDGE`. Always set: `Enabled` → "0" (run
+/// smudge), `Disabled` → "1" (skip smudge). Mirrors uv's `reset()`, which
+/// always overrides the inherited env to avoid surprising smudge-filter
+/// behaviour from a leaky parent env.
+fn lfs_skip_smudge_env(lfs: GitLfs) -> &'static str {
+    if lfs.is_enabled() { "0" } else { "1" }
 }
 
 /// Strategy when fetching refspecs for a [`GitReference`]
@@ -269,7 +271,7 @@ impl GitRemote {
         reference: &GitReference,
         locked_rev: Option<GitOid>,
         client: &LazyClient,
-        lfs: Option<GitLfs>,
+        lfs: GitLfs,
     ) -> Result<(GitDatabase, GitOid), GitError> {
         let locked_ref = locked_rev.map(|oid| GitReference::FullCommit(oid.to_string()));
         let reference = locked_ref.as_ref().unwrap_or(reference);
@@ -282,7 +284,8 @@ impl GitRemote {
             };
 
             if let Some(rev) = resolved_commit_hash {
-                let ready = (lfs == Some(GitLfs::Enabled))
+                let ready = lfs
+                    .is_enabled()
                     .then(|| maybe_fetch_lfs(&mut db.repo, self.url.as_str(), rev))
                     .flatten();
                 return Ok((db.with_lfs_ready(ready), rev));
@@ -302,7 +305,8 @@ impl GitRemote {
             None => reference.resolve(&repo)?,
         };
 
-        let ready = (lfs == Some(GitLfs::Enabled))
+        let ready = lfs
+            .is_enabled()
             .then(|| maybe_fetch_lfs(&mut repo, self.url.as_str(), rev))
             .flatten();
 
@@ -366,7 +370,7 @@ impl GitDatabase {
         &self,
         rev: GitOid,
         destination: &Path,
-        lfs: Option<GitLfs>,
+        lfs: GitLfs,
     ) -> Result<GitCheckout, GitError> {
         // If the existing checkout exists, and it is fresh, use it.
         // A non-fresh checkout can happen if the checkout operation was
@@ -511,7 +515,7 @@ impl GitCheckout {
         into: &Path,
         database: &GitDatabase,
         revision: GitOid,
-        lfs: Option<GitLfs>,
+        lfs: GitLfs,
     ) -> Result<Self, GitError> {
         tracing::debug!("cloning into {:?} from {:?}", database.repo.path, into);
         let dirname = into.parent().expect("into path must have a parent");
@@ -565,7 +569,7 @@ impl GitCheckout {
     /// *doesn't* exist, and then once we're done we create the file.
     ///
     /// [`.ok`]: CHECKOUT_READY_LOCK
-    fn reset(&self, lfs: Option<GitLfs>) -> Result<(), GitError> {
+    fn reset(&self, lfs: GitLfs) -> Result<(), GitError> {
         let ok_file = self.repo.path.join(CHECKOUT_READY_LOCK);
         let _ = fs_err::remove_file(&ok_file);
 
@@ -579,10 +583,8 @@ impl GitCheckout {
             .arg("reset")
             .arg("--hard")
             .arg(self.revision.as_str())
-            .current_dir(&self.repo.path);
-        if let Some(value) = skip_smudge {
-            reset_cmd.env(GIT_LFS_SKIP_SMUDGE, value);
-        }
+            .current_dir(&self.repo.path)
+            .env(GIT_LFS_SKIP_SMUDGE, skip_smudge);
         reset_cmd.output()?;
 
         // Update submodules (`git submodule update --recursive`).
@@ -592,10 +594,8 @@ impl GitCheckout {
             .arg("update")
             .arg("--recursive")
             .arg("--init")
-            .current_dir(&self.repo.path);
-        if let Some(value) = skip_smudge {
-            submodule_cmd.env(GIT_LFS_SKIP_SMUDGE, value);
-        }
+            .current_dir(&self.repo.path)
+            .env(GIT_LFS_SKIP_SMUDGE, skip_smudge);
         submodule_cmd.output().map(drop)?;
 
         fs_err::File::create(ok_file)?;

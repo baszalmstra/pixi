@@ -649,7 +649,7 @@ impl TomlSpec {
                         git,
                         rev,
                         subdirectory,
-                        lfs: loc.lfs.map(pixi_git::GitLfs::from),
+                        lfs: pixi_git::GitLfs::from(loc.lfs),
                     })
                 }
                 (None, None, None) => {
@@ -1168,7 +1168,7 @@ impl TomlLocationSpec {
                     git,
                     rev,
                     subdirectory,
-                    lfs: self.lfs.map(pixi_git::GitLfs::from),
+                    lfs: pixi_git::GitLfs::from(self.lfs),
                 })
             }
             (_, _, _) => return Err(SourceLocationSpecError::MultipleIdentifiers),
@@ -1661,7 +1661,7 @@ mod test {
         insta::assert_yaml_snapshot!(snapshot);
     }
 
-    /// `lfs = true` on a conda git spec parses into `GitSpec.lfs == Some(true)`
+    /// `lfs = true` on a conda git spec parses into `GitSpec.lfs == Enabled`
     /// so the downstream resolver can request LFS artifacts.
     #[test]
     fn test_conda_git_lfs_parses() {
@@ -1671,7 +1671,7 @@ mod test {
         }))
         .expect("parse should succeed");
         let git = spec.as_git().expect("expected a git spec");
-        assert_eq!(git.lfs, Some(pixi_git::GitLfs::Enabled));
+        assert_eq!(git.lfs, pixi_git::GitLfs::Enabled);
     }
 
     /// `lfs` without `git` is rejected the same way `branch` / `rev` / `tag`

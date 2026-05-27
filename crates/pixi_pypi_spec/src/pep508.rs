@@ -1,6 +1,6 @@
 use crate::utils::extract_directory_from_url;
 use crate::{Pep508ToPyPiRequirementError, PixiPypiSource, PixiPypiSpec, VersionOrStar};
-use pixi_git::GitUrl;
+use pixi_git::{GitLfs, GitUrl};
 use pixi_spec::{GitSpec, Verbatim};
 use std::path::Path;
 
@@ -31,7 +31,7 @@ impl TryFrom<pep508_rs::Requirement> for PixiPypiSpec {
                                     git: git_url.repository().clone(),
                                     rev: Some(git_url.reference().clone().into()),
                                     subdirectory,
-                                    lfs: None,
+                                    lfs: GitLfs::Disabled,
                                 };
 
                                 PixiPypiSpec::with_extras_and_markers(
@@ -79,7 +79,7 @@ impl TryFrom<pep508_rs::Requirement> for PixiPypiSpec {
                             git: git_url.repository().clone(),
                             rev: Some(git_url.reference().clone().into()),
                             subdirectory,
-                            lfs: None,
+                            lfs: GitLfs::Disabled,
                         };
                         PixiPypiSpec::with_extras_and_markers(
                             PixiPypiSource::Git { git: git_spec },

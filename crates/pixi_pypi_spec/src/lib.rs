@@ -11,6 +11,7 @@ use std::{
 
 use pep440_rs::VersionSpecifiers;
 use pep508_rs::{ExtraName, MarkerTree};
+use pixi_git::GitLfs;
 use pixi_spec::{GitSpec, Subdirectory};
 use serde::Serialize;
 use thiserror::Error;
@@ -353,7 +354,7 @@ mod tests {
                 git: Url::parse("https://github.com/example/repo").unwrap(),
                 rev: None,
                 subdirectory: Default::default(),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             },
         });
         assert!(spec.is_source_dependency());
@@ -400,7 +401,7 @@ mod tests {
                     git: Url::parse("https://github.com/example/repo").unwrap(),
                     rev: None,
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             },
             vec![extra.clone()],
@@ -426,7 +427,7 @@ mod tests {
                     git: Url::parse("https://github.com/example/repo").unwrap(),
                     rev: None,
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             },
             vec![],
@@ -577,7 +578,7 @@ mod tests {
                     git: Url::parse("https://github.com/ecederstrand/exchangelib").unwrap(),
                     rev: Some(GitReference::DefaultBranch),
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
@@ -593,7 +594,7 @@ mod tests {
                         "b283011c6df4a9e034baca9aea19aa8e5a70e3ab".to_string()
                     )),
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
@@ -687,7 +688,7 @@ mod tests {
                     git: Url::parse("ssh://git@github.com/python-attrs/attrs.git").unwrap(),
                     rev: Some(GitReference::Rev("main".to_string())),
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
@@ -704,7 +705,7 @@ mod tests {
                     git: Url::parse("https://github.com/Deltares/Ribasim.git").unwrap(),
                     rev: Some(GitReference::DefaultBranch),
                     subdirectory: Subdirectory::try_from("python/ribasim").unwrap(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );

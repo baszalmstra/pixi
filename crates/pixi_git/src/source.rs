@@ -30,20 +30,17 @@ pub struct GitSource {
     cache: PathBuf,
     /// The reporter to use for this source.
     reporter: Option<Arc<dyn Reporter>>,
-    /// `Some(Enabled)` = fetch LFS, `Some(Disabled)` = skip + force-skip
-    /// smudge, `None` = no opinion (don't touch `GIT_LFS_SKIP_SMUDGE`).
-    lfs: Option<GitLfs>,
+    /// Concrete LFS policy. Defaults to whatever the [`GitUrl`] carries
+    /// (which itself was resolved at manifest-input time).
+    lfs: GitLfs,
 }
 
 impl GitSource {
-    /// Initialize a new Git source.
-    ///
-    /// LFS preference is read from [`GitUrl::lfs`]; if unset there,
-    /// [`GitLfs::from_env`] is consulted (`PIXI_GIT_LFS`). Callers wanting
-    /// an explicit override should set it on the [`GitUrl`] before
-    /// constructing the source, or use [`Self::with_lfs`].
+    /// Initialize a new Git source. LFS preference is read directly from
+    /// [`GitUrl::lfs`]; the env-var fallback already happened at the
+    /// manifest-input boundary via [`GitLfs::from`]`(Option<bool>)`.
     pub fn new(git: GitUrl, client: LazyClient, cache: impl Into<PathBuf>) -> Self {
-        let lfs = git.lfs().or_else(GitLfs::from_env);
+        let lfs = git.lfs();
         Self {
             git,
             client,
@@ -64,10 +61,10 @@ impl GitSource {
 
     /// Override the LFS preference. Prefer setting `lfs` on the [`GitUrl`]
     /// itself via [`GitUrl::with_lfs`] so it travels through dedup keys;
-    /// this builder is kept for cases where you want to override the URL's
-    /// preference at the source level.
+    /// this builder is kept for cases where you want to override at the
+    /// source level.
     #[must_use]
-    pub fn with_lfs(self, lfs: Option<GitLfs>) -> Self {
+    pub fn with_lfs(self, lfs: GitLfs) -> Self {
         Self { lfs, ..self }
     }
 
@@ -89,7 +86,7 @@ impl GitSource {
         };
 
         let remote = GitRemote::new(&remote);
-        let lfs_requested = self.lfs == Some(GitLfs::Enabled);
+        let lfs_requested = self.lfs.is_enabled();
         let (db, actual_rev, task) = match (self.git.precise, remote.db_at(&db_path).ok()) {
             // Cache hit: the DB has the commit and, if LFS was requested,
             // its LFS objects validate. Skip the regular fetch + checkout.

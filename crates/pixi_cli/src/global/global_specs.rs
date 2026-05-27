@@ -1,3 +1,4 @@
+use pixi_git::GitLfs;
 use std::{io, path::Path};
 
 use clap::Parser;
@@ -104,7 +105,7 @@ impl GlobalSpecs {
                     .map(Subdirectory::try_from)
                     .transpose()?
                     .unwrap_or_default(),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             };
             Some(PixiSpec::Git(git_spec))
         } else if let Some(path) = &self.path {

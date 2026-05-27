@@ -119,7 +119,7 @@ impl From<&Args> for GitOptions {
                 .unwrap_or_default()
                 .into(),
             subdir: args.dependency_config.subdir.clone(),
-            lfs: None,
+            lfs: pixi_git::GitLfs::Disabled,
         }
     }
 }
@@ -148,7 +148,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                     .unwrap_or_default()
                     .into(),
                 subdir: args.dependency_config.subdir.clone(),
-                lfs: None,
+                lfs: pixi_git::GitLfs::Disabled,
             };
 
             workspace_ctx

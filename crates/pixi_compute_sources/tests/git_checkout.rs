@@ -30,7 +30,7 @@ async fn pin_and_checkout_git_default_branch() {
         git: repo.base_url.clone(),
         rev: None,
         subdirectory: Subdirectory::default(),
-        lfs: None,
+        lfs: GitLfs::Disabled,
     };
 
     let checkout = engine
@@ -85,7 +85,7 @@ async fn pin_and_checkout_git_with_lfs() {
         git: repo.base_url.clone(),
         rev: None,
         subdirectory: Subdirectory::default(),
-        lfs: Some(GitLfs::Enabled),
+        lfs: GitLfs::Enabled,
     };
 
     let checkout = engine
@@ -98,7 +98,7 @@ async fn pin_and_checkout_git_with_lfs() {
     // re-validate LFS objects (`db.contains_lfs_artifacts` in `GitSource`).
     match checkout.pinned {
         PinnedSourceSpec::Git(pinned) => {
-            assert_eq!(pinned.source.lfs, Some(GitLfs::Enabled));
+            assert_eq!(pinned.source.lfs, GitLfs::Enabled);
         }
         other => panic!("expected git pinned spec, got {other:?}"),
     }
@@ -132,7 +132,7 @@ async fn git_checkout_fires_full_reporter_lifecycle() {
                 git: repo.base_url.clone(),
                 rev: None,
                 subdirectory: Subdirectory::default(),
-                lfs: None,
+                lfs: GitLfs::Disabled,
             })
             .await
         })

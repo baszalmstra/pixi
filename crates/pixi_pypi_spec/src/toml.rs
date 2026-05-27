@@ -163,7 +163,7 @@ impl RawPyPiRequirement {
                                 .map(pixi_spec::Subdirectory::try_from)
                                 .transpose()?
                                 .unwrap_or_default(),
-                            lfs: self.lfs.map(pixi_git::GitLfs::from),
+                            lfs: pixi_git::GitLfs::from(self.lfs),
                         },
                     },
                     self.extras,
@@ -385,10 +385,12 @@ impl From<PixiPypiSpec> for toml_edit::Value {
                         )),
                     );
                 }
-                if let Some(lfs) = lfs {
+                // Only emit `lfs = true` (mirrors uv's lockfile pattern).
+                // Absence is treated as Disabled by the parser.
+                if lfs.is_enabled() {
                     table.insert(
                         "lfs",
-                        toml_edit::Value::Boolean(toml_edit::Formatted::new(lfs.is_enabled())),
+                        toml_edit::Value::Boolean(toml_edit::Formatted::new(true)),
                     );
                 }
                 insert_extras(&mut table, extras);
@@ -698,7 +700,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: None,
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
@@ -718,7 +720,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Branch("main".to_string())),
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
@@ -738,7 +740,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Tag("v.1.2.3".to_string())),
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
@@ -758,7 +760,7 @@ mod test {
                     git: Url::parse("https://github.com/pallets/flask.git").unwrap(),
                     rev: Some(GitReference::Tag("3.0.0".to_string())),
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             }),
         );
@@ -778,7 +780,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Rev("123456".to_string())),
                     subdirectory: Default::default(),
-                    lfs: None,
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
@@ -798,7 +800,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: None,
                     subdirectory: Default::default(),
-                    lfs: Some(GitLfs::Enabled),
+                    lfs: GitLfs::Enabled,
                 },
             })
         );
@@ -818,7 +820,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Branch("main".to_string())),
                     subdirectory: Default::default(),
-                    lfs: Some(GitLfs::Disabled),
+                    lfs: GitLfs::Disabled,
                 },
             })
         );
