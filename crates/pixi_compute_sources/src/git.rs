@@ -101,13 +101,25 @@ impl LifecycleKind for GitReporterLifecycle {
 /// Stripping `precise` from the key let `checkout_pinned_source(A)`
 /// silently return the branch's HEAD instead of commit `A`
 /// (prefix-dev/pixi#6073).
+///
+/// The LFS flag is also part of the key: two callers asking for the same
+/// commit with different `lfs` preferences get distinct compute futures, so
+/// neither blocks on the other's choice (the on-disk DB is still shared via
+/// the path-based lock in `GitResolver::fetch`).
 #[derive(Clone, Debug, Display, Hash, PartialEq, Eq)]
 #[display("{}@{}", _0.repository(), _0.reference())]
-pub struct CheckoutGit(GitUrl);
+pub struct CheckoutGit(GitUrl, Option<bool>);
 
 impl CheckoutGit {
     pub fn new(git_url: &GitUrl) -> Self {
-        Self(git_url.clone())
+        Self(git_url.clone(), None)
+    }
+
+    /// Set the LFS preference for this checkout. `None` defers to the
+    /// `PIXI_GIT_LFS` env var; `Some(true/false)` is an explicit override.
+    pub fn with_lfs(mut self, lfs: Option<bool>) -> Self {
+        self.1 = lfs;
+        self
     }
 }
 
@@ -141,7 +153,13 @@ impl Key for CheckoutGit {
         // the branch HEAD when not (fresh resolve).
         Arc::new(
             resolver
-                .fetch(self.0.clone(), client, cache_dir.into_std_path_buf(), None)
+                .fetch(
+                    self.0.clone(),
+                    client,
+                    cache_dir.into_std_path_buf(),
+                    None,
+                    self.1,
+                )
                 .await,
         )
     }
@@ -174,6 +192,7 @@ impl GitSourceCheckoutExt for ComputeCtx {
             .unwrap_or(GitReference::DefaultBranch);
         let pinned_git_reference = git_spec.rev.clone().unwrap_or_default();
         let subdirectory = git_spec.subdirectory.clone();
+        let lfs = git_spec.lfs;
 
         let git_url = match GitUrl::try_from(git_spec.git).map_err(GitError::from) {
             Ok(url) => url.with_reference(git_reference),
@@ -182,7 +201,7 @@ impl GitSourceCheckoutExt for ComputeCtx {
             }
         };
 
-        let fut = self.compute(&CheckoutGit::new(&git_url));
+        let fut = self.compute(&CheckoutGit::new(&git_url).with_lfs(lfs));
         Either::Right(async move {
             let fetch = fut.await.as_ref().clone()?;
             let pinned = PinnedGitSpec {
@@ -191,6 +210,7 @@ impl GitSourceCheckoutExt for ComputeCtx {
                     commit: fetch.commit(),
                     subdirectory,
                     reference: pinned_git_reference,
+                    lfs,
                 },
             };
             Ok(SourceCheckout::from_git(fetch, pinned))
@@ -206,7 +226,8 @@ impl GitSourceCheckoutExt for ComputeCtx {
             git_spec.source.reference.clone().into(),
             git_spec.source.commit,
         );
-        let fut = self.compute(&CheckoutGit::new(&git_url));
+        let lfs = git_spec.source.lfs;
+        let fut = self.compute(&CheckoutGit::new(&git_url).with_lfs(lfs));
         async move {
             let fetch = fut.await.as_ref().clone()?;
             Ok(SourceCheckout::from_git(fetch, git_spec))

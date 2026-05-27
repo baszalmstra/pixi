@@ -312,9 +312,13 @@ pub fn into_pixi_reference(git_reference: uv_git_types::GitReference) -> PixiRef
 /// `?branch=/?tag=/?rev=` in sync with what the manifest's PEP 508 string
 /// actually says, so the satisfiability check matches without relying on the
 /// no-ref fallback.
+///
+/// `original_lfs` carries the manifest's `lfs = true/false` into the lock file
+/// (as a `?lfs=...` query pair); uv's `GitSourceDist` doesn't preserve it.
 pub fn into_pinned_git_spec(
     dist: GitSourceDist,
     original_reference: Option<PixiReference>,
+    original_lfs: Option<bool>,
 ) -> PinnedGitSpec {
     // Necessary to convert between our gitsha and uv gitsha.
     let git_sha = PixiGitSha::from_str(
@@ -335,7 +339,8 @@ pub fn into_pinned_git_spec(
             .and_then(|sd| pixi_spec::Subdirectory::try_from(sd.to_path_buf()).ok())
             .unwrap_or_default(),
         reference,
-    );
+    )
+    .with_lfs(original_lfs);
 
     // `url()` is the original URL; `repository()` is the canonical
     // (lowercased + `.git`-stripped) form that would corrupt the lockfile
@@ -373,7 +378,7 @@ pub fn to_parsed_git_url(
             },
             into_uv_git_reference(git_source.reference.into()),
             Some(into_uv_git_sha(git_source.commit)),
-            uv_git_types::GitLfs::Disabled,
+            crate::to_uv_git_lfs(git_source.lfs),
         )
         .into_diagnostic()?,
         if git_source.subdirectory.is_empty() {
@@ -902,7 +907,7 @@ mod tests {
             url: VerbatimUrl::from_url(safe_url),
         };
 
-        let pinned = into_pinned_git_spec(dist, None);
+        let pinned = into_pinned_git_spec(dist, None, None);
 
         assert_eq!(pinned.git.as_str(), original);
     }

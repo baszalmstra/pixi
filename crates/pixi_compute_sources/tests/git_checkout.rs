@@ -29,6 +29,7 @@ async fn pin_and_checkout_git_default_branch() {
         git: repo.base_url.clone(),
         rev: None,
         subdirectory: Subdirectory::default(),
+        lfs: None,
     };
 
     let checkout = engine
@@ -56,6 +57,60 @@ async fn pin_and_checkout_git_default_branch() {
     }
 }
 
+/// `lfs = Some(true)` on the spec flows through `pin_and_checkout_git` to
+/// `GitSource`, which materialises LFS blobs and records the flag on the
+/// pinned spec for the lock file.
+#[tokio::test]
+async fn pin_and_checkout_git_with_lfs() {
+    let lfs_ok = std::process::Command::new("git")
+        .args(["lfs", "version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !lfs_ok {
+        eprintln!("skipping pin_and_checkout_git_with_lfs: git-lfs is not installed");
+        return;
+    }
+
+    let repo = GitRepoFixture::new("lfs-sample");
+    assert!(repo.uses_lfs, "fixture should auto-detect LFS");
+
+    let engine = build_test_engine(EngineConfig {
+        sequential: true,
+        ..Default::default()
+    });
+
+    let spec = GitSpec {
+        git: repo.base_url.clone(),
+        rev: None,
+        subdirectory: Subdirectory::default(),
+        lfs: Some(true),
+    };
+
+    let checkout = engine
+        .with_ctx(async |ctx| ctx.pin_and_checkout_git(spec).await)
+        .await
+        .expect("engine scope")
+        .expect("git checkout should succeed");
+
+    // The lock-file pin records the explicit LFS request so reinstalls
+    // re-validate LFS objects (`db.contains_lfs_artifacts` in `GitSource`).
+    match checkout.pinned {
+        PinnedSourceSpec::Git(pinned) => {
+            assert_eq!(pinned.source.lfs, Some(true));
+        }
+        other => panic!("expected git pinned spec, got {other:?}"),
+    }
+
+    // `data.bin` should be the real blob — not still a git-lfs pointer file.
+    let data = checkout.path.join("data.bin");
+    let contents = fs_err::read_to_string(data.as_std_path()).unwrap_or_default();
+    assert!(
+        !contents.starts_with("version https://git-lfs.github.com/spec/"),
+        "data.bin should be materialised, not a pointer file"
+    );
+}
+
 /// One git checkout fires the full reporter sequence. The
 /// [`LifecycleReporter`] asserts ordering and exactly-once internally;
 /// the test just asserts the run reached the terminal state.
@@ -76,6 +131,7 @@ async fn git_checkout_fires_full_reporter_lifecycle() {
                 git: repo.base_url.clone(),
                 rev: None,
                 subdirectory: Subdirectory::default(),
+                lfs: None,
             })
             .await
         })

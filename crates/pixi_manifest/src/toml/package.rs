@@ -1414,6 +1414,7 @@ mod test {
             rev: None,
             tag: None,
             subdirectory: None,
+            lfs: None,
             md5: None,
             sha256: None,
         });

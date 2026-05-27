@@ -104,6 +104,7 @@ impl GlobalSpecs {
                     .map(Subdirectory::try_from)
                     .transpose()?
                     .unwrap_or_default(),
+                lfs: None,
             };
             Some(PixiSpec::Git(git_spec))
         } else if let Some(path) = &self.path {

@@ -13,7 +13,7 @@ use url::Url;
 
 #[derive(Error, Debug)]
 pub enum SpecConversion {
-    #[error("`branch`, `rev`, and `tag` are only valid when `git` is specified")]
+    #[error("`branch`, `rev`, `tag`, and `lfs` are only valid when `git` is specified")]
     MissingGit,
     #[error("Only one of `branch` or `tag` or `rev` can be specified")]
     MultipleGitSpecifiers,
@@ -71,6 +71,7 @@ struct RawPyPiRequirement {
     pub branch: Option<String>,
     pub tag: Option<String>,
     pub rev: Option<String>,
+    pub lfs: Option<bool>,
 
     // Url only
     pub url: Option<Url>,
@@ -84,7 +85,11 @@ struct RawPyPiRequirement {
 
 impl RawPyPiRequirement {
     fn into_pypi_requirement(self) -> Result<PixiPypiSpec, SpecConversion> {
-        if self.git.is_none() && (self.branch.is_some() || self.rev.is_some() || self.tag.is_some())
+        if self.git.is_none()
+            && (self.branch.is_some()
+                || self.rev.is_some()
+                || self.tag.is_some()
+                || self.lfs.is_some())
         {
             return Err(SpecConversion::MissingGit);
         }
@@ -158,6 +163,7 @@ impl RawPyPiRequirement {
                                 .map(pixi_spec::Subdirectory::try_from)
                                 .transpose()?
                                 .unwrap_or_default(),
+                            lfs: self.lfs,
                         },
                     },
                     self.extras,
@@ -204,6 +210,7 @@ impl<'de> toml_span::Deserialize<'de> for RawPyPiRequirement {
         let rev = th
             .optional::<TomlFromStr<_>>("rev")
             .map(TomlFromStr::into_inner);
+        let lfs = th.optional("lfs");
 
         let url = th
             .optional::<TomlFromStr<_>>("url")
@@ -231,6 +238,7 @@ impl<'de> toml_span::Deserialize<'de> for RawPyPiRequirement {
             branch,
             tag,
             rev,
+            lfs,
             url,
             subdirectory,
             index,
@@ -336,6 +344,7 @@ impl From<PixiPypiSpec> for toml_edit::Value {
                         git,
                         rev,
                         subdirectory,
+                        lfs,
                     },
             } => {
                 let mut table = toml_edit::Table::new().into_inline_table();
@@ -374,6 +383,12 @@ impl From<PixiPypiSpec> for toml_edit::Value {
                         toml_edit::Value::String(toml_edit::Formatted::new(
                             subdirectory.to_string(),
                         )),
+                    );
+                }
+                if let Some(lfs) = lfs {
+                    table.insert(
+                        "lfs",
+                        toml_edit::Value::Boolean(toml_edit::Formatted::new(*lfs)),
                     );
                 }
                 insert_extras(&mut table, extras);
@@ -642,7 +657,7 @@ mod test {
     fn test_deserialize_fail_on_unknown() {
         let input = r#"foo = { borked = "bork"}"#;
         assert_snapshot!(format_parse_error(input, from_toml_str::<TomlIndexMap::<pep508_rs::PackageName, PixiPypiSpec>>(input).unwrap_err()), @r#"
-         × Unexpected keys, expected only 'version', 'extras', 'path', 'editable', 'git', 'branch', 'tag', 'rev', 'url', 'subdirectory', 'index', 'env-markers'
+         × Unexpected keys, expected only 'version', 'extras', 'path', 'editable', 'git', 'branch', 'tag', 'rev', 'lfs', 'url', 'subdirectory', 'index', 'env-markers'
           ╭─[pixi.toml:1:9]
         1 │ foo = { borked = "bork"}
           ·         ───┬──
@@ -682,6 +697,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: None,
                     subdirectory: Default::default(),
+                    lfs: None,
                 },
             })
         );
@@ -701,6 +717,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Branch("main".to_string())),
                     subdirectory: Default::default(),
+                    lfs: None,
                 },
             })
         );
@@ -720,6 +737,7 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Tag("v.1.2.3".to_string())),
                     subdirectory: Default::default(),
+                    lfs: None,
                 },
             })
         );
@@ -739,6 +757,7 @@ mod test {
                     git: Url::parse("https://github.com/pallets/flask.git").unwrap(),
                     rev: Some(GitReference::Tag("3.0.0".to_string())),
                     subdirectory: Default::default(),
+                    lfs: None,
                 },
             }),
         );
@@ -758,8 +777,62 @@ mod test {
                     git: Url::parse("https://test.url.git").unwrap(),
                     rev: Some(GitReference::Rev("123456".to_string())),
                     subdirectory: Default::default(),
+                    lfs: None,
                 },
             })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_pypi_from_git_lfs() {
+        let requirement = from_toml_str::<TomlIndexMap<pep508_rs::PackageName, PixiPypiSpec>>(
+            r#"foo = { git = "https://test.url.git", lfs = true }"#,
+        )
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            requirement.first().unwrap().1,
+            &PixiPypiSpec::new(PixiPypiSource::Git {
+                git: GitSpec {
+                    git: Url::parse("https://test.url.git").unwrap(),
+                    rev: None,
+                    subdirectory: Default::default(),
+                    lfs: Some(true),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_pypi_from_git_lfs_false() {
+        let requirement = from_toml_str::<TomlIndexMap<pep508_rs::PackageName, PixiPypiSpec>>(
+            r#"foo = { git = "https://test.url.git", branch = "main", lfs = false }"#,
+        )
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            requirement.first().unwrap().1,
+            &PixiPypiSpec::new(PixiPypiSource::Git {
+                git: GitSpec {
+                    git: Url::parse("https://test.url.git").unwrap(),
+                    rev: Some(GitReference::Branch("main".to_string())),
+                    subdirectory: Default::default(),
+                    lfs: Some(false),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_pypi_lfs_without_git_fails() {
+        let result = from_toml_str::<TomlIndexMap<pep508_rs::PackageName, PixiPypiSpec>>(
+            r#"foo = { version = "*", lfs = true }"#,
+        );
+        let err = result.expect_err("lfs without git should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("only valid when `git` is specified"),
+            "unexpected error: {msg}"
         );
     }
 }

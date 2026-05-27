@@ -53,6 +53,18 @@ fn create_uv_url(
     url.parse()
 }
 
+/// Map a pixi-side LFS preference (tri-state) to uv's binary enum. uv only
+/// distinguishes "fetch LFS" from "don't"; we treat `None` (env-default) the
+/// same as `Some(false)`, since uv does its own git checkout outside of
+/// `pixi_git`'s `PIXI_GIT_LFS` plumbing.
+pub fn to_uv_git_lfs(lfs: Option<bool>) -> uv_git_types::GitLfs {
+    if lfs == Some(true) {
+        uv_git_types::GitLfs::Enabled
+    } else {
+        uv_git_types::GitLfs::Disabled
+    }
+}
+
 fn manifest_version_to_version_specifiers(
     version: &VersionOrStar,
 ) -> Result<VersionSpecifiers, uv_pep440::VersionSpecifiersParseError> {
@@ -112,6 +124,7 @@ pub fn as_uv_req(
                     git,
                     rev,
                     subdirectory,
+                    lfs,
                 },
         } => {
             let git_url = GitUrlWithPrefix::from(git);
@@ -132,7 +145,7 @@ pub fn as_uv_req(
                         .and_then(|s| s.map(uv_git_types::GitOid::from_str))
                         .transpose()
                         .expect("could not parse sha"),
-                    uv_git_types::GitLfs::Disabled,
+                    to_uv_git_lfs(*lfs),
                 )?,
                 subdirectory: if subdirectory.is_empty() {
                     None
@@ -363,6 +376,7 @@ mod tests {
                     "d099af3b1028b00c232d8eda28a997984ae5848b".to_string(),
                 )),
                 subdirectory: Default::default(),
+                lfs: None,
             },
         });
         let uv_req = as_uv_req(&pypi_req, "test", Path::new("")).unwrap();
@@ -391,6 +405,7 @@ mod tests {
                     "d099af3b1028b00c232d8eda28a997984ae5848b".to_string(),
                 )),
                 subdirectory: Default::default(),
+                lfs: None,
             },
         });
         let uv_req = as_uv_req(&pypi_req, "test", Path::new("")).unwrap();

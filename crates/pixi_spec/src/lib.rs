@@ -794,6 +794,7 @@ impl From<rattler_lock::source::GitSourceLocation> for GitSpec {
                 .subdirectory
                 .and_then(|s| Subdirectory::try_from(s).ok())
                 .unwrap_or_default(),
+            lfs: None,
         }
     }
 }

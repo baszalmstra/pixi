@@ -270,6 +270,9 @@ pub struct TomlLocationSpec {
     /// The git subdirectory of the package
     pub subdirectory: Option<String>,
 
+    /// Whether to fetch git LFS objects when checking out this source.
+    pub lfs: Option<bool>,
+
     /// The md5 hash of the package
     #[serde_as(as = "Option<rattler_digest::serde::SerializableHash::<rattler_digest::Md5>>")]
     pub md5: Option<Md5Hash>,
@@ -339,7 +342,7 @@ fn version_spec_error<T: Into<String>>(input: T) -> Option<impl Display> {
 
 #[derive(Error, Debug)]
 pub enum SpecError {
-    #[error("`branch`, `rev`, and `tag` are only valid when `git` is specified")]
+    #[error("`branch`, `rev`, `tag`, and `lfs` are only valid when `git` is specified")]
     NotAGitSpec,
 
     #[error("only one of `branch`, `rev`, or `tag` can be specified")]
@@ -398,7 +401,7 @@ impl SpecError {
 
 #[derive(Error, Debug)]
 pub enum SourceLocationSpecError {
-    #[error("`branch`, `rev`, and `tag` are only valid when `git` is specified")]
+    #[error("`branch`, `rev`, `tag`, and `lfs` are only valid when `git` is specified")]
     NotAGitSpec,
 
     #[error("only one of `branch`, `rev`, or `tag` can be specified")]
@@ -466,6 +469,7 @@ impl TomlSpec {
                 rev: m.rev.or(b.rev),
                 tag: m.tag.or(b.tag),
                 subdirectory: m.subdirectory.or(b.subdirectory),
+                lfs: m.lfs.or(b.lfs),
                 md5: m.md5.or(b.md5),
                 sha256: m.sha256.or(b.sha256),
             }),
@@ -537,7 +541,11 @@ impl TomlSpec {
 
     fn validate_field_combinations(&self) -> Result<(), SpecError> {
         let (is_git, is_path, is_url) = if let Some(loc) = &self.location {
-            if loc.git.is_none() && (loc.branch.is_some() || loc.rev.is_some() || loc.tag.is_some())
+            if loc.git.is_none()
+                && (loc.branch.is_some()
+                    || loc.rev.is_some()
+                    || loc.tag.is_some()
+                    || loc.lfs.is_some())
             {
                 return Err(SpecError::NotAGitSpec);
             }
@@ -641,6 +649,7 @@ impl TomlSpec {
                         git,
                         rev,
                         subdirectory,
+                        lfs: loc.lfs,
                     })
                 }
                 (None, None, None) => {
@@ -1085,7 +1094,10 @@ impl TomlLocationSpec {
     fn validate_field_combinations(&self) -> Result<(), SourceLocationSpecError> {
         let (is_git, is_path, is_url) = {
             if self.git.is_none()
-                && (self.branch.is_some() || self.rev.is_some() || self.tag.is_some())
+                && (self.branch.is_some()
+                    || self.rev.is_some()
+                    || self.tag.is_some()
+                    || self.lfs.is_some())
             {
                 return Err(SourceLocationSpecError::NotAGitSpec);
             }
@@ -1156,6 +1168,7 @@ impl TomlLocationSpec {
                     git,
                     rev,
                     subdirectory,
+                    lfs: self.lfs,
                 })
             }
             (_, _, _) => return Err(SourceLocationSpecError::MultipleIdentifiers),
@@ -1221,6 +1234,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlSpec {
         let rev = th.optional("rev");
         let tag = th.optional("tag");
         let subdirectory = th.optional("subdirectory");
+        let lfs = th.optional("lfs");
         let build = th
             .optional::<TomlFromStr<_>>("build")
             .map(TomlFromStr::into_inner);
@@ -1257,6 +1271,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlSpec {
                 rev,
                 tag,
                 subdirectory,
+                lfs,
                 md5,
                 sha256,
             }),
@@ -1387,6 +1402,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlLocationSpec {
         let rev = th.optional("rev");
         let tag = th.optional("tag");
         let subdirectory = th.optional("subdirectory");
+        let lfs = th.optional("lfs");
         let md5 = th
             .optional::<TomlDigest<rattler_digest::Md5>>("md5")
             .map(TomlDigest::into_inner);
@@ -1404,6 +1420,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlLocationSpec {
             rev,
             tag,
             subdirectory,
+            lfs,
             md5,
             sha256,
         })
@@ -1642,6 +1659,35 @@ mod test {
         }
 
         insta::assert_yaml_snapshot!(snapshot);
+    }
+
+    /// `lfs = true` on a conda git spec parses into `GitSpec.lfs == Some(true)`
+    /// so the downstream resolver can request LFS artifacts.
+    #[test]
+    fn test_conda_git_lfs_parses() {
+        let spec: PixiSpec = serde_json::from_value(json!({
+            "git": "https://github.com/example/repo",
+            "lfs": true,
+        }))
+        .expect("parse should succeed");
+        let git = spec.as_git().expect("expected a git spec");
+        assert_eq!(git.lfs, Some(true));
+    }
+
+    /// `lfs` without `git` is rejected the same way `branch` / `rev` / `tag`
+    /// are: keeps error messages consistent and stops confused-looking
+    /// version specs from silently accepting an LFS flag.
+    #[test]
+    fn test_conda_lfs_without_git_rejected() {
+        let err = serde_json::from_value::<PixiSpec>(json!({
+            "version": "*",
+            "lfs": true,
+        }))
+        .expect_err("lfs without git should fail");
+        assert!(
+            err.to_string().contains("only valid when `git`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

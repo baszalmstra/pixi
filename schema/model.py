@@ -310,6 +310,10 @@ class MatchspecTable(StrictBaseModel):
     tag: NonEmptyStr | None = Field(None, description="A git tag to use")
     branch: NonEmptyStr | None = Field(None, description="A git branch to use")
     subdirectory: NonEmptyStr | None = Field(None, description="A subdirectory to use in the repo")
+    lfs: bool | None = Field(
+        None,
+        description="Fetch git LFS objects when checking out this repo. Defaults to the `PIXI_GIT_LFS` env var.",
+    )
 
 
 class SourceSpecTable(StrictBaseModel):
@@ -326,6 +330,10 @@ class SourceSpecTable(StrictBaseModel):
     tag: NonEmptyStr | None = Field(None, description="A git tag to use")
     branch: NonEmptyStr | None = Field(None, description="A git branch to use")
     subdirectory: NonEmptyStr | None = Field(None, description="A subdirectory to use in the repo")
+    lfs: bool | None = Field(
+        None,
+        description="Fetch git LFS objects when checking out this repo. Defaults to the `PIXI_GIT_LFS` env var.",
+    )
 
 
 class WhenAll(StrictBaseModel):
@@ -421,6 +429,10 @@ class _PyPiGitRequirement(_PyPIRequirement):
     )
     subdirectory: NonEmptyStr | None = Field(
         None, description="The subdirectory in the repo, a path from the root of the repo."
+    )
+    lfs: bool | None = Field(
+        None,
+        description="Fetch git LFS objects when checking out this repo. Defaults to the `PIXI_GIT_LFS` env var.",
     )
 
 
@@ -974,6 +986,10 @@ class SourceLocation(StrictBaseModel):
     tag: NonEmptyStr | None = Field(None, description="A git tag to use")
     branch: NonEmptyStr | None = Field(None, description="A git branch to use")
     subdirectory: NonEmptyStr | None = Field(None, description="A subdirectory to use in the repo")
+    lfs: bool | None = Field(
+        None,
+        description="Fetch git LFS objects when checking out this repo. Defaults to the `PIXI_GIT_LFS` env var.",
+    )
 
 
 class Build(StrictBaseModel):

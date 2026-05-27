@@ -182,6 +182,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::Branch("main".to_string()),
+                lfs: None,
             },
         });
 
@@ -191,6 +192,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::Tag("v1.0.0".to_string()),
+                lfs: None,
             },
         });
 
@@ -208,6 +210,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
+                lfs: None,
             },
         });
 
@@ -217,6 +220,7 @@ mod tests {
                 commit: GitSha::from_str("def456789012345678901234567890abcdabc123").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
+                lfs: None,
             },
         });
 
@@ -235,6 +239,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
+                lfs: None,
             },
         });
 
@@ -244,6 +249,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Default::default(),
                 reference: GitReference::DefaultBranch,
+                lfs: None,
             },
         });
 
@@ -261,6 +267,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Subdirectory::try_from("subdir1").unwrap(),
                 reference: GitReference::DefaultBranch,
+                lfs: None,
             },
         });
 
@@ -270,6 +277,7 @@ mod tests {
                 commit: GitSha::from_str("abc123def456789012345678901234567890abcd").unwrap(),
                 subdirectory: Subdirectory::try_from("subdir2").unwrap(),
                 reference: GitReference::DefaultBranch,
+                lfs: None,
             },
         });
 

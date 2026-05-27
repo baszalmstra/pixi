@@ -369,6 +369,20 @@ pub async fn resolve_pypi(
         })
         .collect();
 
+    // Same idea as `original_git_references`, but for the `lfs` flag: uv doesn't
+    // know it, so we shuttle it from the manifest into the lock file ourselves.
+    let original_git_lfs: HashMap<_, _> = dependencies
+        .iter()
+        .filter_map(|(name, specs)| {
+            specs.iter().find_map(|spec| {
+                spec.source
+                    .as_git()
+                    .and_then(|git_spec| git_spec.lfs)
+                    .map(|lfs| (name.clone(), lfs))
+            })
+        })
+        .collect();
+
     // Pre-populate the git resolver with locked git references.
     // This ensures that when uv resolves git dependencies, it will find the cached commit
     // and not panic in `url_to_precise` function.
@@ -838,6 +852,7 @@ pub async fn resolve_pypi(
             context.concurrency.downloads_semaphore.clone(),
             project_root,
             &original_git_references,
+            &original_git_lfs,
         )
         .await
         .map_err(|e| SolveError::Locking(e.into()))?;
@@ -1002,6 +1017,7 @@ async fn lock_pypi_packages(
     downloads_semaphore: Arc<tokio::sync::Semaphore>,
     abs_project_root: &Path,
     original_git_references: &HashMap<uv_normalize::PackageName, pixi_spec::GitReference>,
+    original_git_lfs: &HashMap<uv_normalize::PackageName, bool>,
 ) -> miette::Result<LockedPypiRecords> {
     let mut locked_packages = Vec::with_capacity(resolution.len());
     let database =
@@ -1194,10 +1210,11 @@ async fn lock_pypi_packages(
                             let package_name = git.name.clone();
                             let original_reference =
                                 original_git_references.get(&package_name).cloned();
+                            let original_lfs = original_git_lfs.get(&package_name).copied();
 
                             // convert resolved source dist into a pinned git spec
                             let pinned_git_spec =
-                                into_pinned_git_spec(git.clone(), original_reference);
+                                into_pinned_git_spec(git.clone(), original_reference, original_lfs);
                             locked_packages.push(wheel(
                                 metadata,
                                 pinned_git_spec.into_locked_git_url().to_url().into(),

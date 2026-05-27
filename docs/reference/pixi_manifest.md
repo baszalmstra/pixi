@@ -988,13 +988,19 @@ Use `git` in combination with `rev` or `subdirectory`:
 
 - `rev`: A specific revision to install. e.g. `rev = "0106aced5faa299e6ede89d1230bd6784f2c3660`
 - `subdirectory`: A subdirectory to install from. `subdirectory = "src"` or `subdirectory = "src/packagex"`
+- `lfs`: Fetch git LFS objects (e.g. data tracked with [git-lfs](https://git-lfs.com/)) when checking out the repo. Defaults to off. When unset, Pixi honours the `PIXI_GIT_LFS` environment variable.
 
 ```toml
 # Note don't forget the `ssh://` or `https://` prefix!
 pytest = { git = "https://github.com/pytest-dev/pytest.git"}
 httpx = { git = "https://github.com/encode/httpx.git", rev = "c7c13f18a5af4c64c649881b2fe8dbd72a519c32"}
 py-rattler = { git = "ssh://git@github.com/conda/rattler.git", subdirectory = "py-rattler" }
+# Materialise LFS-tracked files instead of leaving them as pointer files
+lfs-example = { git = "https://github.com/foo/lfs-repo.git", lfs = true }
 ```
+
+!!! note "Requires `git-lfs`"
+    Setting `lfs = true` requires the `git-lfs` executable on `PATH`. Install it with your system package manager (or `pixi global install git-lfs`).
 
 ##### `path`
 

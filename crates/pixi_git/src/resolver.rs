@@ -47,12 +47,17 @@ impl GitResolver {
     }
 
     /// Fetch a remote Git repository.
+    ///
+    /// `lfs` overrides the env-var default (`PIXI_GIT_LFS`): `Some(true)` /
+    /// `Some(false)` is explicit, `None` defers to the env. See
+    /// [`GitSource::with_lfs`].
     pub async fn fetch(
         &self,
         url: GitUrl,
         client: LazyClient,
         cache: PathBuf,
         reporter: Option<Arc<dyn Reporter>>,
+        lfs: Option<bool>,
     ) -> Result<Fetch, GitError> {
         debug!("Fetching source distribution from Git: {url}");
 
@@ -80,7 +85,13 @@ impl GitResolver {
         write_guard.begin().await?;
 
         // Fetch the Git repository.
-        let source = GitSource::new(url.clone(), client, cache);
+        let mut source = GitSource::new(url.clone(), client, cache);
+        // Caller-provided `lfs` overrides the env-var default `None` set by
+        // `GitSource::new`. Skip the call entirely for `None` so the env var
+        // still wins for callers that don't care.
+        if lfs.is_some() {
+            source = source.with_lfs(lfs);
+        }
         let source = if let Some(reporter) = reporter {
             source.with_reporter(reporter)
         } else {

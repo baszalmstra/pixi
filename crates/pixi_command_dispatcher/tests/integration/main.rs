@@ -229,6 +229,7 @@ pub async fn simple_test() {
                     git: git_repo.url.parse().unwrap(),
                     rev: Some(GitReference::Rev(git_repo.commits[0].clone())),
                     subdirectory: Subdirectory::try_from("recipe").unwrap(),
+                    lfs: None,
                 }
                 .into(),
             )]),

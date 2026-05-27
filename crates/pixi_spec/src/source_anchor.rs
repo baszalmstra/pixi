@@ -82,6 +82,7 @@ impl SourceAnchor {
                 git,
                 rev,
                 subdirectory,
+                lfs,
             }) => {
                 let base_subdir = subdirectory.as_path().to_string_lossy();
                 let relative_subdir = normalize::normalize_typed(
@@ -100,6 +101,7 @@ impl SourceAnchor {
                     git: git.clone(),
                     rev: rev.clone(),
                     subdirectory,
+                    lfs: *lfs,
                 })
             }
         }

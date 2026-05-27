@@ -21,4 +21,8 @@ pub struct GitOptions {
     pub git: Option<Url>,
     pub reference: GitReference,
     pub subdir: Option<String>,
+    /// Fetch git LFS objects (`Some(true/false)`) or defer to the
+    /// `PIXI_GIT_LFS` env var (`None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<bool>,
 }
