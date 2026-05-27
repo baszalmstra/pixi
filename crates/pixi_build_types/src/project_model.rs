@@ -423,6 +423,60 @@ pub struct GitSpec {
 
     /// The git subdirectory of the package
     pub subdirectory: Option<String>,
+
+    /// Whether the source was checked out with git LFS objects materialised.
+    /// Part of the source identity: an LFS checkout and a non-LFS checkout
+    /// at the same commit produce different file trees (pointer files vs
+    /// real blobs), so backends building from the URL need to know.
+    /// Defaults to `None` (unset) when the manifest didn't specify; the env
+    /// fallback is resolved on the pixi side before reaching the backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<GitLfs>,
+}
+
+/// Whether to fetch git LFS objects when checking out a repository. Mirrors
+/// uv's `GitLfs` and pixi's `pixi_git::GitLfs`; wire-serialised as a bool
+/// (`lfs: true`/`lfs: false`) so existing manifests round-trip unchanged.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum GitLfs {
+    /// Fetch git-LFS objects; materialise pointer files to real blobs.
+    Enabled,
+    /// Skip git-LFS; pointer files stay as pointers.
+    Disabled,
+}
+
+impl GitLfs {
+    /// `true` for [`GitLfs::Enabled`].
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+impl From<bool> for GitLfs {
+    fn from(b: bool) -> Self {
+        if b { Self::Enabled } else { Self::Disabled }
+    }
+}
+
+impl From<GitLfs> for bool {
+    fn from(lfs: GitLfs) -> Self {
+        lfs.is_enabled()
+    }
+}
+
+// Wire as bool so a `lfs = true/false` manifest round-trips through the
+// JSON-RPC layer without any reformatting.
+impl Serialize for GitLfs {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_bool(self.is_enabled())
+    }
+}
+
+impl<'de> Deserialize<'de> for GitLfs {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        bool::deserialize(de).map(GitLfs::from)
+    }
 }
 
 /// A specification of a package from a path
@@ -795,6 +849,7 @@ impl Hash for GitSpec {
             .field("git", &self.git)
             .field("rev", &self.rev)
             .field("subdirectory", &self.subdirectory)
+            .field("lfs", &self.lfs.map(bool::from))
             .finish(state);
     }
 }

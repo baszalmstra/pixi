@@ -6360,6 +6360,7 @@ dependencies = [
  "itertools 0.14.0",
  "ordermap",
  "pixi_build_types",
+ "pixi_git",
  "pixi_manifest",
  "pixi_spec",
  "rattler_conda_types",

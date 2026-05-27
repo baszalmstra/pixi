@@ -12,8 +12,8 @@ pub use capabilities::{BackendCapabilities, FrontendCapabilities};
 pub use channel_configuration::ChannelConfiguration;
 pub use conda_package_metadata::CondaPackageMetadata;
 pub use project_model::{
-    BinaryPackageSpec, ConstraintSpec, GitReference, GitSpec, NamedSpec, PackageSpec, PathSpec,
-    PinBound, PinCompatibleSpec, PinExpression, ProjectModel, SourcePackageLocationSpec,
+    BinaryPackageSpec, ConstraintSpec, GitLfs, GitReference, GitSpec, NamedSpec, PackageSpec,
+    PathSpec, PinBound, PinCompatibleSpec, PinExpression, ProjectModel, SourcePackageLocationSpec,
     SourcePackageName, SourcePackageSpec, Target, TargetSelector, Targets, UrlSpec,
 };
 use rattler_conda_types::{

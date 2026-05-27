@@ -64,7 +64,7 @@ fn to_pixi_spec_v1(
                         git,
                         rev,
                         subdirectory,
-                        lfs: _,
+                        lfs,
                     } = git_spec;
                     pbt::SourcePackageLocationSpec::Git(pbt::GitSpec {
                         git,
@@ -75,6 +75,13 @@ fn to_pixi_spec_v1(
                             GitReference::DefaultBranch => pbt::GitReference::DefaultBranch,
                         }),
                         subdirectory: subdirectory.to_option_string(),
+                        // pixi-side enum and protocol enum are bit-for-bit
+                        // identical (both wire as bool); map across the
+                        // boundary explicitly.
+                        lfs: lfs.map(|p| match p {
+                            pixi_git::GitLfs::Enabled => pbt::GitLfs::Enabled,
+                            pixi_git::GitLfs::Disabled => pbt::GitLfs::Disabled,
+                        }),
                     })
                 }
                 pixi_spec::SourceLocationSpec::Path(path_source_spec) => {
