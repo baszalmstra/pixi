@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use fancy_display::FancyDisplay;
 use miette::IntoDiagnostic;
@@ -16,7 +19,7 @@ use crate::interface::Interface;
 pub async fn list_tasks(
     workspace: &Workspace,
     environment: Option<EnvironmentName>,
-) -> miette::Result<HashMap<EnvironmentName, HashMap<TaskName, Task>>> {
+) -> miette::Result<HashMap<EnvironmentName, HashMap<TaskName, Arc<Task>>>> {
     let explicit_environment = environment
         .map(|n| {
             workspace

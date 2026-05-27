@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use indexmap::{IndexMap, IndexSet};
 use miette::IntoDiagnostic;
@@ -256,7 +256,7 @@ impl<I: Interface> WorkspaceContext<I> {
         &self,
         feature: FeatureName,
         target: Option<&TargetSelector>,
-    ) -> Option<HashMap<TaskName, Task>> {
+    ) -> Option<HashMap<TaskName, Arc<Task>>> {
         crate::workspace::workspace::feature::list_feature_tasks(&self.workspace, feature, target)
             .await
     }
@@ -359,7 +359,7 @@ impl<I: Interface> WorkspaceContext<I> {
     pub async fn list_tasks(
         &self,
         environment: Option<EnvironmentName>,
-    ) -> miette::Result<HashMap<EnvironmentName, HashMap<TaskName, Task>>> {
+    ) -> miette::Result<HashMap<EnvironmentName, HashMap<TaskName, Arc<Task>>>> {
         crate::workspace::task::list_tasks(&self.workspace, environment).await
     }
 

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, str::FromStr};
+use std::{borrow::Cow, collections::HashMap, str::FromStr, sync::Arc};
 
 use indexmap::{IndexMap, map::Entry};
 use itertools::Either;
@@ -47,7 +47,7 @@ pub struct WorkspaceTarget {
     pub activation: Option<Activation>,
 
     /// Target specific tasks to run in the environment
-    pub tasks: HashMap<TaskName, Task>,
+    pub tasks: HashMap<TaskName, Arc<Task>>,
 }
 
 /// A package target describes the dependencies for a specific platform.
@@ -55,6 +55,9 @@ pub struct WorkspaceTarget {
 pub struct PackageTarget {
     /// Dependencies for this target.
     pub dependencies: HashMap<SpecType, DependencyMap<PackageName, PixiSpec>>,
+
+    /// Tasks defined on this target.
+    pub tasks: HashMap<TaskName, Arc<Task>>,
 }
 
 impl WorkspaceTarget {

@@ -1400,6 +1400,34 @@
             }
           ]
         },
+        "tasks": {
+          "title": "Tasks",
+          "description": "The tasks of the package",
+          "type": "object",
+          "patternProperties": {
+            "^[^\\s\\$]+$": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskInlineTable"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/DependsOn"
+                  }
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ]
+            }
+          },
+          "propertyNames": {
+            "description": "A valid task name.",
+            "minLength": 1
+          }
+        },
         "version": {
           "title": "Version",
           "description": "The version of the project; we advise use of [SemVer](https://semver.org). Can be a string or { workspace = true } to inherit from workspace",
@@ -1504,6 +1532,34 @@
             ]
           },
           "propertyNames": {
+            "minLength": 1
+          }
+        },
+        "tasks": {
+          "title": "Tasks",
+          "description": "The tasks of the target",
+          "type": "object",
+          "patternProperties": {
+            "^[^\\s\\$]+$": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskInlineTable"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/DependsOn"
+                  }
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ]
+            }
+          },
+          "propertyNames": {
+            "description": "A valid task name.",
             "minLength": 1
           }
         }

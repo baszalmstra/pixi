@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, hash::Hash, path::Path, str::FromStr};
+use std::{collections::HashMap, fmt::Display, hash::Hash, path::Path, str::FromStr, sync::Arc};
 
 use indexmap::{Equivalent, IndexMap, IndexSet};
 use itertools::Itertools;
@@ -130,7 +130,7 @@ impl WorkspaceManifest {
         &self,
         platform: Option<Platform>,
         feature_name: &FeatureName,
-    ) -> Result<HashMap<TaskName, &Task>, GetFeatureError> {
+    ) -> Result<HashMap<TaskName, &Arc<Task>>, GetFeatureError> {
         Ok(self
             .features
             .get(feature_name)
@@ -250,7 +250,7 @@ impl WorkspaceManifestMut<'_> {
         self.workspace
             .get_or_insert_target_mut(platform, Some(feature_name))
             .tasks
-            .insert(name, task);
+            .insert(name, Arc::new(task));
 
         Ok(())
     }

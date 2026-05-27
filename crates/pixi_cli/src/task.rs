@@ -4,6 +4,7 @@ use std::{
     io::Write,
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
 };
 
 use clap::Parser;
@@ -258,7 +259,7 @@ fn print_heading(value: &str) {
 /// Create a human-readable representation of a list of tasks.
 /// Using a tabwriter for described tasks.
 fn print_tasks(
-    task_map: HashMap<EnvironmentName, HashMap<TaskName, Task>>,
+    task_map: HashMap<EnvironmentName, HashMap<TaskName, Arc<Task>>>,
     summary: bool,
 ) -> Result<(), std::io::Error> {
     if summary {
@@ -476,15 +477,15 @@ struct SerializableTask {
     info: TaskInfo,
 }
 
-impl From<(&FeatureName, &HashMap<&TaskName, &Task>)> for SerializableFeature {
-    fn from((feature_name, task_map): (&FeatureName, &HashMap<&TaskName, &Task>)) -> Self {
+impl From<(&FeatureName, &HashMap<&TaskName, &Arc<Task>>)> for SerializableFeature {
+    fn from((feature_name, task_map): (&FeatureName, &HashMap<&TaskName, &Arc<Task>>)) -> Self {
         Self {
             name: feature_name.to_string(),
             tasks: task_map
                 .iter()
                 .map(|(task_name, task)| SerializableTask {
                     name: task_name.to_string(),
-                    info: TaskInfo::from(*task),
+                    info: TaskInfo::from((**task).as_ref()),
                 })
                 .collect(),
         }

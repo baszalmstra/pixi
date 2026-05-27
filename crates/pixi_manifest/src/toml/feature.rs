@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use indexmap::{IndexMap, IndexSet};
 use pixi_toml::{TomlHashMap, TomlIndexMap, TomlIndexSet, TomlWith};
@@ -42,7 +42,7 @@ pub struct TomlFeature {
     pub activation: Option<Activation>,
 
     /// Target specific tasks to run in the environment
-    pub tasks: HashMap<TaskName, Task>,
+    pub tasks: HashMap<TaskName, Arc<Task>>,
 
     /// Additional options for PyPi dependencies.
     pub pypi_options: Option<PypiOptions>,
@@ -194,7 +194,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlFeature {
                     warnings: mut task_warnings,
                 } = value;
                 warnings.append(&mut task_warnings);
-                (key, task)
+                (key, Arc::new(task))
             })
             .collect();
         let pypi_options = th.optional("pypi-options");

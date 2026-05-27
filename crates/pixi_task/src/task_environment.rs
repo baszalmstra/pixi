@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use miette::Diagnostic;
 use pixi_core::{
     Workspace,
@@ -16,7 +18,7 @@ pub enum FindTaskSource<'p> {
     DependsOn(TaskName, &'p Task),
 }
 
-pub type TaskAndEnvironment<'p> = (Environment<'p>, &'p Task);
+pub type TaskAndEnvironment<'p> = (Environment<'p>, &'p Arc<Task>);
 
 pub trait TaskDisambiguation<'p> {
     fn disambiguate(&self, task: &AmbiguousTask<'p>) -> Option<TaskAndEnvironment<'p>>;

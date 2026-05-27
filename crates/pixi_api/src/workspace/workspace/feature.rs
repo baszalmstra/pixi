@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use indexmap::{IndexMap, IndexSet};
 use miette::IntoDiagnostic;
@@ -66,7 +66,7 @@ pub async fn list_feature_tasks(
     workspace: &Workspace,
     feature: FeatureName,
     target: Option<&TargetSelector>,
-) -> Option<HashMap<TaskName, Task>> {
+) -> Option<HashMap<TaskName, Arc<Task>>> {
     workspace.workspace.value.feature(&feature).and_then(|f| {
         f.targets
             .for_opt_target(target)

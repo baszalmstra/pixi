@@ -22,6 +22,16 @@ pub fn format_parse_error(source: &str, error: impl Into<Report>) -> String {
     )
 }
 
+/// Format a sequence of warnings (or any other diagnostics) into a single
+/// string suitable for snapshot tests. Each entry is rendered like
+/// [`format_parse_error`] and joined with a blank line.
+pub fn format_warnings(source: &str, warnings: impl IntoIterator<Item = impl Into<Report>>) -> String {
+    warnings
+        .into_iter()
+        .map(|w| format_parse_error(source, w))
+        .join("\n\n")
+}
+
 /// Format a diagnostic into a string that can be used to generate snapshots.
 pub fn format_diagnostic(error: &dyn Diagnostic) -> String {
     // Disable colors in tests

@@ -944,6 +944,10 @@ class Package(StrictBaseModel):
     run_dependencies: InheritableDependencies = RunDependenciesField
     run_constraints: InheritableDependencies = RunConstraintsField
 
+    tasks: dict[TaskName, TaskInlineTable | list[DependsOn] | NonEmptyStr] | None = Field(
+        None, description="The tasks of the package"
+    )
+
     target: dict[TargetName, PackageTarget] | None = Field(
         None,
         description="Machine-specific aspects of the package",
@@ -1043,6 +1047,9 @@ class PackageTarget(StrictBaseModel):
     run_constraints: InheritableDependencies = RunConstraintsField
     host_dependencies: InheritableDependencies = HostDependenciesField
     build_dependencies: InheritableDependencies = BuildDependenciesField
+    tasks: dict[TaskName, TaskInlineTable | list[DependsOn] | NonEmptyStr] | None = Field(
+        None, description="The tasks of the target"
+    )
 
 
 #######################

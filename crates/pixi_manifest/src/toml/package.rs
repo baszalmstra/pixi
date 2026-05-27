@@ -1,20 +1,26 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use indexmap::IndexMap;
 use pixi_spec::TomlSpec;
 pub use pixi_toml::TomlFromStr;
-use pixi_toml::{DeserializeAs, Same, TomlIndexMap, TomlWith};
+use pixi_toml::{DeserializeAs, Same, TomlHashMap, TomlIndexMap, TomlWith};
 use rattler_conda_types::{PackageName, Version};
 use thiserror::Error;
 use toml_span::{DeserError, Span, Spanned, Value, de_helpers::TableHelper};
 use url::Url;
 
 use crate::{
-    PackageManifest, Preview, TargetSelector, Targets, TomlError, WithWarnings,
+    PackageManifest, Preview, TargetSelector, Targets, Task, TaskName, TomlError, Warning,
+    WithWarnings,
     error::GenericError,
     package::Package,
     toml::{
         TomlPackageBuild, manifest::ExternalWorkspaceProperties, package_target::TomlPackageTarget,
+        task::TomlTask,
     },
     utils::{PixiSpanned, inheritable_package_map::InheritablePackageMap},
 };
@@ -137,14 +143,17 @@ pub struct TomlPackage {
     pub build_dependencies: Option<PixiSpanned<InheritablePackageMap>>,
     pub run_dependencies: Option<PixiSpanned<InheritablePackageMap>>,
     pub run_constraints: Option<PixiSpanned<InheritablePackageMap>>,
+    pub tasks: HashMap<TaskName, Arc<Task>>,
     pub target: IndexMap<PixiSpanned<TargetSelector>, TomlPackageTarget>,
 
+    pub warnings: Vec<Warning>,
     pub span: Span,
 }
 
 impl<'de> toml_span::Deserialize<'de> for TomlPackage {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
+        let mut warnings = Vec::new();
 
         let name = th.optional("name");
         let version = th
@@ -176,6 +185,20 @@ impl<'de> toml_span::Deserialize<'de> for TomlPackage {
         let build_dependencies = th.optional("build-dependencies");
         let run_dependencies = th.optional("run-dependencies");
         let run_constraints = th.optional("run-constraints");
+        let tasks = th
+            .optional::<TomlHashMap<_, TomlTask>>("tasks")
+            .map(TomlHashMap::into_inner)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, value)| {
+                let TomlTask {
+                    value: task,
+                    warnings: mut task_warnings,
+                } = value;
+                warnings.append(&mut task_warnings);
+                (key, Arc::new(task))
+            })
+            .collect();
         let build = th.required("build")?;
         let target = th
             .optional::<TomlWith<_, TomlIndexMap<_, Same>>>("target")
@@ -198,8 +221,10 @@ impl<'de> toml_span::Deserialize<'de> for TomlPackage {
             build_dependencies,
             run_dependencies,
             run_constraints,
+            tasks,
             build,
             target,
+            warnings,
             span: value.span,
         })
     }
@@ -325,7 +350,7 @@ impl TomlPackage {
         preview: &Preview,
         root_directory: &Path,
     ) -> Result<WithWarnings<PackageManifest>, TomlError> {
-        let mut warnings = Vec::new();
+        let mut warnings = self.warnings;
 
         // Re-base workspace dependency path specs against this member's
         // directory. The pool itself stores them relative to the workspace root.
@@ -358,15 +383,20 @@ impl TomlPackage {
             run_constraints: self.run_constraints,
             host_dependencies: self.host_dependencies,
             build_dependencies: self.build_dependencies,
+            tasks: self.tasks,
+            ..Default::default()
         }
         .into_package_target(preview, &workspace_dependencies)?;
+        warnings.extend(default_package_target.warnings);
+        let default_package_target = default_package_target.value;
 
         let targets = self
             .target
             .into_iter()
             .map(|(selector, target)| {
                 let target = target.into_package_target(preview, &workspace_dependencies)?;
-                Ok::<_, TomlError>((selector, target))
+                warnings.extend(target.warnings);
+                Ok::<_, TomlError>((selector, target.value))
             })
             .collect::<Result<_, _>>()?;
 
@@ -545,7 +575,7 @@ mod test {
     use fs_err as fs;
     use insta::assert_snapshot;
     use pixi_spec::PixiSpec;
-    use pixi_test_utils::format_parse_error;
+    use pixi_test_utils::{format_parse_error, format_warnings};
     use rattler_conda_types::{PackageName, Platform};
     use tempfile::TempDir;
 
@@ -1271,6 +1301,130 @@ mod test {
             "only-linux-constrained",
             ">=3.0",
         );
+    }
+
+    #[track_caller]
+    fn assert_task_command(tasks: &std::collections::HashMap<TaskName, Arc<Task>>, name: &str, expected: &str) {
+        let key = TaskName::from(name);
+        let task = tasks
+            .get(&key)
+            .unwrap_or_else(|| panic!("missing task '{name}'"));
+        let rendered = task
+            .as_single_command_no_render()
+            .unwrap()
+            .unwrap_or_else(|| panic!("task '{name}' has no command"));
+        assert_eq!(rendered.as_ref(), expected);
+    }
+
+    #[test]
+    fn test_package_tasks_default_target() {
+        // Top-level `[package.tasks]` must land in the default PackageTarget's
+        // tasks bucket.
+        let input = r#"
+        name = "pkg"
+        version = "1.0"
+
+        [tasks]
+        build = "make"
+        test = "pytest"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+        "#;
+
+        let manifest = parse_package(input);
+        let tasks = &manifest.targets.default().tasks;
+        assert_eq!(tasks.len(), 2, "expected exactly two default-target tasks");
+        assert_task_command(tasks, "build", "make");
+        assert_task_command(tasks, "test", "pytest");
+    }
+
+    #[test]
+    fn test_package_target_specific_tasks_isolated_from_default() {
+        // Per-target `[package.target.<sel>.tasks]` must land only in that
+        // selector's bucket; the default target only sees the top-level tasks.
+        // Resolve-time "more specific wins" semantics are a PR-2 concern.
+        let input = r#"
+        name = "pkg"
+        version = "1.0"
+
+        [tasks]
+        build = "make"
+
+        [target.linux-64.tasks]
+        build = "make linux"
+        test-linux = "ctest"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+        "#;
+
+        let manifest = parse_package(input);
+
+        let default_tasks = &manifest.targets.default().tasks;
+        assert_eq!(default_tasks.len(), 1, "default target keeps only its own task");
+        assert_task_command(default_tasks, "build", "make");
+
+        let linux = manifest
+            .targets
+            .for_target(&TargetSelector::Platform(Platform::Linux64))
+            .expect("linux-64 target should exist");
+        assert_eq!(linux.tasks.len(), 2);
+        assert_task_command(&linux.tasks, "build", "make linux");
+        assert_task_command(&linux.tasks, "test-linux", "ctest");
+    }
+
+    #[test]
+    fn test_package_tasks_propagate_deprecation_warnings() {
+        // Deprecated task spellings (`depends_on` snake_case) inside both
+        // top-level `[package.tasks]` and per-target `[package.target.<sel>.tasks]`
+        // must surface as warnings on the resulting manifest.
+        let input = r#"
+name = "pkg"
+version = "1.0"
+
+[tasks.build]
+cmd = "make"
+depends_on = ["fetch"]
+
+[target.linux-64.tasks.test]
+cmd = "ctest"
+depends_on = ["build"]
+
+[build]
+backend = { name = "bla", version = "1.0" }
+"#;
+
+        let result = TomlPackage::from_toml_str(input)
+            .and_then(|w| {
+                w.into_manifest(
+                    WorkspacePackageProperties::default(),
+                    PackageDefaults::default(),
+                    &Preview::default(),
+                    Path::new(""),
+                )
+            })
+            .expect("manifest should parse");
+
+        assert_snapshot!(format_warnings(input, result.warnings), @r###"
+          ⚠ The `depends_on` field is deprecated. Use `depends-on` instead.
+           ╭─[pixi.toml:7:1]
+         6 │ cmd = "make"
+         7 │ depends_on = ["fetch"]
+           · ─────┬────
+           ·      ╰── replace this with 'depends-on'
+         8 │
+           ╰────
+
+          ⚠ The `depends_on` field is deprecated. Use `depends-on` instead.
+            ╭─[pixi.toml:11:1]
+         10 │ cmd = "ctest"
+         11 │ depends_on = ["build"]
+            · ─────┬────
+            ·      ╰── replace this with 'depends-on'
+         12 │
+            ╰────
+        "###);
     }
 
     #[test]

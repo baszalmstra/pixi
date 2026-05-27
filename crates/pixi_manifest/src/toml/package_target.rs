@@ -1,36 +1,63 @@
+use std::{collections::HashMap, sync::Arc};
+
 use indexmap::IndexMap;
 use pixi_spec::TomlSpec;
+use pixi_toml::TomlHashMap;
 use rattler_conda_types::PackageName;
 use toml_span::{DeserError, Value, de_helpers::TableHelper};
 
 use crate::{
-    KnownPreviewFeature, Preview, SpecType, TomlError,
+    KnownPreviewFeature, Preview, SpecType, Task, TaskName, TomlError, Warning, WithWarnings,
     target::PackageTarget,
-    toml::target::combine_target_dependencies,
+    toml::{target::combine_target_dependencies, task::TomlTask},
     utils::{PixiSpanned, inheritable_package_map::InheritablePackageMap},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TomlPackageTarget {
     pub run_dependencies: Option<PixiSpanned<InheritablePackageMap>>,
     pub run_constraints: Option<PixiSpanned<InheritablePackageMap>>,
     pub host_dependencies: Option<PixiSpanned<InheritablePackageMap>>,
     pub build_dependencies: Option<PixiSpanned<InheritablePackageMap>>,
+
+    /// Tasks defined on this target.
+    pub tasks: HashMap<TaskName, Arc<Task>>,
+
+    /// Warnings collected while parsing this target.
+    pub warnings: Vec<Warning>,
 }
 
 impl<'de> toml_span::Deserialize<'de> for TomlPackageTarget {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
+        let mut warnings = Vec::new();
+
         let run_dependencies = th.optional("run-dependencies");
         let run_constraints = th.optional("run-constraints");
         let host_dependencies = th.optional("host-dependencies");
         let build_dependencies = th.optional("build-dependencies");
+        let tasks = th
+            .optional::<TomlHashMap<_, TomlTask>>("tasks")
+            .map(TomlHashMap::into_inner)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, value)| {
+                let TomlTask {
+                    value: task,
+                    warnings: mut task_warnings,
+                } = value;
+                warnings.append(&mut task_warnings);
+                (key, Arc::new(task))
+            })
+            .collect();
         th.finalize(None)?;
         Ok(TomlPackageTarget {
             run_dependencies,
             run_constraints,
             host_dependencies,
             build_dependencies,
+            tasks,
+            warnings,
         })
     }
 }
@@ -40,7 +67,7 @@ impl TomlPackageTarget {
         self,
         preview: &Preview,
         workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
-    ) -> Result<PackageTarget, TomlError> {
+    ) -> Result<WithWarnings<PackageTarget>, TomlError> {
         let pixi_build_enabled = preview.is_enabled(KnownPreviewFeature::PixiBuild);
 
         let resolve = |entry: Option<PixiSpanned<InheritablePackageMap>>| -> Result<
@@ -59,16 +86,20 @@ impl TomlPackageTarget {
                 .transpose()
         };
 
-        Ok(PackageTarget {
-            dependencies: combine_target_dependencies(
-                [
-                    (SpecType::Run, resolve(self.run_dependencies)?),
-                    (SpecType::Host, resolve(self.host_dependencies)?),
-                    (SpecType::Build, resolve(self.build_dependencies)?),
-                    (SpecType::RunConstraints, resolve(self.run_constraints)?),
-                ],
-                pixi_build_enabled,
-            )?,
+        Ok(WithWarnings {
+            value: PackageTarget {
+                dependencies: combine_target_dependencies(
+                    [
+                        (SpecType::Run, resolve(self.run_dependencies)?),
+                        (SpecType::Host, resolve(self.host_dependencies)?),
+                        (SpecType::Build, resolve(self.build_dependencies)?),
+                        (SpecType::RunConstraints, resolve(self.run_constraints)?),
+                    ],
+                    pixi_build_enabled,
+                )?,
+                tasks: self.tasks,
+            },
+            warnings: self.warnings,
         })
     }
 }
@@ -105,7 +136,8 @@ mod test {
         let package_target = TomlPackageTarget::from_toml_str(input)
             .unwrap()
             .into_package_target(&Preview::default(), &IndexMap::new())
-            .unwrap();
+            .unwrap()
+            .value;
 
         let lookup = |spec_type: SpecType, name: &str| -> String {
             package_target

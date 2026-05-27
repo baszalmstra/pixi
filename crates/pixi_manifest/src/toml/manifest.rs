@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use indexmap::IndexMap;
@@ -62,7 +63,7 @@ pub struct TomlManifest {
     pub activation: Option<PixiSpanned<Activation>>,
 
     /// Target specific tasks to run in the environment
-    pub tasks: Option<PixiSpanned<HashMap<TaskName, Task>>>,
+    pub tasks: Option<PixiSpanned<HashMap<TaskName, Arc<Task>>>>,
 
     /// The features defined in the project.
     pub feature: Option<PixiSpanned<IndexMap<PixiSpanned<FeatureName>, TomlFeature>>>,
@@ -588,7 +589,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlManifest {
                                 warnings: mut task_warnings,
                             } = value;
                             warnings.append(&mut task_warnings);
-                            (key.into(), task)
+                            (key.into(), Arc::new(task))
                         })
                         .collect(),
                     span: inner.span,

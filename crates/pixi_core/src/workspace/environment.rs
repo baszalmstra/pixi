@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
     hash::{Hash, Hasher},
-    sync::Once,
+    sync::{Arc, Once},
 };
 
 use indexmap::IndexMap;
@@ -239,7 +239,7 @@ impl<'p> Environment<'p> {
     pub fn tasks(
         &self,
         platform: Option<Platform>,
-    ) -> Result<IndexMap<&'p TaskName, &'p Task>, UnsupportedPlatformError> {
+    ) -> Result<IndexMap<&'p TaskName, &'p Arc<Task>>, UnsupportedPlatformError> {
         self.validate_platform_support(platform)?;
         let result = self
             .features()
@@ -273,7 +273,7 @@ impl<'p> Environment<'p> {
         &self,
         name: &TaskName,
         platform: Option<Platform>,
-    ) -> Result<&'p Task, UnknownTask<'_>> {
+    ) -> Result<&'p Arc<Task>, UnknownTask<'_>> {
         match self.tasks(platform).map(|tasks| tasks.get(name).copied()) {
             Err(_) | Ok(None) => Err(UnknownTask {
                 project: self.workspace,
@@ -288,7 +288,7 @@ impl<'p> Environment<'p> {
     /// Returns a map of all the features and their tasks for this environment.
     ///
     /// Resolves for the best platform target.
-    pub fn feature_tasks(&self) -> HashMap<&'p FeatureName, HashMap<&'p TaskName, &'p Task>> {
+    pub fn feature_tasks(&self) -> HashMap<&'p FeatureName, HashMap<&'p TaskName, &'p Arc<Task>>> {
         self.features()
             .map(|feature| {
                 (

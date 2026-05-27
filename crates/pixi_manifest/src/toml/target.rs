@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use indexmap::IndexMap;
 use pixi_spec::{PixiSpec, SourceSpec, TomlLocationSpec};
@@ -32,7 +32,7 @@ pub struct TomlTarget {
     pub activation: Option<Activation>,
 
     /// Target specific tasks to run in the environment
-    pub tasks: HashMap<TaskName, Task>,
+    pub tasks: HashMap<TaskName, Arc<Task>>,
 
     /// Any warnings we encountered while parsing the target
     pub warnings: Vec<Warning>,
@@ -193,7 +193,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlTarget {
                     warnings: mut task_warnings,
                 } = value;
                 warnings.append(&mut task_warnings);
-                (key, task)
+                (key, Arc::new(task))
             })
             .collect();
 
