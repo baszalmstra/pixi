@@ -23,6 +23,9 @@ use crate::{
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     #[clap(flatten)]
+    pub config_source: pixi_config::ConfigSourceCli,
+
+    #[clap(flatten)]
     pub workspace_config: WorkspaceConfig,
 
     #[clap(flatten)]
@@ -52,6 +55,7 @@ impl TryFrom<&Args> for DependencyOptions {
 
 pub async fn execute(args: Args) -> miette::Result<()> {
     let workspace = WorkspaceLocator::for_cli()
+        .with_global_config_source(args.config_source.source())
         .with_search_start(args.workspace_config.workspace_locator_start())
         .locate()?
         .with_cli_config(args.config.clone());
