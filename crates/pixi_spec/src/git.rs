@@ -22,9 +22,8 @@ pub struct GitSpec {
     #[serde(skip_serializing_if = "Subdirectory::is_empty", default)]
     pub subdirectory: Subdirectory,
 
-    /// Whether to fetch git LFS objects for this checkout. Concrete by the
-    /// time we hit this struct: the manifest's `lfs = true/false` (or its
-    /// absence + `PIXI_GIT_LFS`) was already resolved via
+    /// Whether to fetch git LFS objects for this checkout. The manifest's
+    /// `lfs = true/false` (absence → `Disabled`) was resolved via
     /// [`GitLfs::from`]`(Option<bool>)`. Serialised as a plain bool, and
     /// skipped when [`GitLfs::Disabled`] so existing manifests don't churn.
     #[serde(default, skip_serializing_if = "is_lfs_disabled")]

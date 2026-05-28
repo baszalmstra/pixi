@@ -988,7 +988,7 @@ Use `git` in combination with `rev` or `subdirectory`:
 
 - `rev`: A specific revision to install. e.g. `rev = "0106aced5faa299e6ede89d1230bd6784f2c3660`
 - `subdirectory`: A subdirectory to install from. `subdirectory = "src"` or `subdirectory = "src/packagex"`
-- `lfs`: Fetch git LFS objects (e.g. data tracked with [git-lfs](https://git-lfs.com/)) when checking out the repo. Defaults to off. When unset, Pixi honours the `PIXI_GIT_LFS` environment variable.
+- `lfs`: Fetch git LFS objects (e.g. data tracked with [git-lfs](https://git-lfs.com/)) when checking out the repo. Defaults to off when unset.
 
 ```toml
 # Note don't forget the `ssh://` or `https://` prefix!

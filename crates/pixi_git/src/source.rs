@@ -37,8 +37,8 @@ pub struct GitSource {
 
 impl GitSource {
     /// Initialize a new Git source. LFS preference is read directly from
-    /// [`GitUrl::lfs`]; the env-var fallback already happened at the
-    /// manifest-input boundary via [`GitLfs::from`]`(Option<bool>)`.
+    /// [`GitUrl::lfs`] (resolved from the manifest at the input boundary via
+    /// [`GitLfs::from`]`(Option<bool>)`).
     pub fn new(git: GitUrl, client: LazyClient, cache: impl Into<PathBuf>) -> Self {
         let lfs = git.lfs();
         Self {

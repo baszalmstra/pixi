@@ -49,8 +49,7 @@ impl GitResolver {
     /// Fetch a remote Git repository.
     ///
     /// The LFS preference travels on the [`GitUrl`] itself (see
-    /// [`GitUrl::with_lfs`]); `GitSource::new` reads it and falls back to
-    /// the `PIXI_GIT_LFS` env var when unset.
+    /// [`GitUrl::with_lfs`]); `GitSource::new` reads it directly.
     pub async fn fetch(
         &self,
         url: GitUrl,

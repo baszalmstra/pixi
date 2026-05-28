@@ -15,7 +15,7 @@ pub mod sha;
 pub mod source;
 pub mod url;
 
-pub use lfs::{GitLfs, PIXI_GIT_LFS_ENV};
+pub use lfs::GitLfs;
 
 /// The query parameter used to specify the type of reference in a Git URL.
 pub const GIT_URL_QUERY_REV_TYPE: &str = "rev_type";
