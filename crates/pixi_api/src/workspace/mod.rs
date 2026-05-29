@@ -4,7 +4,8 @@ pub(crate) mod add;
 pub use add::{DependencyOptions, GitOptions};
 
 pub(crate) mod remove;
-pub use remove::{QualifiedDependency, RemoveError};
+pub use pixi_core::workspace::QualifiedDependency;
+pub use remove::RemoveError;
 
 pub(crate) mod init;
 pub use init::{GitAttributes, InitOptions, ManifestFormat};

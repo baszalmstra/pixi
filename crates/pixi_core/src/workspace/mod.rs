@@ -64,7 +64,7 @@ pub use registry::{WorkspaceRegistry, WorkspaceRegistryError};
 pub use solve_group::SolveGroup;
 use tokio::sync::Semaphore;
 use url::Url;
-pub use workspace_mut::WorkspaceMut;
+pub use workspace_mut::{QualifiedDependency, WorkspaceMut};
 use xxhash_rust::xxh3::xxh3_64;
 
 static CUSTOM_TARGET_DIR_WARN: OnceCell<()> = OnceCell::new();

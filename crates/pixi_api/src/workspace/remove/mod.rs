@@ -4,13 +4,12 @@ use pixi_core::{
     InstallFilter, UpdateLockFileOptions, Workspace,
     environment::{LockFileUsage, get_update_lock_file_and_prefix},
     lock_file::{ReinstallPackages, UpdateMode},
-    workspace::{PypiDeps, WorkspaceMut},
+    workspace::{PypiDeps, QualifiedDependency, WorkspaceMut},
 };
 use pixi_manifest::{
-    DependencyError, FeatureName, FeaturesExt, LoadManifestsError, RemoveDependencyError, SpecType,
+    DependencyError, FeaturesExt, LoadManifestsError, RemoveDependencyError, SpecType,
 };
-use pixi_pypi_spec::PypiPackageName;
-use rattler_conda_types::{MatchSpec, PackageName, Platform};
+use rattler_conda_types::{MatchSpec, PackageName};
 use thiserror::Error;
 
 use crate::workspace::DependencyOptions;
@@ -105,34 +104,13 @@ pub async fn remove_pypi_deps(
     update_lock_file_after_remove(&workspace, &options).await
 }
 
-/// A dependency together with the full location it was resolved to: which
-/// feature, which table, and which platform target(s). The CLI's "search
-/// everywhere" path produces these once it has pinned down where a bare
-/// `pixi remove <pkg>` should act, so the manifest can be edited without
-/// re-deriving the location.
-#[derive(Debug, Clone)]
-pub enum QualifiedDependency {
-    Conda {
-        name: PackageName,
-        spec_type: SpecType,
-        feature: FeatureName,
-        /// Concrete platform targets the package was found in.
-        platforms: Vec<Platform>,
-        /// Whether the package is also present in the platform-agnostic table.
-        default_target: bool,
-    },
-    Pypi {
-        name: PypiPackageName,
-        feature: FeatureName,
-        platforms: Vec<Platform>,
-        default_target: bool,
-    },
-}
-
 /// Remove a set of fully-qualified dependencies from the manifest in a single
-/// pass, saving and updating the lock file once. The locations are assumed to
-/// have been validated by the caller, so a per-platform miss here is a hard
-/// error.
+/// pass, saving and updating the lock file once.
+///
+/// The manifest mutation itself lives on [`WorkspaceMut`]; this wrapper layers
+/// on the API-level policy (refusing to orphan PyPI dependencies by removing
+/// Python) and the save plus lock-file orchestration shared with the other
+/// remove entry points.
 pub async fn remove_qualified_dependencies(
     mut workspace: WorkspaceMut,
     dependencies: Vec<QualifiedDependency>,
@@ -157,45 +135,7 @@ pub async fn remove_qualified_dependencies(
         }
     }
 
-    for dependency in &dependencies {
-        match dependency {
-            QualifiedDependency::Conda {
-                name,
-                spec_type,
-                feature,
-                platforms,
-                default_target,
-            } => {
-                if *default_target {
-                    workspace
-                        .manifest()
-                        .remove_dependency(name, *spec_type, &[], feature)?;
-                }
-                if !platforms.is_empty() {
-                    workspace
-                        .manifest()
-                        .remove_dependency(name, *spec_type, platforms, feature)?;
-                }
-            }
-            QualifiedDependency::Pypi {
-                name,
-                feature,
-                platforms,
-                default_target,
-            } => {
-                if *default_target {
-                    workspace
-                        .manifest()
-                        .remove_pypi_dependency(name, &[], feature)?;
-                }
-                if !platforms.is_empty() {
-                    workspace
-                        .manifest()
-                        .remove_pypi_dependency(name, platforms, feature)?;
-                }
-            }
-        }
-    }
+    workspace.remove_qualified_dependencies(&dependencies)?;
 
     let workspace = workspace.save().await.map_err(RemoveError::Save)?;
     update_lock_file_after_remove(&workspace, &options).await
@@ -236,8 +176,9 @@ mod tests {
 
     use pixi_core::{Workspace, environment::LockFileUsage};
     use pixi_manifest::FeatureName;
+    use pixi_pypi_spec::PypiPackageName;
     use pixi_test_utils::format_diagnostic;
-    use rattler_conda_types::{MatchSpec, ParseMatchSpecOptions, RepodataRevision};
+    use rattler_conda_types::{MatchSpec, ParseMatchSpecOptions, Platform, RepodataRevision};
 
     use super::*;
 

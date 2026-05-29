@@ -16,8 +16,8 @@ use pixi_config::PinningStrategy;
 use pixi_diff::LockFileDiff;
 use pixi_manifest::{
     DependencyOverwriteBehavior, FeatureName, FeaturesExt, HasFeaturesIter, LoadManifestsError,
-    ManifestDocument, ManifestKind, PypiDependencyLocation, SpecType, TomlError, WorkspaceManifest,
-    WorkspaceManifestMut, toml::TomlDocument, utils::WithSourceCode,
+    ManifestDocument, ManifestKind, PypiDependencyLocation, RemoveDependencyError, SpecType,
+    TomlError, WorkspaceManifest, WorkspaceManifestMut, toml::TomlDocument, utils::WithSourceCode,
 };
 use pixi_pypi_spec::{PixiPypiSpec, PypiPackageName};
 use pixi_spec::PixiSpec;
@@ -38,6 +38,29 @@ use crate::{
 struct OriginalContent {
     manifest: WorkspaceManifest,
     source: String,
+}
+
+/// A dependency together with the full location it was resolved to: which
+/// feature, which table, and which platform target(s). Produced once a bare
+/// `pixi remove <pkg>` has pinned down where to act, so the manifest can be
+/// edited without re-deriving the location.
+#[derive(Debug, Clone)]
+pub enum QualifiedDependency {
+    Conda {
+        name: PackageName,
+        spec_type: SpecType,
+        feature: FeatureName,
+        /// Concrete platform targets the package was found in.
+        platforms: Vec<Platform>,
+        /// Whether the package is also present in the platform-agnostic table.
+        default_target: bool,
+    },
+    Pypi {
+        name: PypiPackageName,
+        feature: FeatureName,
+        platforms: Vec<Platform>,
+        default_target: bool,
+    },
 }
 
 /// This struct represents a safe mutable representation of a [`Workspace`].
@@ -189,6 +212,54 @@ impl WorkspaceMut {
     /// Returns a reference to the underlying workspace manifest document.
     pub fn document(&self) -> &ManifestDocument {
         &self.workspace_manifest_document
+    }
+
+    /// Remove a set of fully-qualified dependencies from the manifest.
+    ///
+    /// Each [`QualifiedDependency`] carries the exact location it was resolved
+    /// to, so this strips the package from the platform-agnostic table and/or
+    /// the recorded platform targets of the right feature. The locations are
+    /// assumed to have been validated by the caller, so a per-platform miss
+    /// here is a hard error.
+    pub fn remove_qualified_dependencies(
+        &mut self,
+        dependencies: &[QualifiedDependency],
+    ) -> Result<(), RemoveDependencyError> {
+        for dependency in dependencies {
+            match dependency {
+                QualifiedDependency::Conda {
+                    name,
+                    spec_type,
+                    feature,
+                    platforms,
+                    default_target,
+                } => {
+                    if *default_target {
+                        self.manifest()
+                            .remove_dependency(name, *spec_type, &[], feature)?;
+                    }
+                    if !platforms.is_empty() {
+                        self.manifest()
+                            .remove_dependency(name, *spec_type, platforms, feature)?;
+                    }
+                }
+                QualifiedDependency::Pypi {
+                    name,
+                    feature,
+                    platforms,
+                    default_target,
+                } => {
+                    if *default_target {
+                        self.manifest().remove_pypi_dependency(name, &[], feature)?;
+                    }
+                    if !platforms.is_empty() {
+                        self.manifest()
+                            .remove_pypi_dependency(name, platforms, feature)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// An internal method to save the changes to the workspace manifest to disk
