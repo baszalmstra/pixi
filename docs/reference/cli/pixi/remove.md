@@ -28,6 +28,8 @@ pixi remove [OPTIONS] <SPEC>...
 - <a id="arg---feature" href="#arg---feature">`--feature (-f) <FEATURE>`</a>
 :  The feature for which the dependency should be modified
 <br>**default**: `default`
+- <a id="arg---all" href="#arg---all">`--all`</a>
+:  Remove the packages from every location they occur in, instead of requiring each to resolve to a single unambiguous table
 
 ## Config Options
 - <a id="arg---no-config" href="#arg---no-config">`--no-config`</a>
@@ -100,7 +102,7 @@ pixi remove [OPTIONS] <SPEC>...
 ## Description
 Removes dependencies from the workspace.
 
-A bare `pixi remove <pkg>...` searches every dependency table (conda and PyPI, every feature, every platform) and removes each package from wherever it is defined. If the package is in the default feature's dependencies it is removed from there; otherwise, if it resolves to a single other location it is removed from that location, and if it is found in several it is reported as ambiguous. Passing a location flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) instead restricts the removal to that table.
+A bare `pixi remove <pkg>...` searches every dependency table (conda and PyPI, every feature, every platform) and removes each package from wherever it is defined. If the package is in the default feature's dependencies it is removed from there; otherwise, if it resolves to a single other location it is removed from that location, and if it is found in several it is reported as ambiguous. Pass `--all` to instead remove every occurrence, or a location flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) to restrict the removal to that table.
 
 If the workspace manifest is a `pyproject.toml`, removing a pypi dependency with the `--pypi` flag will remove it from either
 

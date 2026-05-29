@@ -4,6 +4,7 @@
 ```shell
 pixi remove numpy
 pixi remove numpy pandas pytorch
+pixi remove --all numpy
 pixi remove --manifest-path ~/myworkspace/pixi.toml numpy
 pixi remove --host python
 pixi remove --build cmake
@@ -18,7 +19,7 @@ pixi remove --no-install numpy
 --8<-- [end:example]
 
 --8<-- [start:description]
-Without a location flag, `pixi remove <package>...` searches every dependency table (conda and PyPI, every feature, every platform) and removes each package from wherever it is defined. If the package is in the default feature's `[dependencies]` it is removed from there; otherwise a single match elsewhere is removed, while a package found in several other tables is rejected as ambiguous, with pixi printing the command that targets each location. Passing a location flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) restricts the removal to that table.
+Without a location flag, `pixi remove <package>...` searches every dependency table (conda and PyPI, every feature, every platform) and removes each package from wherever it is defined. If the package is in the default feature's `[dependencies]` it is removed from there; otherwise a single match elsewhere is removed, while a package found in several other tables is rejected as ambiguous, with pixi printing the command that targets each location. Pass `--all` to skip that check and remove every occurrence instead. Passing a location flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) restricts the removal to that table.
 
 If the project manifest is a `pyproject.toml`, removing a pypi dependency with the `--pypi` flag will remove it from either
 

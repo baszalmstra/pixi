@@ -31,8 +31,9 @@ use locate::{Location, Slot, locate};
 /// it is defined. If the package is in the default feature's dependencies it is
 /// removed from there; otherwise, if it resolves to a single other location it
 /// is removed from that location, and if it is found in several it is reported
-/// as ambiguous. Passing a location flag (`--pypi`, `--host`, `--build`,
-/// `--feature`, or `--platform`) instead restricts the removal to that table.
+/// as ambiguous. Pass `--all` to instead remove every occurrence, or a location
+/// flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) to
+/// restrict the removal to that table.
 ///
 ///  If the workspace manifest is a `pyproject.toml`, removing a pypi dependency
 /// with the `--pypi` flag will remove it from either
@@ -53,6 +54,11 @@ pub struct Args {
 
     #[clap(flatten)]
     pub dependency_config: DependencyConfig,
+
+    /// Remove the packages from every location they occur in, instead of
+    /// requiring each to resolve to a single unambiguous table.
+    #[arg(long, conflicts_with_all = ["pypi", "host", "build", "feature", "platforms"])]
+    pub all: bool,
 
     #[clap(flatten)]
     pub no_install_config: NoInstallConfig,
@@ -86,9 +92,10 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let workspace_ctx = WorkspaceContext::new(CliInterface {}, workspace.clone());
 
     // Without any location flag, search every table and remove each package
-    // from wherever it is defined.
+    // from wherever it is defined. `--all` conflicts with the location flags, so
+    // it always lands here too.
     if !location_specified(&args.dependency_config) {
-        return execute_auto(&args, &workspace, &workspace_ctx).await;
+        return execute_auto(&args, &workspace, &workspace_ctx, args.all).await;
     }
 
     let dependency_type = args.dependency_config.dependency_type();
@@ -166,33 +173,39 @@ fn location_specified(config: &DependencyConfig) -> bool {
 
 /// Remove each requested package from wherever it is defined in the workspace.
 ///
-/// Resolution happens up front: every package must resolve to exactly one
-/// location or the whole command fails without touching the manifest. A package
-/// that is missing yields a "not found" diagnostic with suggestions; one that
-/// lives in several tables yields an ambiguity diagnostic listing them.
+/// Resolution happens up front, so the whole command fails without touching the
+/// manifest if any package can't be placed. By default each package must resolve
+/// to exactly one location: a missing package yields a "not found" diagnostic
+/// with suggestions, and one that lives in several tables yields an ambiguity
+/// diagnostic listing them. With `all`, every occurrence is removed instead and
+/// only a wholly-missing package is an error.
 async fn execute_auto(
     args: &Args,
     workspace: &Workspace,
     workspace_ctx: &WorkspaceContext<CliInterface>,
+    all: bool,
 ) -> miette::Result<()> {
     let manifest = workspace.workspace_manifest();
 
     let mut dependencies = Vec::with_capacity(args.dependency_config.specs.len());
     for spec in &args.dependency_config.specs {
-        match resolve(manifest, bare_name(spec)) {
-            Resolution::Resolved(dependency) => dependencies.push(dependency),
-            Resolution::NotFound => {
-                return Err(miette::Report::new(DependencyRemovalError::new(
-                    spec.clone(),
-                    manifest,
-                    Scope::Anywhere,
-                )));
+        let name = bare_name(spec);
+        if all {
+            let resolved = resolve_all(manifest, name);
+            if resolved.is_empty() {
+                return Err(not_found(spec, manifest));
             }
-            Resolution::Ambiguous(locations) => {
-                return Err(miette::Report::new(AmbiguousRemovalError::new(
-                    spec.clone(),
-                    &locations,
-                )));
+            dependencies.extend(resolved);
+        } else {
+            match resolve(manifest, name) {
+                Resolution::Resolved(dependency) => dependencies.push(dependency),
+                Resolution::NotFound => return Err(not_found(spec, manifest)),
+                Resolution::Ambiguous(locations) => {
+                    return Err(miette::Report::new(AmbiguousRemovalError::new(
+                        spec.clone(),
+                        &locations,
+                    )));
+                }
             }
         }
     }
@@ -203,6 +216,16 @@ async fn execute_auto(
     args.dependency_config
         .display_success("Removed", Default::default());
     Ok(())
+}
+
+/// Build the "not found in the workspace" diagnostic for a package that matched
+/// nowhere, with similar-name suggestions.
+fn not_found(spec: &str, manifest: &WorkspaceManifest) -> miette::Report {
+    miette::Report::new(DependencyRemovalError::new(
+        spec.to_string(),
+        manifest,
+        Scope::Anywhere,
+    ))
 }
 
 /// The outcome of resolving one requested package against the workspace.
@@ -232,6 +255,16 @@ fn resolve(manifest: &WorkspaceManifest, name: &str) -> Resolution {
         )),
         _ => Resolution::Ambiguous(locations),
     }
+}
+
+/// Resolve a package name to every location it occurs in (the `--all` path).
+/// Returns one [`QualifiedDependency`] per `(feature, table)` location, or an
+/// empty vec if the package is not defined anywhere.
+fn resolve_all(manifest: &WorkspaceManifest, name: &str) -> Vec<QualifiedDependency> {
+    locate(manifest, name)
+        .into_iter()
+        .map(|location| to_qualified_dependency(name, location))
+        .collect()
 }
 
 /// Whether a location is the implicit target of a bare `pixi remove <pkg>`: the
@@ -277,11 +310,20 @@ fn bare_name(spec: &str) -> &str {
 mod tests {
     use std::path::Path;
 
+    use clap::CommandFactory;
+
     use super::*;
 
     fn parse(toml: &str) -> WorkspaceManifest {
         WorkspaceManifest::from_toml_str_with_base_dir(toml, Path::new(""))
             .expect("failed to parse manifest")
+    }
+
+    /// Validates the clap definition, including that `--all`'s `conflicts_with`
+    /// ids resolve to real arguments.
+    #[test]
+    fn verify_args() {
+        Args::command().debug_assert();
     }
 
     #[test]
@@ -386,5 +428,45 @@ numpy = "*"
 "#,
         );
         assert!(matches!(resolve(&manifest, "absent"), Resolution::NotFound));
+    }
+
+    /// `--all` yields one removal per distinct location, including the default
+    /// `[dependencies]` that the single-match path would otherwise prefer.
+    #[test]
+    fn resolve_all_returns_every_location() {
+        let manifest = parse(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[dependencies]
+numpy = "*"
+
+[pypi-dependencies]
+numpy = "*"
+
+[feature.dev.dependencies]
+numpy = "*"
+"#,
+        );
+        assert_eq!(resolve_all(&manifest, "numpy").len(), 3);
+    }
+
+    #[test]
+    fn resolve_all_is_empty_when_missing() {
+        let manifest = parse(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[dependencies]
+numpy = "*"
+"#,
+        );
+        assert!(resolve_all(&manifest, "absent").is_empty());
     }
 }
