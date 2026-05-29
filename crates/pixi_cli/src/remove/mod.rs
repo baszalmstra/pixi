@@ -11,7 +11,7 @@ use pixi_api::{
 };
 use pixi_config::ConfigCli;
 use pixi_core::{DependencyType, Workspace, WorkspaceLocator};
-use pixi_manifest::HasWorkspaceManifest;
+use pixi_manifest::{HasWorkspaceManifest, SpecType, WorkspaceManifest};
 use pixi_pypi_spec::PypiPackageName;
 use rattler_conda_types::{PackageName, Platform};
 
@@ -26,9 +26,12 @@ use locate::{Location, Slot, locate};
 
 /// Removes dependencies from the workspace.
 ///
-/// A bare `pixi remove <pkg>...` searches every dependency table — conda and
-/// PyPI, every feature, every platform — and removes each package from wherever
-/// it is defined. Passing a location flag (`--pypi`, `--host`, `--build`,
+/// A bare `pixi remove <pkg>...` searches every dependency table (conda and
+/// PyPI, every feature, every platform) and removes each package from wherever
+/// it is defined. If the package is in the default feature's dependencies it is
+/// removed from there; otherwise, if it resolves to a single other location it
+/// is removed from that location, and if it is found in several it is reported
+/// as ambiguous. Passing a location flag (`--pypi`, `--host`, `--build`,
 /// `--feature`, or `--platform`) instead restricts the removal to that table.
 ///
 ///  If the workspace manifest is a `pyproject.toml`, removing a pypi dependency
@@ -176,21 +179,16 @@ async fn execute_auto(
 
     let mut dependencies = Vec::with_capacity(args.dependency_config.specs.len());
     for spec in &args.dependency_config.specs {
-        let name = bare_name(spec);
-        let mut locations = locate(manifest, name);
-        match locations.len() {
-            0 => {
+        match resolve(manifest, bare_name(spec)) {
+            Resolution::Resolved(dependency) => dependencies.push(dependency),
+            Resolution::NotFound => {
                 return Err(miette::Report::new(DependencyRemovalError::new(
                     spec.clone(),
                     manifest,
                     Scope::Anywhere,
                 )));
             }
-            1 => dependencies.push(to_qualified_dependency(
-                name,
-                locations.pop().expect("one location"),
-            )),
-            _ => {
+            Resolution::Ambiguous(locations) => {
                 return Err(miette::Report::new(AmbiguousRemovalError::new(
                     spec.clone(),
                     &locations,
@@ -200,11 +198,46 @@ async fn execute_auto(
     }
 
     workspace_ctx
-        .remove_resolved(dependencies, args.try_into()?)
+        .remove_qualified_dependencies(dependencies, args.try_into()?)
         .await?;
     args.dependency_config
         .display_success("Removed", Default::default());
     Ok(())
+}
+
+/// The outcome of resolving one requested package against the workspace.
+enum Resolution {
+    Resolved(QualifiedDependency),
+    Ambiguous(Vec<Location>),
+    NotFound,
+}
+
+/// Resolve a single package name to the location it should be removed from.
+///
+/// A bare `pixi remove <pkg>` has always targeted the default feature's
+/// run-dependencies, so if the package lives there we remove it from there and
+/// ignore any other matches (otherwise the ambiguity hint would just repeat the
+/// command the user already ran). Only when the default target does not hold the
+/// package do we fall back to the single other match, or report ambiguity.
+fn resolve(manifest: &WorkspaceManifest, name: &str) -> Resolution {
+    let mut locations = locate(manifest, name);
+    if let Some(pos) = locations.iter().position(is_default_run_dependency) {
+        return Resolution::Resolved(to_qualified_dependency(name, locations.swap_remove(pos)));
+    }
+    match locations.len() {
+        0 => Resolution::NotFound,
+        1 => Resolution::Resolved(to_qualified_dependency(
+            name,
+            locations.pop().expect("one location"),
+        )),
+        _ => Resolution::Ambiguous(locations),
+    }
+}
+
+/// Whether a location is the implicit target of a bare `pixi remove <pkg>`: the
+/// default feature's `[dependencies]` table.
+fn is_default_run_dependency(location: &Location) -> bool {
+    location.feature.is_default() && location.slot == Slot::Conda(SpecType::Run)
 }
 
 /// Convert a located dependency into the API's [`QualifiedDependency`], keeping
@@ -242,7 +275,14 @@ fn bare_name(spec: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::bare_name;
+    use std::path::Path;
+
+    use super::*;
+
+    fn parse(toml: &str) -> WorkspaceManifest {
+        WorkspaceManifest::from_toml_str_with_base_dir(toml, Path::new(""))
+            .expect("failed to parse manifest")
+    }
 
     #[test]
     fn bare_name_strips_qualifiers() {
@@ -255,5 +295,96 @@ mod tests {
         assert_eq!(bare_name("black[d]"), "black");
         assert_eq!(bare_name("ruamel.yaml"), "ruamel.yaml");
         assert_eq!(bare_name("foo @ git+https://example.com/foo"), "foo");
+    }
+
+    /// When the package is in the default feature's `[dependencies]` we remove
+    /// it from there even if it also appears elsewhere, instead of reporting an
+    /// ambiguity (which would only echo back the command already run).
+    #[test]
+    fn resolve_prefers_default_run_dependencies() {
+        let manifest = parse(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[dependencies]
+numpy = "*"
+
+[feature.dev.dependencies]
+numpy = "*"
+"#,
+        );
+        match resolve(&manifest, "numpy") {
+            Resolution::Resolved(QualifiedDependency::Conda {
+                spec_type, feature, ..
+            }) => {
+                assert_eq!(spec_type, SpecType::Run);
+                assert!(feature.is_default());
+            }
+            _ => panic!("expected resolution to the default run-dependencies"),
+        }
+    }
+
+    /// A single non-default match resolves to that location.
+    #[test]
+    fn resolve_single_non_default_location() {
+        let manifest = parse(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[feature.dev.dependencies]
+numpy = "*"
+"#,
+        );
+        match resolve(&manifest, "numpy") {
+            Resolution::Resolved(QualifiedDependency::Conda { feature, .. }) => {
+                assert_eq!(feature.as_str(), "dev");
+            }
+            _ => panic!("expected resolution to feature `dev`"),
+        }
+    }
+
+    /// Several matches, none in the default `[dependencies]`, is ambiguous.
+    #[test]
+    fn resolve_ambiguous_without_default() {
+        let manifest = parse(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[pypi-dependencies]
+requests = "*"
+
+[feature.dev.dependencies]
+requests = "*"
+"#,
+        );
+        match resolve(&manifest, "requests") {
+            Resolution::Ambiguous(locations) => assert_eq!(locations.len(), 2),
+            _ => panic!("expected an ambiguous resolution"),
+        }
+    }
+
+    #[test]
+    fn resolve_missing_is_not_found() {
+        let manifest = parse(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[dependencies]
+numpy = "*"
+"#,
+        );
+        assert!(matches!(resolve(&manifest, "absent"), Resolution::NotFound));
     }
 }

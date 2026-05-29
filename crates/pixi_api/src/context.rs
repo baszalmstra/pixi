@@ -349,13 +349,13 @@ impl<I: Interface> WorkspaceContext<I> {
 
     /// Remove a set of dependencies that the CLI has already located across the
     /// workspace (the "search everywhere" path of a bare `pixi remove`).
-    pub async fn remove_resolved(
+    pub async fn remove_qualified_dependencies(
         &self,
         dependencies: Vec<QualifiedDependency>,
         options: DependencyOptions,
     ) -> Result<(), RemoveError> {
         let workspace_mut = self.workspace.clone().modify()?;
-        Box::pin(crate::workspace::remove::remove_resolved(
+        Box::pin(crate::workspace::remove::remove_qualified_dependencies(
             workspace_mut,
             dependencies,
             options,

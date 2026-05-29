@@ -133,7 +133,7 @@ pub enum QualifiedDependency {
 /// pass, saving and updating the lock file once. The locations are assumed to
 /// have been validated by the caller, so a per-platform miss here is a hard
 /// error.
-pub async fn remove_resolved(
+pub async fn remove_qualified_dependencies(
     mut workspace: WorkspaceMut,
     dependencies: Vec<QualifiedDependency>,
     options: DependencyOptions,
@@ -335,11 +335,11 @@ ruff = "*"
         PackageName::try_from(name).unwrap()
     }
 
-    /// `remove_resolved` strips packages from several tables — a conda run dep,
-    /// a pypi dep, a platform-specific conda dep, and a named feature — in a
+    /// `remove_qualified_dependencies` strips packages from several tables: a conda run dep,
+    /// a pypi dep, a platform-specific conda dep, and a named feature, in a
     /// single pass, leaving untouched packages in place.
     #[tokio::test]
-    async fn remove_resolved_across_tables() {
+    async fn remove_qualified_dependencies_across_tables() {
         let tmp = tempfile::TempDir::new().unwrap().keep();
         let path = tmp.join("pixi.toml");
         fs_err::write(
@@ -397,7 +397,7 @@ pytest = "*"
             },
         ];
 
-        remove_resolved(workspace.modify().unwrap(), dependencies, options())
+        remove_qualified_dependencies(workspace.modify().unwrap(), dependencies, options())
             .await
             .unwrap();
 
@@ -415,7 +415,7 @@ pytest = "*"
 
     /// The python guard also fires through the resolved-removal path.
     #[tokio::test]
-    async fn remove_resolved_python_guard() {
+    async fn remove_qualified_dependencies_guard_python() {
         let workspace = workspace_from(
             r#"
 [workspace]
@@ -439,9 +439,10 @@ requests = "*"
             default_target: true,
         }];
 
-        let err = remove_resolved(workspace.modify().unwrap(), dependencies, options())
-            .await
-            .unwrap_err();
+        let err =
+            remove_qualified_dependencies(workspace.modify().unwrap(), dependencies, options())
+                .await
+                .unwrap_err();
 
         insta::assert_snapshot!(
             format_diagnostic(&err),

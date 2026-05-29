@@ -100,7 +100,7 @@ pixi remove [OPTIONS] <SPEC>...
 ## Description
 Removes dependencies from the workspace.
 
-A bare `pixi remove <pkg>...` searches every dependency table — conda and PyPI, every feature, every platform — and removes each package from wherever it is defined. Passing a location flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) instead restricts the removal to that table.
+A bare `pixi remove <pkg>...` searches every dependency table (conda and PyPI, every feature, every platform) and removes each package from wherever it is defined. If the package is in the default feature's dependencies it is removed from there; otherwise, if it resolves to a single other location it is removed from that location, and if it is found in several it is reported as ambiguous. Passing a location flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) instead restricts the removal to that table.
 
 If the workspace manifest is a `pyproject.toml`, removing a pypi dependency with the `--pypi` flag will remove it from either
 

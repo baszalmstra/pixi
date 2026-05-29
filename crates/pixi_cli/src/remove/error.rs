@@ -505,26 +505,27 @@ name = "test"
 channels = []
 platforms = ["linux-64"]
 
-[dependencies]
-numpy = "*"
+[pypi-dependencies]
+requests = "*"
 
 [feature.dev.dependencies]
-numpy = "*"
+requests = "*"
 "#;
 
     #[test]
     fn ambiguous_removal_lists_each_location() {
-        // A bare `pixi remove numpy` when numpy is in two features must refuse
-        // to guess and point at the command for each location.
+        // `requests` is a pypi dep and a conda dep in feature `dev`: with no
+        // default `[dependencies]` match to fall back on, the removal is
+        // ambiguous and each location's command is spelled out.
         let manifest = parse(DUPLICATE_MANIFEST);
-        let locations = crate::remove::locate::locate(&manifest, "numpy");
-        let err = AmbiguousRemovalError::new("numpy".to_string(), &locations);
+        let locations = crate::remove::locate::locate(&manifest, "requests");
+        let err = AmbiguousRemovalError::new("requests".to_string(), &locations);
         insta::assert_snapshot!(
             format_diagnostic(&err),
             @r"
-          × dependency `numpy` is defined in multiple locations; specify which one to remove
-          help: - `numpy` is a dependencies entry in the default feature; try `pixi remove numpy`
-                - `numpy` is a dependencies entry in feature `dev`; try `pixi remove --feature dev numpy`
+          × dependency `requests` is defined in multiple locations; specify which one to remove
+          help: - `requests` is a pypi-dependencies entry in the default feature; try `pixi remove --pypi requests`
+                - `requests` is a dependencies entry in feature `dev`; try `pixi remove --feature dev requests`
         "
         );
     }
