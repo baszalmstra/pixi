@@ -5,7 +5,7 @@ use itertools::Itertools;
 use miette::{Context, IntoDiagnostic, SourceCode, miette};
 use pixi_pypi_spec::{PixiPypiSpec, PypiPackageName};
 use pixi_spec::PixiSpec;
-use rattler_conda_types::{ParseStrictness::Strict, Platform, Version, VersionSpec};
+use rattler_conda_types::{PackageName, ParseStrictness::Strict, Platform, Version, VersionSpec};
 use toml_edit::Value;
 
 use crate::{
@@ -26,6 +26,30 @@ use crate::{
     utils::WithSourceCode,
     workspace::Workspace,
 };
+
+/// A single conda dependency discovered while walking the manifest, together
+/// with the exact location it lives in. Yielded by
+/// [`WorkspaceManifest::iter_conda_dependencies`]; borrows from the manifest so
+/// no allocation is required to traverse it.
+pub struct CondaDependencyRef<'a> {
+    pub feature: &'a FeatureName,
+    /// The target the dependency belongs to, or `None` for the
+    /// platform-agnostic table.
+    pub selector: Option<&'a TargetSelector>,
+    pub spec_type: SpecType,
+    pub name: &'a PackageName,
+}
+
+/// A single PyPI dependency discovered while walking the manifest, together
+/// with the exact location it lives in. Yielded by
+/// [`WorkspaceManifest::iter_pypi_dependencies`].
+pub struct PypiDependencyRef<'a> {
+    pub feature: &'a FeatureName,
+    /// The target the dependency belongs to, or `None` for the
+    /// platform-agnostic table.
+    pub selector: Option<&'a TargetSelector>,
+    pub name: &'a PypiPackageName,
+}
 
 /// Holds the parsed content of the workspace part of a pixi manifest. This
 /// describes the part related to the workspace only.
@@ -60,6 +84,46 @@ impl WorkspaceManifest {
             })
             .map(|manifests| manifests.0)
             .map_err(|e| WithSourceCode { source, error: e })
+    }
+
+    /// Iterate over every conda dependency in the manifest, across all features,
+    /// targets, and spec types. Each item borrows from the manifest, so the
+    /// traversal allocates nothing.
+    pub fn iter_conda_dependencies(&self) -> impl Iterator<Item = CondaDependencyRef<'_>> + '_ {
+        self.features.values().flat_map(|feature| {
+            feature.targets.iter().flat_map(move |(target, selector)| {
+                SpecType::all().flat_map(move |spec_type| {
+                    target
+                        .dependencies(spec_type)
+                        .into_iter()
+                        .flat_map(move |deps| {
+                            deps.names().map(move |name| CondaDependencyRef {
+                                feature: &feature.name,
+                                selector,
+                                spec_type,
+                                name,
+                            })
+                        })
+                })
+            })
+        })
+    }
+
+    /// Iterate over every PyPI dependency in the manifest, across all features
+    /// and targets. Each item borrows from the manifest, so the traversal
+    /// allocates nothing.
+    pub fn iter_pypi_dependencies(&self) -> impl Iterator<Item = PypiDependencyRef<'_>> + '_ {
+        self.features.values().flat_map(|feature| {
+            feature.targets.iter().flat_map(move |(target, selector)| {
+                target.pypi_dependencies.iter().flat_map(move |deps| {
+                    deps.names().map(move |name| PypiDependencyRef {
+                        feature: &feature.name,
+                        selector,
+                        name,
+                    })
+                })
+            })
+        })
     }
 
     /// Returns the default feature.

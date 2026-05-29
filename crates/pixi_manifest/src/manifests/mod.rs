@@ -23,5 +23,6 @@ pub use provenance::{
 };
 pub use source::ManifestSource;
 pub use workspace::{
-    MissingTargetError, RemoveDependencyError, WorkspaceManifest, WorkspaceManifestMut,
+    CondaDependencyRef, MissingTargetError, PypiDependencyRef, RemoveDependencyError,
+    WorkspaceManifest, WorkspaceManifestMut,
 };

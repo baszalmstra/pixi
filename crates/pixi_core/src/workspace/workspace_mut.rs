@@ -26,8 +26,8 @@ use rattler_lock::LockFile;
 use toml_edit::DocumentMut;
 
 use crate::{
-    Workspace,
-    environment::LockFileUsage,
+    InstallFilter, UpdateLockFileOptions, Workspace,
+    environment::{LockFileUsage, get_update_lock_file_and_prefix},
     lock_file::{LockFileDerivedData, ReinstallPackages, UpdateContext, UpdateMode},
     workspace::{
         MatchSpecs, NON_SEMVER_PACKAGES, PypiDeps, SourceSpecs, UpdateDeps,
@@ -214,14 +214,69 @@ impl WorkspaceMut {
         &self.workspace_manifest_document
     }
 
-    /// Remove a set of fully-qualified dependencies from the manifest.
+    /// Remove a set of fully-qualified dependencies from the manifest, then save
+    /// the manifest and update the lock file (and prefix) once.
     ///
     /// Each [`QualifiedDependency`] carries the exact location it was resolved
     /// to, so this strips the package from the platform-agnostic table and/or
     /// the recorded platform targets of the right feature. The locations are
-    /// assumed to have been validated by the caller, so a per-platform miss
-    /// here is a hard error.
-    pub fn remove_qualified_dependencies(
+    /// assumed to have been validated by the caller, so a per-platform miss is a
+    /// hard error.
+    ///
+    /// Removing `python` is refused while PyPI dependencies still exist, since
+    /// that would orphan them.
+    pub async fn remove_qualified_dependencies(
+        mut self,
+        dependencies: &[QualifiedDependency],
+        lock_file_usage: LockFileUsage,
+        no_install: bool,
+    ) -> miette::Result<()> {
+        let removing_python = dependencies.iter().any(
+            |dep| matches!(dep, QualifiedDependency::Conda { name, .. } if name.as_source() == "python"),
+        );
+        if removing_python {
+            let pypi_deps = self
+                .workspace()
+                .default_environment()
+                .pypi_dependencies(None);
+            if !pypi_deps.is_empty() {
+                let names = pypi_deps
+                    .iter()
+                    .map(|(name, _)| name.as_source().to_string())
+                    .join(", ");
+                miette::bail!(
+                    "Cannot remove Python while PyPI dependencies exist. Please remove these PyPI dependencies first: {names}"
+                );
+            }
+        }
+
+        self.apply_qualified_dependency_removals(dependencies)?;
+        let workspace = self.save().await.into_diagnostic()?;
+
+        // TODO: update all environments touched by the affected features.
+        if lock_file_usage == LockFileUsage::Update {
+            get_update_lock_file_and_prefix(
+                &workspace.default_environment(),
+                None,
+                UpdateMode::Revalidate,
+                UpdateLockFileOptions {
+                    lock_file_usage,
+                    no_install,
+                    max_concurrent_solves: workspace.config().max_concurrent_solves(),
+                    ..Default::default()
+                },
+                ReinstallPackages::default(),
+                &InstallFilter::default(),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Apply a set of fully-qualified dependency removals to the in-memory
+    /// manifest and TOML document, without saving or touching the lock file.
+    fn apply_qualified_dependency_removals(
         &mut self,
         dependencies: &[QualifiedDependency],
     ) -> Result<(), RemoveDependencyError> {

@@ -353,12 +353,12 @@ impl<I: Interface> WorkspaceContext<I> {
         &self,
         dependencies: Vec<QualifiedDependency>,
         options: DependencyOptions,
-    ) -> Result<(), RemoveError> {
+    ) -> miette::Result<()> {
         let workspace_mut = self.workspace.clone().modify()?;
-        Box::pin(crate::workspace::remove::remove_qualified_dependencies(
-            workspace_mut,
-            dependencies,
-            options,
+        Box::pin(workspace_mut.remove_qualified_dependencies(
+            &dependencies,
+            options.lock_file_usage,
+            options.no_install,
         ))
         .await
     }

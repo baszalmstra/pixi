@@ -54,14 +54,15 @@ impl Slot {
     }
 }
 
-/// One dependency entry discovered while walking the workspace.
+/// One dependency entry discovered while walking the workspace. Borrows the
+/// name from the manifest so iterating allocates nothing.
 pub(super) struct DepEntry<'a> {
     pub feature: &'a FeatureName,
     pub slot: Slot,
     /// The platform target the entry was found in. `None` is the
     /// platform-agnostic table (e.g. `[dependencies]`).
     pub platform: Option<Platform>,
-    pub name: String,
+    pub name: &'a str,
 }
 
 /// A distinct location (a single dependency table of a single feature) where a
@@ -74,46 +75,43 @@ pub(super) struct Location {
     pub platforms: Vec<Option<Platform>>,
 }
 
-/// Walk every dependency entry across all features, targets, and spec types.
+/// Walk every dependency entry across all features, targets, and spec types,
+/// lazily and without allocating.
 ///
 /// Only the platform-agnostic target (`None`) and concrete per-platform targets
 /// are visited; group selectors (`linux`/`unix`/`win`/`osx`) are skipped
 /// because they cannot be addressed through the CLI's `--platform` flag.
-pub(super) fn walk_dependencies(manifest: &WorkspaceManifest) -> Vec<DepEntry<'_>> {
-    let mut entries = Vec::new();
-    for (feat_name, feat) in &manifest.features {
-        for (target, selector) in feat.targets.iter() {
-            let platform = match selector {
-                None => None,
-                Some(TargetSelector::Platform(p)) => Some(*p),
-                // Group selectors aren't addressable through `--platform`.
-                Some(_) => continue,
-            };
-            for spec_type in SpecType::all() {
-                if let Some(deps) = target.dependencies(spec_type) {
-                    for pkg in deps.names() {
-                        entries.push(DepEntry {
-                            feature: feat_name,
-                            slot: Slot::Conda(spec_type),
-                            platform,
-                            name: pkg.as_normalized().to_string(),
-                        });
-                    }
-                }
-            }
-            if let Some(deps) = &target.pypi_dependencies {
-                for pkg in deps.names() {
-                    entries.push(DepEntry {
-                        feature: feat_name,
-                        slot: Slot::Pypi,
-                        platform,
-                        name: pkg.as_source().to_string(),
-                    });
-                }
-            }
-        }
+pub(super) fn walk_dependencies(
+    manifest: &WorkspaceManifest,
+) -> impl Iterator<Item = DepEntry<'_>> + '_ {
+    let conda = manifest.iter_conda_dependencies().filter_map(|dep| {
+        Some(DepEntry {
+            feature: dep.feature,
+            slot: Slot::Conda(dep.spec_type),
+            platform: selector_platform(dep.selector)?,
+            name: dep.name.as_normalized(),
+        })
+    });
+    let pypi = manifest.iter_pypi_dependencies().filter_map(|dep| {
+        Some(DepEntry {
+            feature: dep.feature,
+            slot: Slot::Pypi,
+            platform: selector_platform(dep.selector)?,
+            name: dep.name.as_source(),
+        })
+    });
+    conda.chain(pypi)
+}
+
+/// Map a target selector to the platform scope used for removal, returning
+/// `None` to skip group selectors (`linux`/`unix`/`win`/`osx`) that the CLI's
+/// `--platform` flag cannot address.
+fn selector_platform(selector: Option<&TargetSelector>) -> Option<Option<Platform>> {
+    match selector {
+        None => Some(None),
+        Some(TargetSelector::Platform(p)) => Some(Some(*p)),
+        Some(_) => None,
     }
-    entries
 }
 
 /// Find every distinct location of `name` in the workspace, grouped by
@@ -152,14 +150,10 @@ pub(super) fn is_exact_match(
 ) -> bool {
     match entry.slot {
         Slot::Conda(_) => target_conda
-            .and_then(|t| {
-                PackageName::try_from(entry.name.as_str())
-                    .ok()
-                    .map(|n| n == *t)
-            })
+            .and_then(|t| PackageName::try_from(entry.name).ok().map(|n| n == *t))
             .unwrap_or(false),
         Slot::Pypi => target_pypi
-            .and_then(|t| PypiPackageName::from_str(&entry.name).ok().map(|n| n == *t))
+            .and_then(|t| PypiPackageName::from_str(entry.name).ok().map(|n| n == *t))
             .unwrap_or(false),
     }
 }

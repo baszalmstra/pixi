@@ -183,12 +183,11 @@ fn collect_table_suggestions(
         }
 
         let same_slot_and_feature = entry.slot == current_slot && entry.feature == feature;
-        let candidate = (entry.name.clone(), entry.feature.clone());
-        if same_slot_and_feature
-            && is_similar(name, &entry.name)
-            && !similar_in_target.contains(&candidate)
-        {
-            similar_in_target.push(candidate);
+        if same_slot_and_feature && is_similar(name, entry.name) {
+            let candidate = (entry.name.to_string(), entry.feature.clone());
+            if !similar_in_target.contains(&candidate) {
+                similar_in_target.push(candidate);
+            }
         }
     }
 
@@ -208,9 +207,11 @@ fn collect_table_suggestions(
 fn collect_similar_suggestions(manifest: &WorkspaceManifest, name: &str) -> Vec<String> {
     let mut similar: Vec<(String, FeatureName)> = Vec::new();
     for entry in walk_dependencies(manifest) {
-        let candidate = (entry.name.clone(), entry.feature.clone());
-        if is_similar(name, &entry.name) && !similar.contains(&candidate) {
-            similar.push(candidate);
+        if is_similar(name, entry.name) {
+            let candidate = (entry.name.to_string(), entry.feature.clone());
+            if !similar.contains(&candidate) {
+                similar.push(candidate);
+            }
         }
     }
     if similar.is_empty() {
@@ -524,8 +525,8 @@ requests = "*"
             format_diagnostic(&err),
             @r"
           × dependency `requests` is defined in multiple locations; specify which one to remove
-          help: - `requests` is a pypi-dependencies entry in the default feature; try `pixi remove --pypi requests`
-                - `requests` is a dependencies entry in feature `dev`; try `pixi remove --feature dev requests`
+          help: - `requests` is a dependencies entry in feature `dev`; try `pixi remove --feature dev requests`
+                - `requests` is a pypi-dependencies entry in the default feature; try `pixi remove --pypi requests`
         "
         );
     }

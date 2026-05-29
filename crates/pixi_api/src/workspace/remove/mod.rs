@@ -4,7 +4,7 @@ use pixi_core::{
     InstallFilter, UpdateLockFileOptions, Workspace,
     environment::{LockFileUsage, get_update_lock_file_and_prefix},
     lock_file::{ReinstallPackages, UpdateMode},
-    workspace::{PypiDeps, QualifiedDependency, WorkspaceMut},
+    workspace::{PypiDeps, WorkspaceMut},
 };
 use pixi_manifest::{
     DependencyError, FeaturesExt, LoadManifestsError, RemoveDependencyError, SpecType,
@@ -104,43 +104,6 @@ pub async fn remove_pypi_deps(
     update_lock_file_after_remove(&workspace, &options).await
 }
 
-/// Remove a set of fully-qualified dependencies from the manifest in a single
-/// pass, saving and updating the lock file once.
-///
-/// The manifest mutation itself lives on [`WorkspaceMut`]; this wrapper layers
-/// on the API-level policy (refusing to orphan PyPI dependencies by removing
-/// Python) and the save plus lock-file orchestration shared with the other
-/// remove entry points.
-pub async fn remove_qualified_dependencies(
-    mut workspace: WorkspaceMut,
-    dependencies: Vec<QualifiedDependency>,
-    options: DependencyOptions,
-) -> Result<(), RemoveError> {
-    // Prevent removing Python if PyPI dependencies exist.
-    let removing_python = dependencies.iter().any(
-        |dep| matches!(dep, QualifiedDependency::Conda { name, .. } if name.as_source() == "python"),
-    );
-    if removing_python {
-        let pypi_deps = workspace
-            .workspace()
-            .default_environment()
-            .pypi_dependencies(None);
-        if !pypi_deps.is_empty() {
-            return Err(RemoveError::PythonHasPypiDependencies {
-                pypi_deps: pypi_deps
-                    .iter()
-                    .map(|(name, _)| name.as_source().to_string())
-                    .collect(),
-            });
-        }
-    }
-
-    workspace.remove_qualified_dependencies(&dependencies)?;
-
-    let workspace = workspace.save().await.map_err(RemoveError::Save)?;
-    update_lock_file_after_remove(&workspace, &options).await
-}
-
 /// Update the lock file (and prefix) after the manifest has been modified by a
 /// removal, unless the user asked to keep the lock file untouched.
 async fn update_lock_file_after_remove(
@@ -174,6 +137,7 @@ async fn update_lock_file_after_remove(
 mod tests {
     use std::str::FromStr;
 
+    use pixi_core::workspace::QualifiedDependency;
     use pixi_core::{Workspace, environment::LockFileUsage};
     use pixi_manifest::FeatureName;
     use pixi_pypi_spec::PypiPackageName;
@@ -338,7 +302,10 @@ pytest = "*"
             },
         ];
 
-        remove_qualified_dependencies(workspace.modify().unwrap(), dependencies, options())
+        workspace
+            .modify()
+            .unwrap()
+            .remove_qualified_dependencies(&dependencies, LockFileUsage::Frozen, true)
             .await
             .unwrap();
 
@@ -380,13 +347,15 @@ requests = "*"
             default_target: true,
         }];
 
-        let err =
-            remove_qualified_dependencies(workspace.modify().unwrap(), dependencies, options())
-                .await
-                .unwrap_err();
+        let err = workspace
+            .modify()
+            .unwrap()
+            .remove_qualified_dependencies(&dependencies, LockFileUsage::Frozen, true)
+            .await
+            .unwrap_err();
 
         insta::assert_snapshot!(
-            format_diagnostic(&err),
+            format_diagnostic(&*err),
             @"  × Cannot remove Python while PyPI dependencies exist. Please remove these PyPI dependencies first: requests"
         );
     }
