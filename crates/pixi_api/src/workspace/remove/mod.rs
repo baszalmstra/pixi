@@ -1,15 +1,16 @@
 use indexmap::IndexMap;
 use miette::Diagnostic;
 use pixi_core::{
-    InstallFilter, UpdateLockFileOptions,
+    InstallFilter, UpdateLockFileOptions, Workspace,
     environment::{LockFileUsage, get_update_lock_file_and_prefix},
     lock_file::{ReinstallPackages, UpdateMode},
     workspace::{PypiDeps, WorkspaceMut},
 };
 use pixi_manifest::{
-    DependencyError, FeaturesExt, LoadManifestsError, RemoveDependencyError, SpecType,
+    DependencyError, FeatureName, FeaturesExt, LoadManifestsError, RemoveDependencyError, SpecType,
 };
-use rattler_conda_types::{MatchSpec, PackageName};
+use pixi_pypi_spec::PypiPackageName;
+use rattler_conda_types::{MatchSpec, PackageName, Platform};
 use thiserror::Error;
 
 use crate::workspace::DependencyOptions;
@@ -86,28 +87,7 @@ pub async fn remove_conda_deps(
         )?;
     }
     let workspace = workspace.save().await.map_err(RemoveError::Save)?;
-
-    // TODO: update all environments touched by this feature defined.
-    // updating prefix after removing from toml
-    if options.lock_file_usage == LockFileUsage::Update {
-        get_update_lock_file_and_prefix(
-            &workspace.default_environment(),
-            None,
-            UpdateMode::Revalidate,
-            UpdateLockFileOptions {
-                lock_file_usage: options.lock_file_usage,
-                no_install: options.no_install,
-                max_concurrent_solves: workspace.config().max_concurrent_solves(),
-                ..Default::default()
-            },
-            ReinstallPackages::default(),
-            &InstallFilter::default(),
-        )
-        .await
-        .map_err(|e| RemoveError::LockFileUpdate(e.into()))?;
-    }
-
-    Ok(())
+    update_lock_file_after_remove(&workspace, &options).await
 }
 
 pub async fn remove_pypi_deps(
@@ -122,7 +102,110 @@ pub async fn remove_pypi_deps(
     }
 
     let workspace = workspace.save().await.map_err(RemoveError::Save)?;
+    update_lock_file_after_remove(&workspace, &options).await
+}
 
+/// A single resolved removal produced by the CLI's "search everywhere" path.
+///
+/// Each variant carries the concrete location(s) the package was found in so a
+/// bare `pixi remove <pkg>` can strip it from the platform-agnostic table
+/// and/or specific platform targets of one feature in a single pass.
+#[derive(Debug, Clone)]
+pub enum Removal {
+    Conda {
+        name: PackageName,
+        spec_type: SpecType,
+        feature: FeatureName,
+        /// Concrete platform targets the package was found in.
+        platforms: Vec<Platform>,
+        /// Whether the package is also present in the platform-agnostic table.
+        default_target: bool,
+    },
+    Pypi {
+        name: PypiPackageName,
+        feature: FeatureName,
+        platforms: Vec<Platform>,
+        default_target: bool,
+    },
+}
+
+/// Apply a set of resolved removals to the manifest in a single pass, saving
+/// and updating the lock file once. The locations are assumed to have been
+/// validated by the caller, so a per-platform miss here is a hard error.
+pub async fn remove_resolved(
+    mut workspace: WorkspaceMut,
+    removals: Vec<Removal>,
+    options: DependencyOptions,
+) -> Result<(), RemoveError> {
+    // Prevent removing Python if PyPI dependencies exist.
+    let removing_python = removals.iter().any(
+        |removal| matches!(removal, Removal::Conda { name, .. } if name.as_source() == "python"),
+    );
+    if removing_python {
+        let pypi_deps = workspace
+            .workspace()
+            .default_environment()
+            .pypi_dependencies(None);
+        if !pypi_deps.is_empty() {
+            return Err(RemoveError::PythonHasPypiDependencies {
+                pypi_deps: pypi_deps
+                    .iter()
+                    .map(|(name, _)| name.as_source().to_string())
+                    .collect(),
+            });
+        }
+    }
+
+    for removal in &removals {
+        match removal {
+            Removal::Conda {
+                name,
+                spec_type,
+                feature,
+                platforms,
+                default_target,
+            } => {
+                if *default_target {
+                    workspace
+                        .manifest()
+                        .remove_dependency(name, *spec_type, &[], feature)?;
+                }
+                if !platforms.is_empty() {
+                    workspace
+                        .manifest()
+                        .remove_dependency(name, *spec_type, platforms, feature)?;
+                }
+            }
+            Removal::Pypi {
+                name,
+                feature,
+                platforms,
+                default_target,
+            } => {
+                if *default_target {
+                    workspace
+                        .manifest()
+                        .remove_pypi_dependency(name, &[], feature)?;
+                }
+                if !platforms.is_empty() {
+                    workspace
+                        .manifest()
+                        .remove_pypi_dependency(name, platforms, feature)?;
+                }
+            }
+        }
+    }
+
+    let workspace = workspace.save().await.map_err(RemoveError::Save)?;
+    update_lock_file_after_remove(&workspace, &options).await
+}
+
+/// Update the lock file (and prefix) after the manifest has been modified by a
+/// removal, unless the user asked to keep the lock file untouched.
+async fn update_lock_file_after_remove(
+    workspace: &Workspace,
+    options: &DependencyOptions,
+) -> Result<(), RemoveError> {
     // TODO: update all environments touched by this feature defined.
     // updating prefix after removing from toml
     if options.lock_file_usage == LockFileUsage::Update {
@@ -148,6 +231,8 @@ pub async fn remove_pypi_deps(
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use pixi_core::{Workspace, environment::LockFileUsage};
     use pixi_manifest::FeatureName;
     use pixi_test_utils::format_diagnostic;
@@ -243,5 +328,123 @@ ruff = "*"
             @"  × dependency `fizzbuzz` was not found"
         );
         assert!(matches!(err, RemoveError::NotFound { name } if name == "fizzbuzz"));
+    }
+
+    fn conda_name(name: &str) -> PackageName {
+        PackageName::try_from(name).unwrap()
+    }
+
+    /// `remove_resolved` strips packages from several tables — a conda run dep,
+    /// a pypi dep, a platform-specific conda dep, and a named feature — in a
+    /// single pass, leaving untouched packages in place.
+    #[tokio::test]
+    async fn remove_resolved_across_tables() {
+        let tmp = tempfile::TempDir::new().unwrap().keep();
+        let path = tmp.join("pixi.toml");
+        fs_err::write(
+            &path,
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[dependencies]
+numpy = "*"
+ruff = "*"
+
+[pypi-dependencies]
+black = "*"
+
+[target.linux-64.dependencies]
+only-linux = "*"
+
+[feature.dev.dependencies]
+pytest = "*"
+"#,
+        )
+        .unwrap();
+        let workspace = Workspace::from_path(&path).expect("failed to load workspace");
+
+        let removals = vec![
+            Removal::Conda {
+                name: conda_name("numpy"),
+                spec_type: SpecType::Run,
+                feature: FeatureName::DEFAULT,
+                platforms: vec![],
+                default_target: true,
+            },
+            Removal::Pypi {
+                name: PypiPackageName::from_str("black").unwrap(),
+                feature: FeatureName::DEFAULT,
+                platforms: vec![],
+                default_target: true,
+            },
+            Removal::Conda {
+                name: conda_name("only-linux"),
+                spec_type: SpecType::Run,
+                feature: FeatureName::DEFAULT,
+                platforms: vec![Platform::Linux64],
+                default_target: false,
+            },
+            Removal::Conda {
+                name: conda_name("pytest"),
+                spec_type: SpecType::Run,
+                feature: FeatureName::from("dev"),
+                platforms: vec![],
+                default_target: true,
+            },
+        ];
+
+        remove_resolved(workspace.modify().unwrap(), removals, options())
+            .await
+            .unwrap();
+
+        let content = fs_err::read_to_string(&path).unwrap();
+        assert!(!content.contains("numpy"), "numpy should be removed");
+        assert!(!content.contains("black"), "black should be removed");
+        assert!(
+            !content.contains("only-linux"),
+            "only-linux should be removed"
+        );
+        assert!(!content.contains("pytest"), "pytest should be removed");
+        // Untouched dependency survives.
+        assert!(content.contains("ruff"), "ruff should be kept");
+    }
+
+    /// The python guard also fires through the resolved-removal path.
+    #[tokio::test]
+    async fn remove_resolved_python_guard() {
+        let workspace = workspace_from(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[dependencies]
+python = "*"
+
+[pypi-dependencies]
+requests = "*"
+"#,
+        );
+
+        let removals = vec![Removal::Conda {
+            name: conda_name("python"),
+            spec_type: SpecType::Run,
+            feature: FeatureName::DEFAULT,
+            platforms: vec![],
+            default_target: true,
+        }];
+
+        let err = remove_resolved(workspace.modify().unwrap(), removals, options())
+            .await
+            .unwrap_err();
+
+        insta::assert_snapshot!(
+            format_diagnostic(&err),
+            @"  × Cannot remove Python while PyPI dependencies exist. Please remove these PyPI dependencies first: requests"
+        );
     }
 }

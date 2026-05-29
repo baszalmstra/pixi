@@ -1,15 +1,29 @@
-use std::{
-    fmt::{self, Display},
-    str::FromStr,
-};
+use std::fmt::{self, Display};
 
 use itertools::Itertools;
 use miette::Diagnostic;
-use pixi_consts::consts;
 use pixi_core::DependencyType;
-use pixi_manifest::{FeatureName, SpecType, WorkspaceManifest};
+use pixi_manifest::{FeatureName, WorkspaceManifest};
 use pixi_pypi_spec::PypiPackageName;
-use rattler_conda_types::{PackageName, Platform};
+use rattler_conda_types::PackageName;
+use std::str::FromStr;
+
+use super::locate::{
+    Location, Slot, format_exact_location, is_exact_match, is_similar, suggested_invocation,
+    walk_dependencies,
+};
+
+/// What was searched when a dependency could not be removed.
+pub(super) enum Scope {
+    /// A specific table + feature was targeted (the user passed a location flag
+    /// such as `--pypi`, `--host`, `--build`, or `--feature`).
+    Table {
+        dependency_type: DependencyType,
+        feature: FeatureName,
+    },
+    /// The whole workspace was searched (a bare `pixi remove <pkg>`).
+    Anywhere,
+}
 
 /// Diagnostic for the "dependency not found" path of `pixi remove`. Carries
 /// computed help text that points the user at the right dependency table,
@@ -17,24 +31,37 @@ use rattler_conda_types::{PackageName, Platform};
 #[derive(Debug)]
 pub(super) struct DependencyRemovalError {
     name: String,
-    dependency_type: DependencyType,
-    feature: FeatureName,
+    location: NotFoundLocation,
     suggestions: Vec<String>,
 }
 
+/// The rendered description of where we looked, kept separate from [`Scope`] so
+/// the error can stay `Debug` without requiring it of every field of `Scope`.
+#[derive(Debug)]
+enum NotFoundLocation {
+    Table {
+        table: &'static str,
+        feature: FeatureName,
+    },
+    Anywhere,
+}
+
 impl DependencyRemovalError {
-    pub(super) fn new(
-        name: String,
-        manifest: &WorkspaceManifest,
-        dependency_type: DependencyType,
-        feature: &FeatureName,
-        platforms: &[Platform],
-    ) -> Self {
-        let suggestions = collect_suggestions(manifest, &name, dependency_type, feature, platforms);
+    pub(super) fn new(name: String, manifest: &WorkspaceManifest, scope: Scope) -> Self {
+        let suggestions = collect_suggestions(manifest, &name, &scope);
+        let location = match scope {
+            Scope::Table {
+                dependency_type,
+                feature,
+            } => NotFoundLocation::Table {
+                table: Slot::from(dependency_type).table_name(),
+                feature,
+            },
+            Scope::Anywhere => NotFoundLocation::Anywhere,
+        };
         Self {
             name,
-            dependency_type,
-            feature: feature.clone(),
+            location,
             suggestions,
         }
     }
@@ -42,16 +69,22 @@ impl DependencyRemovalError {
 
 impl Display for DependencyRemovalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "dependency `{}` was not found in {}",
-            self.name,
-            Slot::from(self.dependency_type).table_name()
-        )?;
-        if !self.feature.is_default() {
-            write!(f, " of feature `{}`", self.feature)?;
+        match &self.location {
+            NotFoundLocation::Table { table, feature } => {
+                write!(f, "dependency `{}` was not found in {table}", self.name)?;
+                if !feature.is_default() {
+                    write!(f, " of feature `{feature}`")?;
+                }
+                Ok(())
+            }
+            NotFoundLocation::Anywhere => {
+                write!(
+                    f,
+                    "dependency `{}` was not found in the workspace",
+                    self.name
+                )
+            }
         }
-        Ok(())
     }
 }
 
@@ -67,59 +100,68 @@ impl Diagnostic for DependencyRemovalError {
     }
 }
 
-/// Local key that identifies which dependency table a package lives in.
-/// Mirrors [`DependencyType`] but is `Eq` so we can deduplicate locations.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum Slot {
-    Conda(SpecType),
-    Pypi,
-}
-
-impl From<DependencyType> for Slot {
-    fn from(value: DependencyType) -> Self {
-        match value {
-            DependencyType::CondaDependency(s) => Slot::Conda(s),
-            DependencyType::PypiDependency => Slot::Pypi,
-        }
-    }
-}
-
-impl Slot {
-    fn table_name(self) -> &'static str {
-        match self {
-            Slot::Pypi => "pypi-dependencies",
-            Slot::Conda(SpecType::Host) => "host-dependencies",
-            Slot::Conda(SpecType::Build) => "build-dependencies",
-            Slot::Conda(SpecType::Run) => "dependencies",
-            Slot::Conda(SpecType::RunConstraints) => "run-constraints",
-        }
-    }
-
-    fn cli_flag(self) -> Option<&'static str> {
-        match self {
-            Slot::Pypi => Some("--pypi"),
-            Slot::Conda(SpecType::Host) => Some("--host"),
-            Slot::Conda(SpecType::Build) => Some("--build"),
-            // `Run` is the default; `RunConstraints` cannot be removed via the CLI.
-            Slot::Conda(_) => None,
-        }
-    }
-}
-
-/// One dependency entry discovered while walking the workspace, used by the
-/// suggestion collector to match against the missing name.
-struct DepEntry<'a> {
-    feature: &'a FeatureName,
-    slot: Slot,
+/// Diagnostic for a bare `pixi remove <pkg>` that matches the same package in
+/// more than one location. We refuse to guess and ask the user to disambiguate.
+#[derive(Debug)]
+pub(super) struct AmbiguousRemovalError {
     name: String,
+    locations: Vec<(FeatureName, Slot)>,
 }
 
-fn collect_suggestions(
+impl AmbiguousRemovalError {
+    pub(super) fn new(name: String, locations: &[Location]) -> Self {
+        Self {
+            name,
+            locations: locations
+                .iter()
+                .map(|loc| (loc.feature.clone(), loc.slot))
+                .collect(),
+        }
+    }
+}
+
+impl Display for AmbiguousRemovalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "dependency `{}` is defined in multiple locations; specify which one to remove",
+            self.name
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousRemovalError {}
+
+impl Diagnostic for AmbiguousRemovalError {
+    fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
+        let hints = self
+            .locations
+            .iter()
+            .map(|(feature, slot)| {
+                format!("- {}", suggested_invocation(&self.name, *slot, feature))
+            })
+            .join("\n");
+        Some(Box::new(hints))
+    }
+}
+
+fn collect_suggestions(manifest: &WorkspaceManifest, name: &str, scope: &Scope) -> Vec<String> {
+    match scope {
+        Scope::Table {
+            dependency_type,
+            feature,
+        } => collect_table_suggestions(manifest, name, *dependency_type, feature),
+        Scope::Anywhere => collect_similar_suggestions(manifest, name),
+    }
+}
+
+/// Suggestions for the strict path: point at the same package in other tables /
+/// features, or at a similarly-named package in the requested table.
+fn collect_table_suggestions(
     manifest: &WorkspaceManifest,
     name: &str,
     dependency_type: DependencyType,
     feature: &FeatureName,
-    platforms: &[Platform],
 ) -> Vec<String> {
     let current_slot = Slot::from(dependency_type);
     let target_conda = PackageName::try_from(name).ok();
@@ -128,7 +170,7 @@ fn collect_suggestions(
     let mut exact_locations: Vec<(FeatureName, Slot)> = Vec::new();
     let mut similar_in_target: Vec<String> = Vec::new();
 
-    for entry in walk_dependencies(manifest, platforms) {
+    for entry in walk_dependencies(manifest) {
         if is_exact_match(&entry, target_conda.as_ref(), target_pypi.as_ref()) {
             let location = (entry.feature.clone(), entry.slot);
             if (entry.feature, entry.slot) != (feature, current_slot)
@@ -153,106 +195,30 @@ fn collect_suggestions(
         suggestions.push(format_exact_location(name, slot, &feat_name));
     }
     if !similar_in_target.is_empty() {
-        let quoted = similar_in_target
-            .iter()
-            .map(|s| format!("`{s}`"))
-            .join(", ");
-        suggestions.push(format!("did you mean {quoted}?"));
+        suggestions.push(did_you_mean(&similar_in_target));
     }
     suggestions
 }
 
-/// Flatten the (feature × platform × spec-type) iteration into a single
-/// stream of dependency entries so the matching logic above can stay flat.
-fn walk_dependencies<'a>(
-    manifest: &'a WorkspaceManifest,
-    platforms: &[Platform],
-) -> impl Iterator<Item = DepEntry<'a>> + 'a {
-    let platform_opts = to_platform_options(platforms);
-    manifest.features.iter().flat_map(move |(feat_name, feat)| {
-        platform_opts
-            .clone()
-            .into_iter()
-            .flat_map(move |platform| dependencies_for(feat_name, feat, platform))
-    })
-}
-
-fn dependencies_for<'a>(
-    feat_name: &'a FeatureName,
-    feat: &'a pixi_manifest::Feature,
-    platform: Option<Platform>,
-) -> Vec<DepEntry<'a>> {
-    let mut entries = Vec::new();
-    for spec_type in SpecType::all() {
-        if let Some(deps) = feat.dependencies(spec_type, platform) {
-            entries.extend(deps.iter().map(|(pkg, _)| DepEntry {
-                feature: feat_name,
-                slot: Slot::Conda(spec_type),
-                name: pkg.as_normalized().to_string(),
-            }));
+/// Suggestions for the auto path: the package was nowhere to be found, so the
+/// only useful hint is a similarly-named package anywhere in the workspace.
+fn collect_similar_suggestions(manifest: &WorkspaceManifest, name: &str) -> Vec<String> {
+    let mut similar: Vec<String> = Vec::new();
+    for entry in walk_dependencies(manifest) {
+        if is_similar(name, &entry.name) && !similar.contains(&entry.name) {
+            similar.push(entry.name);
         }
     }
-    if let Some(deps) = feat.pypi_dependencies(platform) {
-        entries.extend(deps.iter().map(|(pkg, _)| DepEntry {
-            feature: feat_name,
-            slot: Slot::Pypi,
-            name: pkg.as_source().to_string(),
-        }));
-    }
-    entries
-}
-
-fn is_exact_match(
-    entry: &DepEntry<'_>,
-    target_conda: Option<&PackageName>,
-    target_pypi: Option<&PypiPackageName>,
-) -> bool {
-    match entry.slot {
-        Slot::Conda(_) => target_conda
-            .and_then(|t| {
-                PackageName::try_from(entry.name.as_str())
-                    .ok()
-                    .map(|n| n == *t)
-            })
-            .unwrap_or(false),
-        Slot::Pypi => target_pypi
-            .and_then(|t| PypiPackageName::from_str(&entry.name).ok().map(|n| n == *t))
-            .unwrap_or(false),
-    }
-}
-
-fn format_exact_location(name: &str, slot: Slot, feature: &FeatureName) -> String {
-    let feature_part = if feature.is_default() {
-        "the default feature".to_string()
+    if similar.is_empty() {
+        Vec::new()
     } else {
-        format!("feature `{}`", consts::FEATURE_STYLE.apply_to(feature))
-    };
-    let mut parts = vec!["pixi".to_string(), "remove".to_string()];
-    if let Some(flag) = slot.cli_flag() {
-        parts.push(flag.to_string());
+        vec![did_you_mean(&similar)]
     }
-    if !feature.is_default() {
-        parts.push("--feature".to_string());
-        parts.push(feature.to_string());
-    }
-    parts.push(name.to_string());
-    let invocation = parts.join(" ");
-    format!(
-        "`{name}` is a {} entry in {feature_part}; try `{invocation}`",
-        slot.table_name()
-    )
 }
 
-fn is_similar(a: &str, b: &str) -> bool {
-    a != b && strsim::jaro(a, b) > 0.85
-}
-
-fn to_platform_options(platforms: &[Platform]) -> Vec<Option<Platform>> {
-    if platforms.is_empty() {
-        vec![None]
-    } else {
-        platforms.iter().copied().map(Some).collect()
-    }
+fn did_you_mean(names: &[String]) -> String {
+    let quoted = names.iter().map(|s| format!("`{s}`")).join(", ");
+    format!("did you mean {quoted}?")
 }
 
 #[cfg(test)]
@@ -274,10 +240,15 @@ mod tests {
         name: &str,
         dep_type: DependencyType,
         feature: &FeatureName,
-        platforms: &[Platform],
     ) -> String {
-        let err =
-            DependencyRemovalError::new(name.to_string(), manifest, dep_type, feature, platforms);
+        let err = DependencyRemovalError::new(
+            name.to_string(),
+            manifest,
+            Scope::Table {
+                dependency_type: dep_type,
+                feature: feature.clone(),
+            },
+        );
         format_diagnostic(&err)
     }
 
@@ -316,7 +287,6 @@ pandas = "*"
                 "polars",
                 DependencyType::CondaDependency(SpecType::Run),
                 &FeatureName::DEFAULT,
-                &[],
             ),
             @r"
           × dependency `polars` was not found in dependencies
@@ -335,7 +305,6 @@ pandas = "*"
                 "ruff",
                 DependencyType::PypiDependency,
                 &FeatureName::DEFAULT,
-                &[],
             ),
             @r"
           × dependency `ruff` was not found in pypi-dependencies
@@ -354,7 +323,6 @@ pandas = "*"
                 "openssl",
                 DependencyType::CondaDependency(SpecType::Run),
                 &FeatureName::DEFAULT,
-                &[],
             ),
             @r"
           × dependency `openssl` was not found in dependencies
@@ -373,7 +341,6 @@ pandas = "*"
                 "cmake",
                 DependencyType::CondaDependency(SpecType::Run),
                 &FeatureName::DEFAULT,
-                &[],
             ),
             @r"
           × dependency `cmake` was not found in dependencies
@@ -393,7 +360,6 @@ pandas = "*"
                 "numpy",
                 DependencyType::CondaDependency(SpecType::Run),
                 &FeatureName::DEFAULT,
-                &[],
             ),
             @r"
           × dependency `numpy` was not found in dependencies
@@ -413,7 +379,6 @@ pandas = "*"
                 "polrs",
                 DependencyType::PypiDependency,
                 &FeatureName::DEFAULT,
-                &[],
             ),
             @r"
           × dependency `polrs` was not found in pypi-dependencies
@@ -432,7 +397,6 @@ pandas = "*"
                 "fizzbuzz",
                 DependencyType::CondaDependency(SpecType::Run),
                 &FeatureName::DEFAULT,
-                &[],
             ),
             @"  × dependency `fizzbuzz` was not found in dependencies"
         );
@@ -449,7 +413,6 @@ pandas = "*"
                 "numpy",
                 DependencyType::PypiDependency,
                 &FeatureName::from("dev"),
-                &[],
             ),
             @r"
           × dependency `numpy` was not found in pypi-dependencies of feature `dev`
@@ -469,11 +432,35 @@ pandas = "*"
                 "pandas",
                 DependencyType::CondaDependency(SpecType::Run),
                 &FeatureName::from("dev"),
-                &[],
             ),
             @r"
           × dependency `pandas` was not found in dependencies of feature `dev`
           help: `pandas` is a pypi-dependencies entry in feature `dev`; try `pixi remove --pypi --feature dev pandas`
+        "
+        );
+    }
+
+    #[test]
+    fn auto_not_found_searches_whole_workspace() {
+        // A bare `pixi remove fizzbuzz` that matches nothing anywhere.
+        let manifest = parse(MIXED_MANIFEST);
+        let err = DependencyRemovalError::new("fizzbuzz".to_string(), &manifest, Scope::Anywhere);
+        insta::assert_snapshot!(
+            format_diagnostic(&err),
+            @"  × dependency `fizzbuzz` was not found in the workspace"
+        );
+    }
+
+    #[test]
+    fn auto_not_found_suggests_similar_name_anywhere() {
+        // A bare `pixi remove pollars` should suggest the pypi `polars`.
+        let manifest = parse(MIXED_MANIFEST);
+        let err = DependencyRemovalError::new("pollars".to_string(), &manifest, Scope::Anywhere);
+        insta::assert_snapshot!(
+            format_diagnostic(&err),
+            @r"
+          × dependency `pollars` was not found in the workspace
+          help: did you mean `polars`?
         "
         );
     }

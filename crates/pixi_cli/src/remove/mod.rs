@@ -1,14 +1,19 @@
 mod error;
+mod locate;
+
+use std::str::FromStr;
 
 use clap::Parser;
 use indexmap::IndexMap;
 use pixi_api::{
     WorkspaceContext,
-    workspace::{DependencyOptions, RemoveError},
+    workspace::{DependencyOptions, Removal, RemoveError},
 };
 use pixi_config::ConfigCli;
-use pixi_core::{DependencyType, WorkspaceLocator};
+use pixi_core::{DependencyType, Workspace, WorkspaceLocator};
 use pixi_manifest::HasWorkspaceManifest;
+use pixi_pypi_spec::PypiPackageName;
+use rattler_conda_types::{PackageName, Platform};
 
 use crate::{cli_config::LockFileUpdateConfig, has_specs::HasSpecs};
 use crate::{
@@ -16,9 +21,15 @@ use crate::{
     cli_interface::CliInterface,
 };
 
-use error::DependencyRemovalError;
+use error::{AmbiguousRemovalError, DependencyRemovalError, Scope};
+use locate::{Location, Slot, locate};
 
 /// Removes dependencies from the workspace.
+///
+/// A bare `pixi remove <pkg>...` searches every dependency table — conda and
+/// PyPI, every feature, every platform — and removes each package from wherever
+/// it is defined. Passing a location flag (`--pypi`, `--host`, `--build`,
+/// `--feature`, or `--platform`) instead restricts the removal to that table.
 ///
 ///  If the workspace manifest is a `pyproject.toml`, removing a pypi dependency
 /// with the `--pypi` flag will remove it from either
@@ -71,9 +82,14 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     let workspace_ctx = WorkspaceContext::new(CliInterface {}, workspace.clone());
 
+    // Without any location flag, search every table and remove each package
+    // from wherever it is defined.
+    if !location_specified(&args.dependency_config) {
+        return execute_auto(&args, &workspace, &workspace_ctx).await;
+    }
+
     let dependency_type = args.dependency_config.dependency_type();
     let feature = args.dependency_config.feature.clone();
-    let platforms = args.dependency_config.platforms.clone();
 
     let result = match dependency_type {
         DependencyType::CondaDependency(spec_type) => {
@@ -124,11 +140,117 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             Err(miette::Report::new(DependencyRemovalError::new(
                 name,
                 (&workspace).workspace_manifest(),
-                dependency_type,
-                &feature,
-                &platforms,
+                Scope::Table {
+                    dependency_type,
+                    feature,
+                },
             )))
         }
         (Err(other), _) => Err(miette::Report::new(other)),
+    }
+}
+
+/// Returns `true` if the user pinned the removal to a specific location with a
+/// flag, in which case the strict (single-table) removal path is used.
+fn location_specified(config: &DependencyConfig) -> bool {
+    config.pypi
+        || config.host
+        || config.build
+        || !config.feature.is_default()
+        || !config.platforms.is_empty()
+        || config.git.is_some()
+}
+
+/// Remove each requested package from wherever it is defined in the workspace.
+///
+/// Resolution happens up front: every package must resolve to exactly one
+/// location or the whole command fails without touching the manifest. A package
+/// that is missing yields a "not found" diagnostic with suggestions; one that
+/// lives in several tables yields an ambiguity diagnostic listing them.
+async fn execute_auto(
+    args: &Args,
+    workspace: &Workspace,
+    workspace_ctx: &WorkspaceContext<CliInterface>,
+) -> miette::Result<()> {
+    let manifest = workspace.workspace_manifest();
+
+    let mut removals = Vec::with_capacity(args.dependency_config.specs.len());
+    for spec in &args.dependency_config.specs {
+        let name = bare_name(spec);
+        let mut locations = locate(manifest, name);
+        match locations.len() {
+            0 => {
+                return Err(miette::Report::new(DependencyRemovalError::new(
+                    spec.clone(),
+                    manifest,
+                    Scope::Anywhere,
+                )));
+            }
+            1 => removals.push(to_removal(name, locations.pop().expect("one location"))),
+            _ => {
+                return Err(miette::Report::new(AmbiguousRemovalError::new(
+                    spec.clone(),
+                    &locations,
+                )));
+            }
+        }
+    }
+
+    workspace_ctx
+        .remove_resolved(removals, args.try_into()?)
+        .await?;
+    args.dependency_config
+        .display_success("Removed", Default::default());
+    Ok(())
+}
+
+/// Convert a located dependency into the API's [`Removal`] instruction, keeping
+/// the platform-agnostic table and any concrete platform targets separate.
+fn to_removal(name: &str, location: Location) -> Removal {
+    let default_target = location.platforms.iter().any(Option::is_none);
+    let platforms: Vec<Platform> = location.platforms.iter().filter_map(|p| *p).collect();
+    match location.slot {
+        Slot::Conda(spec_type) => Removal::Conda {
+            name: PackageName::try_from(name).expect("located as a conda dependency"),
+            spec_type,
+            feature: location.feature,
+            platforms,
+            default_target,
+        },
+        Slot::Pypi => Removal::Pypi {
+            name: PypiPackageName::from_str(name).expect("located as a pypi dependency"),
+            feature: location.feature,
+            platforms,
+            default_target,
+        },
+    }
+}
+
+/// Extract the bare package name from a user-supplied spec, dropping any channel
+/// prefix (`conda-forge::`) and version/extra qualifiers so it can be matched
+/// against the names stored in the manifest.
+fn bare_name(spec: &str) -> &str {
+    let without_channel = spec.rsplit("::").next().unwrap_or(spec);
+    let end = without_channel
+        .find(|c: char| "<>=!~ \t@;[(".contains(c))
+        .unwrap_or(without_channel.len());
+    without_channel[..end].trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bare_name;
+
+    #[test]
+    fn bare_name_strips_qualifiers() {
+        assert_eq!(bare_name("numpy"), "numpy");
+        assert_eq!(bare_name("numpy>=1.0"), "numpy");
+        assert_eq!(bare_name("numpy >=1.0"), "numpy");
+        assert_eq!(bare_name("numpy==1.26.*"), "numpy");
+        assert_eq!(bare_name("conda-forge::numpy"), "numpy");
+        assert_eq!(bare_name("conda-forge::numpy>=1.0"), "numpy");
+        assert_eq!(bare_name("black[d]"), "black");
+        assert_eq!(bare_name("ruamel.yaml"), "ruamel.yaml");
+        assert_eq!(bare_name("foo @ git+https://example.com/foo"), "foo");
     }
 }

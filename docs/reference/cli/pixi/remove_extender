@@ -18,6 +18,8 @@ pixi remove --no-install numpy
 --8<-- [end:example]
 
 --8<-- [start:description]
+Without a location flag, `pixi remove <package>...` searches every dependency table — conda and PyPI, every feature, every platform — and removes each package from wherever it is defined. If a package is defined in more than one table the removal is rejected as ambiguous, and pixi prints the commands that target each location. Passing a location flag (`--pypi`, `--host`, `--build`, `--feature`, or `--platform`) restricts the removal to that table.
+
 If the project manifest is a `pyproject.toml`, removing a pypi dependency with the `--pypi` flag will remove it from either
 
 - the native pyproject `project.dependencies` array or the native `project.optional-dependencies` table (if a feature is specified)

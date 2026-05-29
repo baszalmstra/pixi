@@ -17,7 +17,7 @@ use rattler_conda_types::{
 use crate::interface::Interface;
 use crate::workspace::add::GitOptions;
 use crate::workspace::{
-    ChannelOptions, DependencyOptions, InitOptions, Package, ReinstallOptions, RemoveError,
+    ChannelOptions, DependencyOptions, InitOptions, Package, ReinstallOptions, Removal, RemoveError,
 };
 
 pub struct DefaultContext<I: Interface> {
@@ -341,6 +341,22 @@ impl<I: Interface> WorkspaceContext<I> {
         Box::pin(crate::workspace::remove::remove_pypi_deps(
             workspace_mut,
             pypi_deps,
+            options,
+        ))
+        .await
+    }
+
+    /// Remove a set of dependencies that the CLI has already located across the
+    /// workspace (the "search everywhere" path of a bare `pixi remove`).
+    pub async fn remove_resolved(
+        &self,
+        removals: Vec<Removal>,
+        options: DependencyOptions,
+    ) -> Result<(), RemoveError> {
+        let workspace_mut = self.workspace.clone().modify()?;
+        Box::pin(crate::workspace::remove::remove_resolved(
+            workspace_mut,
+            removals,
             options,
         ))
         .await
