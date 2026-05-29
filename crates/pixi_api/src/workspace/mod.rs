@@ -4,7 +4,7 @@ pub(crate) mod add;
 pub use add::{DependencyOptions, GitOptions};
 
 pub(crate) mod remove;
-pub use remove::{Removal, RemoveError};
+pub use remove::{QualifiedDependency, RemoveError};
 
 pub(crate) mod init;
 pub use init::{GitAttributes, InitOptions, ManifestFormat};

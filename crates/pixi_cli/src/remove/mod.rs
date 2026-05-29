@@ -7,7 +7,7 @@ use clap::Parser;
 use indexmap::IndexMap;
 use pixi_api::{
     WorkspaceContext,
-    workspace::{DependencyOptions, Removal, RemoveError},
+    workspace::{DependencyOptions, QualifiedDependency, RemoveError},
 };
 use pixi_config::ConfigCli;
 use pixi_core::{DependencyType, Workspace, WorkspaceLocator};
@@ -174,7 +174,7 @@ async fn execute_auto(
 ) -> miette::Result<()> {
     let manifest = workspace.workspace_manifest();
 
-    let mut removals = Vec::with_capacity(args.dependency_config.specs.len());
+    let mut dependencies = Vec::with_capacity(args.dependency_config.specs.len());
     for spec in &args.dependency_config.specs {
         let name = bare_name(spec);
         let mut locations = locate(manifest, name);
@@ -186,7 +186,10 @@ async fn execute_auto(
                     Scope::Anywhere,
                 )));
             }
-            1 => removals.push(to_removal(name, locations.pop().expect("one location"))),
+            1 => dependencies.push(to_qualified_dependency(
+                name,
+                locations.pop().expect("one location"),
+            )),
             _ => {
                 return Err(miette::Report::new(AmbiguousRemovalError::new(
                     spec.clone(),
@@ -197,27 +200,27 @@ async fn execute_auto(
     }
 
     workspace_ctx
-        .remove_resolved(removals, args.try_into()?)
+        .remove_resolved(dependencies, args.try_into()?)
         .await?;
     args.dependency_config
         .display_success("Removed", Default::default());
     Ok(())
 }
 
-/// Convert a located dependency into the API's [`Removal`] instruction, keeping
+/// Convert a located dependency into the API's [`QualifiedDependency`], keeping
 /// the platform-agnostic table and any concrete platform targets separate.
-fn to_removal(name: &str, location: Location) -> Removal {
+fn to_qualified_dependency(name: &str, location: Location) -> QualifiedDependency {
     let default_target = location.platforms.iter().any(Option::is_none);
     let platforms: Vec<Platform> = location.platforms.iter().filter_map(|p| *p).collect();
     match location.slot {
-        Slot::Conda(spec_type) => Removal::Conda {
+        Slot::Conda(spec_type) => QualifiedDependency::Conda {
             name: PackageName::try_from(name).expect("located as a conda dependency"),
             spec_type,
             feature: location.feature,
             platforms,
             default_target,
         },
-        Slot::Pypi => Removal::Pypi {
+        Slot::Pypi => QualifiedDependency::Pypi {
             name: PypiPackageName::from_str(name).expect("located as a pypi dependency"),
             feature: location.feature,
             platforms,

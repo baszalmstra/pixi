@@ -8,9 +8,10 @@ use pixi_pypi_spec::PypiPackageName;
 use rattler_conda_types::PackageName;
 use std::str::FromStr;
 
+use pixi_consts::consts;
+
 use super::locate::{
-    Location, Slot, format_exact_location, is_exact_match, is_similar, suggested_invocation,
-    walk_dependencies,
+    Location, Slot, format_exact_location, is_exact_match, is_similar, walk_dependencies,
 };
 
 /// What was searched when a dependency could not be removed.
@@ -138,7 +139,7 @@ impl Diagnostic for AmbiguousRemovalError {
             .locations
             .iter()
             .map(|(feature, slot)| {
-                format!("- {}", suggested_invocation(&self.name, *slot, feature))
+                format!("- {}", format_exact_location(&self.name, *slot, feature))
             })
             .join("\n");
         Some(Box::new(hints))
@@ -168,7 +169,7 @@ fn collect_table_suggestions(
     let target_pypi = PypiPackageName::from_str(name).ok();
 
     let mut exact_locations: Vec<(FeatureName, Slot)> = Vec::new();
-    let mut similar_in_target: Vec<String> = Vec::new();
+    let mut similar_in_target: Vec<(String, FeatureName)> = Vec::new();
 
     for entry in walk_dependencies(manifest) {
         if is_exact_match(&entry, target_conda.as_ref(), target_pypi.as_ref()) {
@@ -182,11 +183,12 @@ fn collect_table_suggestions(
         }
 
         let same_slot_and_feature = entry.slot == current_slot && entry.feature == feature;
+        let candidate = (entry.name.clone(), entry.feature.clone());
         if same_slot_and_feature
             && is_similar(name, &entry.name)
-            && !similar_in_target.contains(&entry.name)
+            && !similar_in_target.contains(&candidate)
         {
-            similar_in_target.push(entry.name);
+            similar_in_target.push(candidate);
         }
     }
 
@@ -201,12 +203,14 @@ fn collect_table_suggestions(
 }
 
 /// Suggestions for the auto path: the package was nowhere to be found, so the
-/// only useful hint is a similarly-named package anywhere in the workspace.
+/// only useful hint is a similarly-named package anywhere in the workspace,
+/// together with the feature it lives in.
 fn collect_similar_suggestions(manifest: &WorkspaceManifest, name: &str) -> Vec<String> {
-    let mut similar: Vec<String> = Vec::new();
+    let mut similar: Vec<(String, FeatureName)> = Vec::new();
     for entry in walk_dependencies(manifest) {
-        if is_similar(name, &entry.name) && !similar.contains(&entry.name) {
-            similar.push(entry.name);
+        let candidate = (entry.name.clone(), entry.feature.clone());
+        if is_similar(name, &entry.name) && !similar.contains(&candidate) {
+            similar.push(candidate);
         }
     }
     if similar.is_empty() {
@@ -216,9 +220,25 @@ fn collect_similar_suggestions(manifest: &WorkspaceManifest, name: &str) -> Vec<
     }
 }
 
-fn did_you_mean(names: &[String]) -> String {
-    let quoted = names.iter().map(|s| format!("`{s}`")).join(", ");
-    format!("did you mean {quoted}?")
+fn did_you_mean(candidates: &[(String, FeatureName)]) -> String {
+    let rendered = candidates
+        .iter()
+        .map(|(name, feature)| similar_candidate(name, feature))
+        .join(", ");
+    format!("did you mean {rendered}?")
+}
+
+/// Render a single "did you mean" candidate, naming the feature it lives in
+/// unless that is the default feature (where the location is unambiguous).
+fn similar_candidate(name: &str, feature: &FeatureName) -> String {
+    if feature.is_default() {
+        format!("`{name}`")
+    } else {
+        format!(
+            "`{name}` from feature `{}`",
+            consts::FEATURE_STYLE.apply_to(feature)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +481,50 @@ pandas = "*"
             @r"
           × dependency `pollars` was not found in the workspace
           help: did you mean `polars`?
+        "
+        );
+    }
+
+    #[test]
+    fn auto_not_found_similar_name_names_the_feature() {
+        // `pandas` only lives in feature `dev`, so the suggestion should say so.
+        let manifest = parse(MIXED_MANIFEST);
+        let err = DependencyRemovalError::new("pandes".to_string(), &manifest, Scope::Anywhere);
+        insta::assert_snapshot!(
+            format_diagnostic(&err),
+            @r"
+          × dependency `pandes` was not found in the workspace
+          help: did you mean `pandas` from feature `dev`?
+        "
+        );
+    }
+
+    const DUPLICATE_MANIFEST: &str = r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[dependencies]
+numpy = "*"
+
+[feature.dev.dependencies]
+numpy = "*"
+"#;
+
+    #[test]
+    fn ambiguous_removal_lists_each_location() {
+        // A bare `pixi remove numpy` when numpy is in two features must refuse
+        // to guess and point at the command for each location.
+        let manifest = parse(DUPLICATE_MANIFEST);
+        let locations = crate::remove::locate::locate(&manifest, "numpy");
+        let err = AmbiguousRemovalError::new("numpy".to_string(), &locations);
+        insta::assert_snapshot!(
+            format_diagnostic(&err),
+            @r"
+          × dependency `numpy` is defined in multiple locations; specify which one to remove
+          help: - `numpy` is a dependencies entry in the default feature; try `pixi remove numpy`
+                - `numpy` is a dependencies entry in feature `dev`; try `pixi remove --feature dev numpy`
         "
         );
     }

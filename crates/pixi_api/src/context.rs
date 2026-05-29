@@ -17,7 +17,8 @@ use rattler_conda_types::{
 use crate::interface::Interface;
 use crate::workspace::add::GitOptions;
 use crate::workspace::{
-    ChannelOptions, DependencyOptions, InitOptions, Package, ReinstallOptions, Removal, RemoveError,
+    ChannelOptions, DependencyOptions, InitOptions, Package, QualifiedDependency, ReinstallOptions,
+    RemoveError,
 };
 
 pub struct DefaultContext<I: Interface> {
@@ -350,13 +351,13 @@ impl<I: Interface> WorkspaceContext<I> {
     /// workspace (the "search everywhere" path of a bare `pixi remove`).
     pub async fn remove_resolved(
         &self,
-        removals: Vec<Removal>,
+        dependencies: Vec<QualifiedDependency>,
         options: DependencyOptions,
     ) -> Result<(), RemoveError> {
         let workspace_mut = self.workspace.clone().modify()?;
         Box::pin(crate::workspace::remove::remove_resolved(
             workspace_mut,
-            removals,
+            dependencies,
             options,
         ))
         .await

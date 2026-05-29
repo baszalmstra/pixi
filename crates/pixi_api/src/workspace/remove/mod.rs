@@ -105,13 +105,13 @@ pub async fn remove_pypi_deps(
     update_lock_file_after_remove(&workspace, &options).await
 }
 
-/// A single resolved removal produced by the CLI's "search everywhere" path.
-///
-/// Each variant carries the concrete location(s) the package was found in so a
-/// bare `pixi remove <pkg>` can strip it from the platform-agnostic table
-/// and/or specific platform targets of one feature in a single pass.
+/// A dependency together with the full location it was resolved to: which
+/// feature, which table, and which platform target(s). The CLI's "search
+/// everywhere" path produces these once it has pinned down where a bare
+/// `pixi remove <pkg>` should act, so the manifest can be edited without
+/// re-deriving the location.
 #[derive(Debug, Clone)]
-pub enum Removal {
+pub enum QualifiedDependency {
     Conda {
         name: PackageName,
         spec_type: SpecType,
@@ -129,17 +129,18 @@ pub enum Removal {
     },
 }
 
-/// Apply a set of resolved removals to the manifest in a single pass, saving
-/// and updating the lock file once. The locations are assumed to have been
-/// validated by the caller, so a per-platform miss here is a hard error.
+/// Remove a set of fully-qualified dependencies from the manifest in a single
+/// pass, saving and updating the lock file once. The locations are assumed to
+/// have been validated by the caller, so a per-platform miss here is a hard
+/// error.
 pub async fn remove_resolved(
     mut workspace: WorkspaceMut,
-    removals: Vec<Removal>,
+    dependencies: Vec<QualifiedDependency>,
     options: DependencyOptions,
 ) -> Result<(), RemoveError> {
     // Prevent removing Python if PyPI dependencies exist.
-    let removing_python = removals.iter().any(
-        |removal| matches!(removal, Removal::Conda { name, .. } if name.as_source() == "python"),
+    let removing_python = dependencies.iter().any(
+        |dep| matches!(dep, QualifiedDependency::Conda { name, .. } if name.as_source() == "python"),
     );
     if removing_python {
         let pypi_deps = workspace
@@ -156,9 +157,9 @@ pub async fn remove_resolved(
         }
     }
 
-    for removal in &removals {
-        match removal {
-            Removal::Conda {
+    for dependency in &dependencies {
+        match dependency {
+            QualifiedDependency::Conda {
                 name,
                 spec_type,
                 feature,
@@ -176,7 +177,7 @@ pub async fn remove_resolved(
                         .remove_dependency(name, *spec_type, platforms, feature)?;
                 }
             }
-            Removal::Pypi {
+            QualifiedDependency::Pypi {
                 name,
                 feature,
                 platforms,
@@ -366,28 +367,28 @@ pytest = "*"
         .unwrap();
         let workspace = Workspace::from_path(&path).expect("failed to load workspace");
 
-        let removals = vec![
-            Removal::Conda {
+        let dependencies = vec![
+            QualifiedDependency::Conda {
                 name: conda_name("numpy"),
                 spec_type: SpecType::Run,
                 feature: FeatureName::DEFAULT,
                 platforms: vec![],
                 default_target: true,
             },
-            Removal::Pypi {
+            QualifiedDependency::Pypi {
                 name: PypiPackageName::from_str("black").unwrap(),
                 feature: FeatureName::DEFAULT,
                 platforms: vec![],
                 default_target: true,
             },
-            Removal::Conda {
+            QualifiedDependency::Conda {
                 name: conda_name("only-linux"),
                 spec_type: SpecType::Run,
                 feature: FeatureName::DEFAULT,
                 platforms: vec![Platform::Linux64],
                 default_target: false,
             },
-            Removal::Conda {
+            QualifiedDependency::Conda {
                 name: conda_name("pytest"),
                 spec_type: SpecType::Run,
                 feature: FeatureName::from("dev"),
@@ -396,7 +397,7 @@ pytest = "*"
             },
         ];
 
-        remove_resolved(workspace.modify().unwrap(), removals, options())
+        remove_resolved(workspace.modify().unwrap(), dependencies, options())
             .await
             .unwrap();
 
@@ -430,7 +431,7 @@ requests = "*"
 "#,
         );
 
-        let removals = vec![Removal::Conda {
+        let dependencies = vec![QualifiedDependency::Conda {
             name: conda_name("python"),
             spec_type: SpecType::Run,
             feature: FeatureName::DEFAULT,
@@ -438,7 +439,7 @@ requests = "*"
             default_target: true,
         }];
 
-        let err = remove_resolved(workspace.modify().unwrap(), removals, options())
+        let err = remove_resolved(workspace.modify().unwrap(), dependencies, options())
             .await
             .unwrap_err();
 
