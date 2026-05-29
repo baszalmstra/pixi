@@ -67,7 +67,10 @@ pub fn from_source_package_location_spec(
                     .subdirectory
                     .and_then(|s| pixi_spec::Subdirectory::try_from(s).ok())
                     .unwrap_or_default(),
-                lfs: GitLfs::Disabled,
+                lfs: match git.lfs {
+                    pixi_build_types::GitLfs::Enabled => GitLfs::Enabled,
+                    pixi_build_types::GitLfs::Disabled => GitLfs::Disabled,
+                },
             })
         }
 

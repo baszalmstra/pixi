@@ -11,7 +11,6 @@ use std::{
 
 use pep440_rs::VersionSpecifiers;
 use pep508_rs::{ExtraName, MarkerTree};
-use pixi_git::GitLfs;
 use pixi_spec::{GitSpec, Subdirectory};
 use serde::Serialize;
 use thiserror::Error;
@@ -337,6 +336,7 @@ mod tests {
     use insta::assert_snapshot;
     use itertools::Itertools;
     use pep508_rs::Requirement;
+    use pixi_git::GitLfs;
     use pixi_spec::{GitReference, Subdirectory};
     use pixi_test_utils::format_parse_error;
     use pixi_toml::TomlDiagnostic;

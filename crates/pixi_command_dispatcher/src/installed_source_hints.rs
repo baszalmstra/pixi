@@ -42,7 +42,6 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use pixi_git::GitLfs;
 use pixi_record::{PinnedBuildSourceSpec, PinnedSourceSpec, UnresolvedPixiRecord};
 use pixi_spec::SourceLocationSpec;
 use rattler_conda_types::PackageName;
@@ -206,6 +205,7 @@ fn hash_vec(records: &Arc<[UnresolvedPixiRecord]>) -> u64 {
 mod tests {
     use std::sync::Arc;
 
+    use pixi_git::GitLfs;
     use pixi_record::{PartialSourceRecordData, SourceRecordData, UnresolvedSourceRecord};
     use pixi_spec::{PathSourceSpec, SourceLocationSpec};
     use rattler_conda_types::PackageName;
