@@ -506,35 +506,4 @@ pandas = "*"
         "
         );
     }
-
-    const DUPLICATE_MANIFEST: &str = r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[pypi-dependencies]
-requests = "*"
-
-[feature.dev.dependencies]
-requests = "*"
-"#;
-
-    #[test]
-    fn ambiguous_removal_lists_each_location() {
-        // `requests` is a pypi dep and a conda dep in feature `dev`: with no
-        // default `[dependencies]` match to fall back on, the removal is
-        // ambiguous and each location's command is spelled out.
-        let manifest = parse(DUPLICATE_MANIFEST);
-        let locations = Location::locate(&manifest, "requests");
-        let err = AmbiguousRemovalError::new("requests".to_string(), &locations);
-        insta::assert_snapshot!(
-            format_diagnostic(&err),
-            @r"
-          × dependency `requests` is defined in multiple locations; specify which one to remove
-          help: - `requests` is a dependencies entry in feature `dev`; try `pixi remove --feature dev requests`
-                - `requests` is a pypi-dependencies entry in the default feature; try `pixi remove --pypi requests`
-        "
-        );
-    }
 }

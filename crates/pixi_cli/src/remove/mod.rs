@@ -311,12 +311,60 @@ mod tests {
     use std::path::Path;
 
     use clap::CommandFactory;
+    use pixi_manifest::HasWorkspaceManifest;
+    use pixi_test_utils::format_diagnostic;
 
     use super::*;
 
     fn parse(toml: &str) -> WorkspaceManifest {
         WorkspaceManifest::from_toml_str_with_base_dir(toml, Path::new(""))
             .expect("failed to parse manifest")
+    }
+
+    /// Load a workspace from an on-disk `pixi.toml`, the way the CLI does. The
+    /// temp dir is leaked for the duration of the test.
+    fn workspace_from(toml: &str) -> Workspace {
+        let tmp = tempfile::TempDir::new().unwrap().keep();
+        let path = tmp.join("pixi.toml");
+        fs_err::write(&path, toml).unwrap();
+        Workspace::from_path(&path).expect("failed to load workspace")
+    }
+
+    /// Regression test: a bare `pixi remove requests` against a real manifest
+    /// where `requests` is both a PyPI dep and a conda dep of feature `dev`
+    /// (with no default `[dependencies]` to fall back on) resolves as ambiguous
+    /// and renders a hint for each location.
+    #[test]
+    fn ambiguous_removal_reports_each_location() {
+        let workspace = workspace_from(
+            r#"
+[workspace]
+name = "test"
+channels = []
+platforms = ["linux-64"]
+
+[pypi-dependencies]
+requests = "*"
+
+[feature.dev.dependencies]
+requests = "*"
+"#,
+        );
+        let manifest = (&workspace).workspace_manifest();
+
+        let Resolution::Ambiguous(locations) = resolve(manifest, "requests") else {
+            panic!("expected an ambiguous resolution");
+        };
+        let err = AmbiguousRemovalError::new("requests".to_string(), &locations);
+
+        insta::assert_snapshot!(
+            format_diagnostic(&err),
+            @r"
+          × dependency `requests` is defined in multiple locations; specify which one to remove
+          help: - `requests` is a dependencies entry in feature `dev`; try `pixi remove --feature dev requests`
+                - `requests` is a pypi-dependencies entry in the default feature; try `pixi remove --pypi requests`
+        "
+        );
     }
 
     /// Validates the clap definition, including that `--all`'s `conflicts_with`
