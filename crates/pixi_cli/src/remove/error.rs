@@ -15,7 +15,7 @@ use super::locate::{
 };
 
 /// What was searched when a dependency could not be removed.
-pub(super) enum Scope {
+pub(super) enum RequestScope {
     /// A specific table + feature was targeted (the user passed a location flag
     /// such as `--pypi`, `--host`, `--build`, or `--feature`).
     Table {
@@ -36,8 +36,8 @@ pub(super) struct DependencyRemovalError {
     suggestions: Vec<String>,
 }
 
-/// The rendered description of where we looked, kept separate from [`Scope`] so
-/// the error can stay `Debug` without requiring it of every field of `Scope`.
+/// The rendered description of where we looked, kept separate from [`RequestScope`] so
+/// the error can stay `Debug` without requiring it of every field of `RequestScope`.
 #[derive(Debug)]
 enum NotFoundLocation {
     Table {
@@ -48,17 +48,17 @@ enum NotFoundLocation {
 }
 
 impl DependencyRemovalError {
-    pub(super) fn new(name: String, manifest: &WorkspaceManifest, scope: Scope) -> Self {
+    pub(super) fn new(name: String, manifest: &WorkspaceManifest, scope: RequestScope) -> Self {
         let suggestions = collect_suggestions(manifest, &name, &scope);
         let location = match scope {
-            Scope::Table {
+            RequestScope::Table {
                 dependency_type,
                 feature,
             } => NotFoundLocation::Table {
                 table: Slot::from(dependency_type).table_name(),
                 feature,
             },
-            Scope::Anywhere => NotFoundLocation::Anywhere,
+            RequestScope::Anywhere => NotFoundLocation::Anywhere,
         };
         Self {
             name,
@@ -146,13 +146,17 @@ impl Diagnostic for AmbiguousRemovalError {
     }
 }
 
-fn collect_suggestions(manifest: &WorkspaceManifest, name: &str, scope: &Scope) -> Vec<String> {
+fn collect_suggestions(
+    manifest: &WorkspaceManifest,
+    name: &str,
+    scope: &RequestScope,
+) -> Vec<String> {
     match scope {
-        Scope::Table {
+        RequestScope::Table {
             dependency_type,
             feature,
         } => collect_table_suggestions(manifest, name, *dependency_type, feature),
-        Scope::Anywhere => collect_similar_suggestions(manifest, name),
+        RequestScope::Anywhere => collect_similar_suggestions(manifest, name),
     }
 }
 
@@ -265,7 +269,7 @@ mod tests {
         let err = DependencyRemovalError::new(
             name.to_string(),
             manifest,
-            Scope::Table {
+            RequestScope::Table {
                 dependency_type: dep_type,
                 feature: feature.clone(),
             },
@@ -465,7 +469,8 @@ pandas = "*"
     fn auto_not_found_searches_whole_workspace() {
         // A bare `pixi remove fizzbuzz` that matches nothing anywhere.
         let manifest = parse(MIXED_MANIFEST);
-        let err = DependencyRemovalError::new("fizzbuzz".to_string(), &manifest, Scope::Anywhere);
+        let err =
+            DependencyRemovalError::new("fizzbuzz".to_string(), &manifest, RequestScope::Anywhere);
         insta::assert_snapshot!(
             format_diagnostic(&err),
             @"  × dependency `fizzbuzz` was not found in the workspace"
@@ -476,7 +481,8 @@ pandas = "*"
     fn auto_not_found_suggests_similar_name_anywhere() {
         // A bare `pixi remove pollars` should suggest the pypi `polars`.
         let manifest = parse(MIXED_MANIFEST);
-        let err = DependencyRemovalError::new("pollars".to_string(), &manifest, Scope::Anywhere);
+        let err =
+            DependencyRemovalError::new("pollars".to_string(), &manifest, RequestScope::Anywhere);
         insta::assert_snapshot!(
             format_diagnostic(&err),
             @r"
@@ -490,7 +496,8 @@ pandas = "*"
     fn auto_not_found_similar_name_names_the_feature() {
         // `pandas` only lives in feature `dev`, so the suggestion should say so.
         let manifest = parse(MIXED_MANIFEST);
-        let err = DependencyRemovalError::new("pandes".to_string(), &manifest, Scope::Anywhere);
+        let err =
+            DependencyRemovalError::new("pandes".to_string(), &manifest, RequestScope::Anywhere);
         insta::assert_snapshot!(
             format_diagnostic(&err),
             @r"
@@ -519,7 +526,7 @@ requests = "*"
         // default `[dependencies]` match to fall back on, the removal is
         // ambiguous and each location's command is spelled out.
         let manifest = parse(DUPLICATE_MANIFEST);
-        let locations = crate::remove::locate::locate(&manifest, "requests");
+        let locations = Location::locate(&manifest, "requests");
         let err = AmbiguousRemovalError::new("requests".to_string(), &locations);
         insta::assert_snapshot!(
             format_diagnostic(&err),

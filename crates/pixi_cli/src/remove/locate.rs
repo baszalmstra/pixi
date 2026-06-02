@@ -114,33 +114,35 @@ fn selector_platform(selector: Option<&TargetSelector>) -> Option<Option<Platfor
     }
 }
 
-/// Find every distinct location of `name` in the workspace, grouped by
-/// `(feature, table)`. Each location records all platform scopes where the
-/// package appears so the caller can remove them in one pass.
-///
-/// Insertion order follows [`walk_dependencies`], which is deterministic.
-pub(super) fn locate(manifest: &WorkspaceManifest, name: &str) -> Vec<Location> {
-    let target_conda = PackageName::try_from(name).ok();
-    let target_pypi = PypiPackageName::from_str(name).ok();
+impl Location {
+    /// Find every distinct location of `name` in the workspace, grouped by
+    /// `(feature, table)`. Each location records all platform scopes where the
+    /// package appears so the caller can remove them in one pass.
+    ///
+    /// Insertion order follows [`walk_dependencies`], which is deterministic.
+    pub(super) fn locate(manifest: &WorkspaceManifest, name: &str) -> Vec<Location> {
+        let target_conda = PackageName::try_from(name).ok();
+        let target_pypi = PypiPackageName::from_str(name).ok();
 
-    let mut groups: IndexMap<(FeatureName, Slot), Vec<Option<Platform>>> = IndexMap::new();
-    for entry in walk_dependencies(manifest) {
-        if is_exact_match(&entry, target_conda.as_ref(), target_pypi.as_ref()) {
-            groups
-                .entry((entry.feature.clone(), entry.slot))
-                .or_default()
-                .push(entry.platform);
+        let mut groups: IndexMap<(FeatureName, Slot), Vec<Option<Platform>>> = IndexMap::new();
+        for entry in walk_dependencies(manifest) {
+            if is_exact_match(&entry, target_conda.as_ref(), target_pypi.as_ref()) {
+                groups
+                    .entry((entry.feature.clone(), entry.slot))
+                    .or_default()
+                    .push(entry.platform);
+            }
         }
-    }
 
-    groups
-        .into_iter()
-        .map(|((feature, slot), platforms)| Location {
-            feature,
-            slot,
-            platforms,
-        })
-        .collect()
+        groups
+            .into_iter()
+            .map(|((feature, slot), platforms)| Location {
+                feature,
+                slot,
+                platforms,
+            })
+            .collect()
+    }
 }
 
 pub(super) fn is_exact_match(
@@ -225,7 +227,7 @@ numpy = "*"
     #[test]
     fn locate_pypi_only() {
         let manifest = parse(MANIFEST);
-        let locations = locate(&manifest, "black");
+        let locations = Location::locate(&manifest, "black");
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].slot, Slot::Pypi);
         assert!(locations[0].feature.is_default());
@@ -236,7 +238,7 @@ numpy = "*"
     fn locate_platform_specific_only() {
         // `only-linux` lives only in `[target.linux-64.dependencies]`.
         let manifest = parse(MANIFEST);
-        let locations = locate(&manifest, "only-linux");
+        let locations = Location::locate(&manifest, "only-linux");
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].slot, Slot::Conda(SpecType::Run));
         assert_eq!(locations[0].platforms, vec![Some(Platform::Linux64)]);
@@ -249,7 +251,7 @@ numpy = "*"
         // `dev` feature: two distinct (feature, table) locations, with the
         // default-feature one spanning the agnostic and linux-64 scopes.
         let manifest = parse(MANIFEST);
-        let locations = locate(&manifest, "numpy");
+        let locations = Location::locate(&manifest, "numpy");
         assert_eq!(locations.len(), 2);
 
         let default = locations
@@ -269,6 +271,6 @@ numpy = "*"
     #[test]
     fn locate_missing_is_empty() {
         let manifest = parse(MANIFEST);
-        assert!(locate(&manifest, "does-not-exist").is_empty());
+        assert!(Location::locate(&manifest, "does-not-exist").is_empty());
     }
 }

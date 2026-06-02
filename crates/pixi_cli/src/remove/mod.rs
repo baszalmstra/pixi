@@ -21,8 +21,8 @@ use crate::{
     cli_interface::CliInterface,
 };
 
-use error::{AmbiguousRemovalError, DependencyRemovalError, Scope};
-use locate::{Location, Slot, locate};
+use error::{AmbiguousRemovalError, DependencyRemovalError, RequestScope};
+use locate::{Location, Slot};
 
 /// Removes dependencies from the workspace.
 ///
@@ -150,7 +150,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             Err(miette::Report::new(DependencyRemovalError::new(
                 name,
                 (&workspace).workspace_manifest(),
-                Scope::Table {
+                RequestScope::Table {
                     dependency_type,
                     feature,
                 },
@@ -224,7 +224,7 @@ fn not_found(spec: &str, manifest: &WorkspaceManifest) -> miette::Report {
     miette::Report::new(DependencyRemovalError::new(
         spec.to_string(),
         manifest,
-        Scope::Anywhere,
+        RequestScope::Anywhere,
     ))
 }
 
@@ -243,7 +243,7 @@ enum Resolution {
 /// command the user already ran). Only when the default target does not hold the
 /// package do we fall back to the single other match, or report ambiguity.
 fn resolve(manifest: &WorkspaceManifest, name: &str) -> Resolution {
-    let mut locations = locate(manifest, name);
+    let mut locations = Location::locate(manifest, name);
     if let Some(pos) = locations.iter().position(is_default_run_dependency) {
         return Resolution::Resolved(to_qualified_dependency(name, locations.swap_remove(pos)));
     }
@@ -261,7 +261,7 @@ fn resolve(manifest: &WorkspaceManifest, name: &str) -> Resolution {
 /// Returns one [`QualifiedDependency`] per `(feature, table)` location, or an
 /// empty vec if the package is not defined anywhere.
 fn resolve_all(manifest: &WorkspaceManifest, name: &str) -> Vec<QualifiedDependency> {
-    locate(manifest, name)
+    Location::locate(manifest, name)
         .into_iter()
         .map(|location| to_qualified_dependency(name, location))
         .collect()
