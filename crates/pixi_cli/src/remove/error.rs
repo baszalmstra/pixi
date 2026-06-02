@@ -321,42 +321,6 @@ pandas = "*"
     }
 
     #[test]
-    fn missing_dep_lives_in_conda() {
-        // `pixi remove --pypi ruff` when ruff is a conda dependency.
-        let manifest = parse(MIXED_MANIFEST);
-        insta::assert_snapshot!(
-            render(
-                &manifest,
-                "ruff",
-                DependencyType::PypiDependency,
-                &FeatureName::DEFAULT,
-            ),
-            @r"
-          × dependency `ruff` was not found in pypi-dependencies
-          help: `ruff` is a dependencies entry in the default feature; try `pixi remove ruff`
-        "
-        );
-    }
-
-    #[test]
-    fn missing_dep_lives_in_host_deps() {
-        // `pixi remove openssl` when openssl is in host-dependencies.
-        let manifest = parse(MIXED_MANIFEST);
-        insta::assert_snapshot!(
-            render(
-                &manifest,
-                "openssl",
-                DependencyType::CondaDependency(SpecType::Run),
-                &FeatureName::DEFAULT,
-            ),
-            @r"
-          × dependency `openssl` was not found in dependencies
-          help: `openssl` is a host-dependencies entry in the default feature; try `pixi remove --host openssl`
-        "
-        );
-    }
-
-    #[test]
     fn missing_dep_lives_in_build_deps() {
         // `pixi remove cmake` when cmake is in build-dependencies.
         let manifest = parse(MIXED_MANIFEST);
@@ -407,86 +371,6 @@ pandas = "*"
             ),
             @r"
           × dependency `polrs` was not found in pypi-dependencies
-          help: did you mean `polars`?
-        "
-        );
-    }
-
-    #[test]
-    fn missing_dep_truly_absent() {
-        // `pixi remove fizzbuzz` with nothing matching. No help text.
-        let manifest = parse(MIXED_MANIFEST);
-        insta::assert_snapshot!(
-            render(
-                &manifest,
-                "fizzbuzz",
-                DependencyType::CondaDependency(SpecType::Run),
-                &FeatureName::DEFAULT,
-            ),
-            @"  × dependency `fizzbuzz` was not found in dependencies"
-        );
-    }
-
-    #[test]
-    fn missing_dep_wrong_dep_type_in_non_default_feature() {
-        // `pixi remove --pypi numpy --feature dev`: numpy exists in feature
-        // dev but as a conda dep, not a pypi dep.
-        let manifest = parse(MIXED_MANIFEST);
-        insta::assert_snapshot!(
-            render(
-                &manifest,
-                "numpy",
-                DependencyType::PypiDependency,
-                &FeatureName::from("dev"),
-            ),
-            @r"
-          × dependency `numpy` was not found in pypi-dependencies of feature `dev`
-          help: `numpy` is a dependencies entry in feature `dev`; try `pixi remove --feature dev numpy`
-        "
-        );
-    }
-
-    #[test]
-    fn missing_dep_pypi_in_non_default_feature() {
-        // `pixi remove pandas --feature dev`: pandas exists in feature dev
-        // but as a pypi dep.
-        let manifest = parse(MIXED_MANIFEST);
-        insta::assert_snapshot!(
-            render(
-                &manifest,
-                "pandas",
-                DependencyType::CondaDependency(SpecType::Run),
-                &FeatureName::from("dev"),
-            ),
-            @r"
-          × dependency `pandas` was not found in dependencies of feature `dev`
-          help: `pandas` is a pypi-dependencies entry in feature `dev`; try `pixi remove --pypi --feature dev pandas`
-        "
-        );
-    }
-
-    #[test]
-    fn auto_not_found_searches_whole_workspace() {
-        // A bare `pixi remove fizzbuzz` that matches nothing anywhere.
-        let manifest = parse(MIXED_MANIFEST);
-        let err =
-            DependencyRemovalError::new("fizzbuzz".to_string(), &manifest, RequestScope::Anywhere);
-        insta::assert_snapshot!(
-            format_diagnostic(&err),
-            @"  × dependency `fizzbuzz` was not found in the workspace"
-        );
-    }
-
-    #[test]
-    fn auto_not_found_suggests_similar_name_anywhere() {
-        // A bare `pixi remove pollars` should suggest the pypi `polars`.
-        let manifest = parse(MIXED_MANIFEST);
-        let err =
-            DependencyRemovalError::new("pollars".to_string(), &manifest, RequestScope::Anywhere);
-        insta::assert_snapshot!(
-            format_diagnostic(&err),
-            @r"
-          × dependency `pollars` was not found in the workspace
           help: did you mean `polars`?
         "
         );

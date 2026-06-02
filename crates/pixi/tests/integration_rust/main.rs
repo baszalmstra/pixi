@@ -10,6 +10,7 @@ mod install_tests;
 mod lock_tests;
 mod project_tests;
 mod pypi_tests;
+mod remove_tests;
 mod search_tests;
 mod solve_group_tests;
 mod source_package_tests;

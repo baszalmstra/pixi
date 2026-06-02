@@ -135,14 +135,10 @@ async fn update_lock_file_after_remove(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use pixi_core::workspace::QualifiedDependency;
     use pixi_core::{Workspace, environment::LockFileUsage};
     use pixi_manifest::FeatureName;
-    use pixi_pypi_spec::PypiPackageName;
     use pixi_test_utils::format_diagnostic;
-    use rattler_conda_types::{MatchSpec, ParseMatchSpecOptions, Platform, RepodataRevision};
+    use rattler_conda_types::{MatchSpec, ParseMatchSpecOptions, RepodataRevision};
 
     use super::*;
 
@@ -234,129 +230,5 @@ ruff = "*"
             @"  × dependency `fizzbuzz` was not found"
         );
         assert!(matches!(err, RemoveError::NotFound { name } if name == "fizzbuzz"));
-    }
-
-    fn conda_name(name: &str) -> PackageName {
-        PackageName::try_from(name).unwrap()
-    }
-
-    /// `remove_qualified_dependencies` strips packages from several tables: a conda run dep,
-    /// a pypi dep, a platform-specific conda dep, and a named feature, in a
-    /// single pass, leaving untouched packages in place.
-    #[tokio::test]
-    async fn remove_qualified_dependencies_across_tables() {
-        let tmp = tempfile::TempDir::new().unwrap().keep();
-        let path = tmp.join("pixi.toml");
-        fs_err::write(
-            &path,
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[dependencies]
-numpy = "*"
-ruff = "*"
-
-[pypi-dependencies]
-black = "*"
-
-[target.linux-64.dependencies]
-only-linux = "*"
-
-[feature.dev.dependencies]
-pytest = "*"
-"#,
-        )
-        .unwrap();
-        let workspace = Workspace::from_path(&path).expect("failed to load workspace");
-
-        let dependencies = vec![
-            QualifiedDependency::Conda {
-                name: conda_name("numpy"),
-                spec_type: SpecType::Run,
-                feature: FeatureName::DEFAULT,
-                platforms: vec![],
-                default_target: true,
-            },
-            QualifiedDependency::Pypi {
-                name: PypiPackageName::from_str("black").unwrap(),
-                feature: FeatureName::DEFAULT,
-                platforms: vec![],
-                default_target: true,
-            },
-            QualifiedDependency::Conda {
-                name: conda_name("only-linux"),
-                spec_type: SpecType::Run,
-                feature: FeatureName::DEFAULT,
-                platforms: vec![Platform::Linux64],
-                default_target: false,
-            },
-            QualifiedDependency::Conda {
-                name: conda_name("pytest"),
-                spec_type: SpecType::Run,
-                feature: FeatureName::from("dev"),
-                platforms: vec![],
-                default_target: true,
-            },
-        ];
-
-        workspace
-            .modify()
-            .unwrap()
-            .remove_qualified_dependencies(&dependencies, LockFileUsage::Frozen, true)
-            .await
-            .unwrap();
-
-        let content = fs_err::read_to_string(&path).unwrap();
-        assert!(!content.contains("numpy"), "numpy should be removed");
-        assert!(!content.contains("black"), "black should be removed");
-        assert!(
-            !content.contains("only-linux"),
-            "only-linux should be removed"
-        );
-        assert!(!content.contains("pytest"), "pytest should be removed");
-        // Untouched dependency survives.
-        assert!(content.contains("ruff"), "ruff should be kept");
-    }
-
-    /// The python guard also fires through the resolved-removal path.
-    #[tokio::test]
-    async fn remove_qualified_dependencies_guard_python() {
-        let workspace = workspace_from(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[dependencies]
-python = "*"
-
-[pypi-dependencies]
-requests = "*"
-"#,
-        );
-
-        let dependencies = vec![QualifiedDependency::Conda {
-            name: conda_name("python"),
-            spec_type: SpecType::Run,
-            feature: FeatureName::DEFAULT,
-            platforms: vec![],
-            default_target: true,
-        }];
-
-        let err = workspace
-            .modify()
-            .unwrap()
-            .remove_qualified_dependencies(&dependencies, LockFileUsage::Frozen, true)
-            .await
-            .unwrap_err();
-
-        insta::assert_snapshot!(
-            format_diagnostic(&*err),
-            @"  × Cannot remove Python while PyPI dependencies exist. Please remove these PyPI dependencies first: requests"
-        );
     }
 }

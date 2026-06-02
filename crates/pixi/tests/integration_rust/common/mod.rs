@@ -530,6 +530,7 @@ impl PixiControl {
                     ..Default::default()
                 },
                 dependency_config: AddBuilder::dependency_config_with_specs(vec![spec]),
+                all: false,
                 no_install_config: NoInstallConfig { no_install: true },
                 lock_file_update_config: LockFileUpdateConfig {
                     no_lock_file_update: false,

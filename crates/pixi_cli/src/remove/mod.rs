@@ -308,72 +308,23 @@ fn bare_name(spec: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use clap::CommandFactory;
-    use pixi_manifest::HasWorkspaceManifest;
-    use pixi_test_utils::format_diagnostic;
+    use clap::{CommandFactory, Parser};
 
     use super::*;
 
-    fn parse(toml: &str) -> WorkspaceManifest {
-        WorkspaceManifest::from_toml_str_with_base_dir(toml, Path::new(""))
-            .expect("failed to parse manifest")
-    }
-
-    /// Load a workspace from an on-disk `pixi.toml`, the way the CLI does. The
-    /// temp dir is leaked for the duration of the test.
-    fn workspace_from(toml: &str) -> Workspace {
-        let tmp = tempfile::TempDir::new().unwrap().keep();
-        let path = tmp.join("pixi.toml");
-        fs_err::write(&path, toml).unwrap();
-        Workspace::from_path(&path).expect("failed to load workspace")
-    }
-
-    /// Regression test: a bare `pixi remove requests` against a real manifest
-    /// where `requests` is both a PyPI dep and a conda dep of feature `dev`
-    /// (with no default `[dependencies]` to fall back on) resolves as ambiguous
-    /// and renders a hint for each location.
-    #[test]
-    fn ambiguous_removal_reports_each_location() {
-        let workspace = workspace_from(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[pypi-dependencies]
-requests = "*"
-
-[feature.dev.dependencies]
-requests = "*"
-"#,
-        );
-        let manifest = (&workspace).workspace_manifest();
-
-        let Resolution::Ambiguous(locations) = resolve(manifest, "requests") else {
-            panic!("expected an ambiguous resolution");
-        };
-        let err = AmbiguousRemovalError::new("requests".to_string(), &locations);
-
-        insta::assert_snapshot!(
-            format_diagnostic(&err),
-            @r"
-          × dependency `requests` is defined in multiple locations; specify which one to remove
-          help: - `requests` is a dependencies entry in feature `dev`; try `pixi remove --feature dev requests`
-                - `requests` is a pypi-dependencies entry in the default feature; try `pixi remove --pypi requests`
-        "
-        );
-    }
-
-    /// Validates the clap definition, including that `--all`'s `conflicts_with`
-    /// ids resolve to real arguments.
+    /// Validates the clap definition: that `--all`'s `conflicts_with` ids
+    /// resolve to real arguments and that it actually rejects a location flag.
     #[test]
     fn verify_args() {
         Args::command().debug_assert();
+
+        assert!(Args::try_parse_from(["remove", "--all", "numpy"]).is_ok());
+        assert!(Args::try_parse_from(["remove", "--all", "--pypi", "numpy"]).is_err());
+        assert!(Args::try_parse_from(["remove", "--all", "--feature", "dev", "numpy"]).is_err());
     }
 
+    /// `bare_name` reduces a user-supplied spec to the package name used for
+    /// matching, dropping channels, version/build qualifiers, extras, and URLs.
     #[test]
     fn bare_name_strips_qualifiers() {
         assert_eq!(bare_name("numpy"), "numpy");
@@ -385,136 +336,5 @@ requests = "*"
         assert_eq!(bare_name("black[d]"), "black");
         assert_eq!(bare_name("ruamel.yaml"), "ruamel.yaml");
         assert_eq!(bare_name("foo @ git+https://example.com/foo"), "foo");
-    }
-
-    /// When the package is in the default feature's `[dependencies]` we remove
-    /// it from there even if it also appears elsewhere, instead of reporting an
-    /// ambiguity (which would only echo back the command already run).
-    #[test]
-    fn resolve_prefers_default_run_dependencies() {
-        let manifest = parse(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[dependencies]
-numpy = "*"
-
-[feature.dev.dependencies]
-numpy = "*"
-"#,
-        );
-        match resolve(&manifest, "numpy") {
-            Resolution::Resolved(QualifiedDependency::Conda {
-                spec_type, feature, ..
-            }) => {
-                assert_eq!(spec_type, SpecType::Run);
-                assert!(feature.is_default());
-            }
-            _ => panic!("expected resolution to the default run-dependencies"),
-        }
-    }
-
-    /// A single non-default match resolves to that location.
-    #[test]
-    fn resolve_single_non_default_location() {
-        let manifest = parse(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[feature.dev.dependencies]
-numpy = "*"
-"#,
-        );
-        match resolve(&manifest, "numpy") {
-            Resolution::Resolved(QualifiedDependency::Conda { feature, .. }) => {
-                assert_eq!(feature.as_str(), "dev");
-            }
-            _ => panic!("expected resolution to feature `dev`"),
-        }
-    }
-
-    /// Several matches, none in the default `[dependencies]`, is ambiguous.
-    #[test]
-    fn resolve_ambiguous_without_default() {
-        let manifest = parse(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[pypi-dependencies]
-requests = "*"
-
-[feature.dev.dependencies]
-requests = "*"
-"#,
-        );
-        match resolve(&manifest, "requests") {
-            Resolution::Ambiguous(locations) => assert_eq!(locations.len(), 2),
-            _ => panic!("expected an ambiguous resolution"),
-        }
-    }
-
-    #[test]
-    fn resolve_missing_is_not_found() {
-        let manifest = parse(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[dependencies]
-numpy = "*"
-"#,
-        );
-        assert!(matches!(resolve(&manifest, "absent"), Resolution::NotFound));
-    }
-
-    /// `--all` yields one removal per distinct location, including the default
-    /// `[dependencies]` that the single-match path would otherwise prefer.
-    #[test]
-    fn resolve_all_returns_every_location() {
-        let manifest = parse(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[dependencies]
-numpy = "*"
-
-[pypi-dependencies]
-numpy = "*"
-
-[feature.dev.dependencies]
-numpy = "*"
-"#,
-        );
-        assert_eq!(resolve_all(&manifest, "numpy").len(), 3);
-    }
-
-    #[test]
-    fn resolve_all_is_empty_when_missing() {
-        let manifest = parse(
-            r#"
-[workspace]
-name = "test"
-channels = []
-platforms = ["linux-64"]
-
-[dependencies]
-numpy = "*"
-"#,
-        );
-        assert!(resolve_all(&manifest, "absent").is_empty());
     }
 }

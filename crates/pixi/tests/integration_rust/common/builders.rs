@@ -325,6 +325,26 @@ impl HasNoInstallConfig for RemoveBuilder {
     }
 }
 
+impl HasLockFileUpdateConfig for RemoveBuilder {
+    fn lock_file_update_config(&mut self) -> &mut LockFileUpdateConfig {
+        &mut self.args.lock_file_update_config
+    }
+}
+
+impl RemoveBuilder {
+    /// Restrict the removal to a feature (`--feature`).
+    pub fn with_feature(mut self, feature: impl ToString) -> Self {
+        self.args.dependency_config.feature = FeatureName::from(feature.to_string());
+        self
+    }
+
+    /// Remove the packages from every location they occur in (`--all`).
+    pub fn with_all(mut self, all: bool) -> Self {
+        self.args.all = all;
+        self
+    }
+}
+
 impl IntoFuture for RemoveBuilder {
     type Output = miette::Result<()>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'static>>;
