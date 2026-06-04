@@ -184,6 +184,16 @@ impl GenerateRecipe for RosGenerator {
             structured.root = Some(workspace_root.to_path_buf());
             generated_recipe.metadata_input_glob_sets.push(structured);
 
+            // Companion set: re-run discovery when a sibling's pixi manifest
+            // (`pixi.toml` / `pyproject.toml`) appears or disappears, since
+            // that flips its sibling override between a directory and a
+            // `package.xml` path.
+            let mut pixi_manifest_structured = discovery.pixi_manifest_input_glob_set;
+            pixi_manifest_structured.root = Some(workspace_root.to_path_buf());
+            generated_recipe
+                .metadata_input_glob_sets
+                .push(pixi_manifest_structured);
+
             let sibling_specs = workspace_discovery::sibling_source_spec_map(
                 &discovery.packages,
                 &package_xml.name,
@@ -1376,6 +1386,80 @@ mod tests {
         assert!(
             sibling_in_run.0.url.is_some(),
             "expected ros-jazzy-pkg-b in run to be source, got: {sibling_in_run}"
+        );
+        // pkg_b is a bare ROS package (no pixi manifest), so the source dep
+        // targets its `package.xml` file.
+        assert!(
+            format!("{sibling_in_build}").contains("package.xml"),
+            "expected a package.xml source path, got: {sibling_in_build}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_discovery_targets_directory_for_pixi_package_sibling() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_root = workspace.path();
+
+        write_minimal_package_xml(
+            &workspace_root.join("src").join("pkg_a"),
+            "pkg_a",
+            &["pkg_b"],
+        );
+        write_minimal_package_xml(&workspace_root.join("src").join("pkg_b"), "pkg_b", &[]);
+        // pkg_b is *also* a pixi package: the sibling override must target
+        // its directory, not its `package.xml`, so it unifies with the
+        // canonical workspace source location (prefix-dev/pixi#6277).
+        fs::write(
+            workspace_root.join("src").join("pkg_b").join("pixi.toml"),
+            "[package]\n",
+        )
+        .unwrap();
+
+        let model = project_fixture!({ "targets": { "defaultTarget": {} } });
+        let config = RosBackendConfig {
+            distro: Some("jazzy".to_string()),
+            ..Default::default()
+        };
+
+        let generated = RosGenerator::default()
+            .generate_recipe(
+                &model,
+                &config,
+                workspace_root.join("src").join("pkg_a"),
+                Platform::Linux64,
+                None,
+                &HashSet::new(),
+                vec![],
+                None,
+                None,
+                Some(workspace_root.to_path_buf()),
+                None,
+            )
+            .await
+            .expect("generate_recipe should succeed");
+
+        let sibling_in_build =
+            find_concrete(&generated.recipe.requirements.build, "ros-jazzy-pkg-b")
+                .expect("sibling should appear in build requirements");
+        assert!(
+            sibling_in_build.0.url.is_some(),
+            "expected ros-jazzy-pkg-b to be a source dep, got: {sibling_in_build}"
+        );
+        assert!(
+            !format!("{sibling_in_build}").contains("package.xml"),
+            "pixi-package sibling must target its directory, not package.xml: {sibling_in_build}"
+        );
+
+        // The companion pixi-manifest glob set must be emitted so adding or
+        // removing a sibling's pixi.toml re-runs discovery.
+        let watches_pixi_manifest = generated.metadata_input_glob_sets.iter().any(|g| {
+            g.patterns.iter().any(|p| p == "**/pixi.toml")
+                && g.patterns.iter().any(|p| p == "**/pyproject.toml")
+        });
+        assert!(
+            watches_pixi_manifest,
+            "expected a metadata glob set watching pixi.toml, got: {:?}",
+            generated.metadata_input_glob_sets
         );
     }
 
