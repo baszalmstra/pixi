@@ -1,0 +1,23 @@
+---
+source: crates/pixi_build_ros/src/main.rs
+expression: generated.metadata_input_glob_sets
+---
+- patterns:
+    - "**/package.xml"
+  markers:
+    - package.xml
+    - COLCON_IGNORE
+    - AMENT_IGNORE
+    - CATKIN_IGNORE
+  excludeHidden: true
+  root: "[WORKSPACE]"
+- patterns:
+    - src/pkg_b/pixi.toml
+  excludeHidden: true
+  root: "[WORKSPACE]"
+- patterns:
+    - package.xml
+    - CMakeLists.txt
+    - setup.py
+    - setup.cfg
+  excludeHidden: true

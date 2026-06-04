@@ -1186,6 +1186,31 @@ mod tests {
     use typed_path::Utf8TypedPathBuf;
 
     #[test]
+    fn test_path_identifiable_url_normalizes_current_dir() {
+        // A directly-declared `./pkg` dependency and an anchor-resolved
+        // `pkg` sibling must collapse to the same identifiable URL, so the
+        // solver dedups them instead of seeing duplicate source records
+        // (prefix-dev/pixi#6277).
+        let with_dot = PinnedPathSpec {
+            path: Utf8TypedPathBuf::from("./autoware_common_msgs"),
+        };
+        let without_dot = PinnedPathSpec {
+            path: Utf8TypedPathBuf::from("autoware_common_msgs"),
+        };
+        assert_eq!(with_dot.identifiable_url(), without_dot.identifiable_url());
+
+        // ...but pointing at the `package.xml` file (the pre-fix behaviour)
+        // yields a different URL, which is what caused the duplicate.
+        let at_manifest = PinnedPathSpec {
+            path: Utf8TypedPathBuf::from("autoware_common_msgs/package.xml"),
+        };
+        assert_ne!(
+            without_dot.identifiable_url(),
+            at_manifest.identifiable_url()
+        );
+    }
+
+    #[test]
     fn test_path_exact_match() {
         let pinned = PinnedSourceSpec::Path(PinnedPathSpec {
             path: Utf8TypedPathBuf::from("/path/to/source"),

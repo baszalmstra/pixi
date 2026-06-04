@@ -184,15 +184,14 @@ impl GenerateRecipe for RosGenerator {
             structured.root = Some(workspace_root.to_path_buf());
             generated_recipe.metadata_input_glob_sets.push(structured);
 
-            // Companion set: re-run discovery when a sibling's pixi manifest
-            // (`pixi.toml` / `pyproject.toml`) appears or disappears, since
-            // that flips its sibling override between a directory and a
-            // `package.xml` path.
-            let mut pixi_manifest_structured = discovery.pixi_manifest_input_glob_set;
-            pixi_manifest_structured.root = Some(workspace_root.to_path_buf());
-            generated_recipe
-                .metadata_input_glob_sets
-                .push(pixi_manifest_structured);
+            // Watch the discovered pixi-package manifests, so changing or
+            // removing one re-runs discovery. Listed as explicit paths, not
+            // a recursive `**/pixi.toml` walk.
+            let mut pixi_manifests = discovery.pixi_manifest_input_glob_set;
+            if !pixi_manifests.patterns.is_empty() {
+                pixi_manifests.root = Some(workspace_root.to_path_buf());
+                generated_recipe.metadata_input_glob_sets.push(pixi_manifests);
+            }
 
             let sibling_specs = workspace_discovery::sibling_source_spec_map(
                 &discovery.packages,
@@ -1450,17 +1449,64 @@ mod tests {
             "pixi-package sibling must target its directory, not package.xml: {sibling_in_build}"
         );
 
-        // The companion pixi-manifest glob set must be emitted so adding or
-        // removing a sibling's pixi.toml re-runs discovery.
+        // A glob set listing pkg_b's discovered manifest must be emitted so
+        // changing or removing it re-runs discovery.
         let watches_pixi_manifest = generated.metadata_input_glob_sets.iter().any(|g| {
-            g.patterns.iter().any(|p| p == "**/pixi.toml")
-                && g.patterns.iter().any(|p| p == "**/pyproject.toml")
+            g.root.as_deref() == Some(workspace_root)
+                && g.patterns.iter().any(|p| p == "src/pkg_b/pixi.toml")
         });
         assert!(
             watches_pixi_manifest,
-            "expected a metadata glob set watching pixi.toml, got: {:?}",
+            "expected a glob set listing src/pkg_b/pixi.toml, got: {:?}",
             generated.metadata_input_glob_sets
         );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_discovery_metadata_glob_sets_snapshot() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_root = workspace.path();
+
+        write_minimal_package_xml(
+            &workspace_root.join("src").join("pkg_a"),
+            "pkg_a",
+            &["pkg_b"],
+        );
+        write_minimal_package_xml(&workspace_root.join("src").join("pkg_b"), "pkg_b", &[]);
+        // pkg_b is a pixi package, so its manifest is watched as a second set.
+        fs::write(
+            workspace_root.join("src").join("pkg_b").join("pixi.toml"),
+            "[package]\n",
+        )
+        .unwrap();
+
+        let model = project_fixture!({ "targets": { "defaultTarget": {} } });
+        let config = RosBackendConfig {
+            distro: Some("jazzy".to_string()),
+            ..Default::default()
+        };
+
+        let generated = RosGenerator::default()
+            .generate_recipe(
+                &model,
+                &config,
+                workspace_root.join("src").join("pkg_a"),
+                Platform::Linux64,
+                None,
+                &HashSet::new(),
+                vec![],
+                None,
+                None,
+                Some(workspace_root.to_path_buf()),
+                None,
+            )
+            .await
+            .expect("generate_recipe should succeed");
+
+        // The tempdir root differs per run, so redact it.
+        insta::assert_yaml_snapshot!(generated.metadata_input_glob_sets, {
+            "[].root" => "[WORKSPACE]"
+        });
     }
 
     #[tokio::test]

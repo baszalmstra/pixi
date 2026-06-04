@@ -24,11 +24,6 @@ use crate::package_xml::{PackageXml, PackageXmlError};
 const PACKAGE_XML: &str = "package.xml";
 const IGNORE_MARKERS: &[&str] = &["COLCON_IGNORE", "AMENT_IGNORE", "CATKIN_IGNORE"];
 
-/// Manifest file names that, when found next to a sibling's `package.xml`,
-/// mean pixi can resolve that package directly from its *directory* (it is
-/// also a pixi package). See [`sibling_source_spec`].
-const PIXI_MANIFEST_FILE_NAMES: &[&str] = &["pixi.toml", "pyproject.toml"];
-
 /// Result of walking a workspace root for ROS packages.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceDiscovery {
@@ -44,12 +39,10 @@ pub struct WorkspaceDiscovery {
     /// the structured form carries.
     pub input_glob_set: InputGlobSet,
 
-    /// Companion glob set that watches the pixi manifests (`pixi.toml` /
-    /// `pyproject.toml`) sitting next to each discovered `package.xml`.
-    /// Whether such a manifest exists decides if [`sibling_source_spec`]
-    /// targets the package *directory* (pixi package) or the `package.xml`
-    /// file (bare ROS package), so adding or removing one must invalidate
-    /// the cached metadata just like a `package.xml` change does.
+    /// Set listing the pixi manifests discovered next to a `package.xml`
+    /// (the packages [`sibling_source_spec`] references by directory). The
+    /// caller watches it so a manifest change or removal invalidates the
+    /// cached metadata. Empty when no sibling is a pixi package.
     pub pixi_manifest_input_glob_set: InputGlobSet,
 }
 
@@ -168,29 +161,27 @@ pub fn discover_ros_packages(
         root: None,
     };
 
-    // Companion set watching the pixi manifests (`pixi.toml` /
-    // `pyproject.toml`) anywhere under the workspace, so adding or removing
-    // one next to a sibling's `package.xml` invalidates the cached metadata
-    // (it flips that sibling's override between a directory and a
-    // `package.xml` path).
-    //
-    // Unlike the primary set this one uses *only* the colcon/ament/catkin
-    // ignore markers — never `pixi.toml` / `package.xml` as leaf markers.
-    // Two reasons:
-    //   * a leaf marker present at the workspace root (the workspace
-    //     `pixi.toml` almost always is) would short-circuit the whole walk
-    //     to that single file (see `pixi_glob`'s root-marker handling);
-    //   * a `package.xml` leaf marker prunes a package directory *before*
-    //     the walker can see the pixi manifest sitting beside it.
-    // The cost is that this set descends into package directories instead
-    // of stopping at their boundary, but the ignored build/install/log
-    // trees (carrying `COLCON_IGNORE`) and hidden folders are still pruned.
+    // Resolve the manifest of every already-discovered package that is also
+    // a pixi package (cheap `is_file` probes, no second walk). They are
+    // emitted as explicit anchored patterns rather than a `**/pixi.toml`
+    // glob, so `ignore` only descends the relevant package dirs.
+    let mut manifest_patterns: Vec<String> = packages
+        .values()
+        .filter_map(|package_xml| package_xml.parent())
+        .filter_map(pixi_manifest_in_dir)
+        .map(|manifest| {
+            let rel = manifest
+                .strip_prefix(workspace_root)
+                .map(Path::to_path_buf)
+                .unwrap_or(manifest);
+            path_to_forward_slashes(&rel)
+        })
+        .collect();
+    // Stable order for deterministic recipe output / cache identity.
+    manifest_patterns.sort();
     let pixi_manifest_input_glob_set = InputGlobSet {
-        patterns: PIXI_MANIFEST_FILE_NAMES
-            .iter()
-            .map(|f| format!("**/{f}"))
-            .collect(),
-        markers: IGNORE_MARKERS.iter().map(|m| m.to_string()).collect(),
+        patterns: manifest_patterns,
+        markers: Vec::new(),
         exclude_hidden: true,
         root: None,
     };
@@ -206,25 +197,16 @@ fn path_to_forward_slashes(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Build a matchspec string of the form
-/// `ros-<distro>-<name>[url="source://?path=<rel-to-manifest>"]` that, when
-/// parsed via `SerializableMatchSpec::from`, yields a source dependency on
-/// the sibling package.
+/// Build a matchspec `ros-<distro>-<name>[url="source://?path=<rel>"]` that
+/// parses into a source dependency on the sibling package.
 ///
-/// The `path` targets the sibling's package *directory* when that directory
-/// is itself a pixi package (a `pixi.toml`, or a `pyproject.toml` with a
-/// `[tool.pixi]` table, sits next to its `package.xml`), and the
-/// `package.xml` file otherwise.
-///
-/// This matters because pixi identifies source packages by their pinned
-/// path.  A first-class workspace dependency on a pixi package is declared
-/// against the package directory (pixi's `discover_pixi` resolves it there),
-/// so if this override instead pointed at the `package.xml` file the *same*
-/// package would be resolved twice under two different source locations and
-/// the solver would reject the pair as duplicate records
-/// (prefix-dev/pixi#6277).  Bare ROS packages keep the `package.xml` file
-/// path, which pixi's ROS backend requires (a directory holding only a
-/// `package.xml` is not directly resolvable).
+/// The `path` targets the package *directory* when the sibling is itself a
+/// pixi package, and the `package.xml` file otherwise. pixi identifies
+/// source packages by their pinned path: a workspace dependency on a pixi
+/// package resolves against the directory, so pointing at `package.xml`
+/// here would resolve the same package twice under two locations, which the
+/// solver rejects as duplicate records (prefix-dev/pixi#6277). Bare ROS
+/// packages must keep the `package.xml` path (the ROS backend requires it).
 pub fn sibling_source_spec(
     conda_name: &str,
     sibling_package_xml: &Path,
@@ -244,25 +226,26 @@ pub fn sibling_source_spec(
 /// that directory; otherwise `None` (callers keep the `package.xml` path).
 fn sibling_pixi_package_dir(package_xml: &Path) -> Option<PathBuf> {
     let dir = package_xml.parent()?;
-    is_pixi_package_dir(dir).then(|| dir.to_path_buf())
+    pixi_manifest_in_dir(dir).map(|_| dir.to_path_buf())
 }
 
-/// True when `dir` holds a manifest pixi resolves as a package: a
-/// `pixi.toml`, or a `pyproject.toml` carrying a `[tool.pixi]` table.
-fn is_pixi_package_dir(dir: &Path) -> bool {
-    if dir.join("pixi.toml").is_file() {
-        return true;
+/// The manifest that makes `dir` a pixi package: a `pixi.toml`, or a
+/// `pyproject.toml` carrying a `[tool.pixi]` table. `None` if neither.
+fn pixi_manifest_in_dir(dir: &Path) -> Option<PathBuf> {
+    let pixi_toml = dir.join("pixi.toml");
+    if pixi_toml.is_file() {
+        return Some(pixi_toml);
     }
     let pyproject = dir.join("pyproject.toml");
-    pyproject.is_file()
-        && fs::read_to_string(&pyproject)
-            .map(|content| {
-                content.lines().any(|line| {
-                    let trimmed = line.trim_start();
-                    trimmed.starts_with("[tool.pixi]") || trimmed.starts_with("[tool.pixi.")
-                })
+    let has_tool_pixi = fs::read_to_string(&pyproject)
+        .map(|content| {
+            content.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("[tool.pixi]") || trimmed.starts_with("[tool.pixi.")
             })
-            .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    has_tool_pixi.then_some(pyproject)
 }
 
 /// Build the conda-formatted package name for a ROS package.
@@ -592,73 +575,59 @@ mod tests {
     }
 
     #[test]
-    fn pixi_manifest_glob_set_watches_pixi_manifests() {
-        let tmp = tempdir().unwrap();
-        let result = discover_ros_packages(tmp.path()).unwrap();
-        let set = &result.pixi_manifest_input_glob_set;
-
-        assert!(set.patterns.iter().any(|p| p == "**/pixi.toml"));
-        assert!(set.patterns.iter().any(|p| p == "**/pyproject.toml"));
-        // Only the ignore markers prune; pixi manifests must NOT be leaf
-        // markers (that would short-circuit at a workspace-root manifest).
-        assert!(set.markers.iter().any(|m| m == "COLCON_IGNORE"));
-        assert!(!set.markers.iter().any(|m| m == "pixi.toml"));
-        assert!(!set.markers.iter().any(|m| m == "package.xml"));
-        assert!(set.exclude_hidden);
-    }
-
-    /// The companion set must record sibling pixi manifests even when the
-    /// workspace root carries its own `pixi.toml` (the case that would
-    /// short-circuit a leaf-marker walk), while still pruning ignored
-    /// subtrees.
-    #[test]
-    fn pixi_manifest_glob_set_finds_sibling_manifest_past_root_manifest() {
+    fn pixi_manifest_set_lists_only_discovered_manifests() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
 
-        // Workspace-root manifest (would short-circuit a `pixi.toml` leaf).
+        // Workspace-root manifest is not a discovered package -> not listed.
         fs::write(root.join("pixi.toml"), "[workspace]\n").unwrap();
+        // Bare ROS package -> not listed.
         write_package_xml(&root.join("src").join("pkg_a"), "pkg_a");
+        // pixi.toml package -> listed.
         write_package_xml(&root.join("src").join("pkg_b"), "pkg_b");
         fs::write(
             root.join("src").join("pkg_b").join("pixi.toml"),
             "[package]\n",
         )
         .unwrap();
-        // A pixi manifest under a COLCON_IGNORE'd subtree must be pruned.
-        write_package_xml(&root.join("build").join("pkg_c"), "pkg_c");
+        // pyproject with `[tool.pixi]` -> listed.
+        write_package_xml(&root.join("src").join("pkg_c"), "pkg_c");
         fs::write(
-            root.join("build").join("pkg_c").join("pixi.toml"),
-            "[package]\n",
+            root.join("src").join("pkg_c").join("pyproject.toml"),
+            "[tool.pixi.package]\nname = \"pkg_c\"\n",
         )
         .unwrap();
-        fs::write(root.join("build").join("COLCON_IGNORE"), b"").unwrap();
 
         let set = discover_ros_packages(root)
             .unwrap()
             .pixi_manifest_input_glob_set;
+        assert_eq!(
+            set.patterns,
+            vec![
+                "src/pkg_b/pixi.toml".to_string(),
+                "src/pkg_c/pyproject.toml".to_string(),
+            ],
+            "only discovered pixi manifests, relative and sorted"
+        );
+        assert!(set.markers.is_empty());
+
+        // Walked from the workspace root the set matches exactly those
+        // manifests, and never the workspace-root manifest.
         let matches: Vec<PathBuf> = GlobSet::create(set.patterns.iter().map(String::as_str))
-            .with_ignore_marker_filenames(set.markers.iter().map(String::as_str))
             .with_exclude_hidden(set.exclude_hidden)
             .collect_matching(root)
             .unwrap()
             .into_iter()
             .map(|m| m.into_path())
             .collect();
-
-        assert!(
-            matches.contains(&root.join("src").join("pkg_b").join("pixi.toml")),
-            "sibling pixi.toml must be captured, got: {matches:?}"
-        );
-        // No short-circuit: the root manifest is also visited.
-        assert!(
-            matches.contains(&root.join("pixi.toml")),
-            "walk should not short-circuit at the root manifest, got: {matches:?}"
-        );
-        // COLCON_IGNORE'd subtree is pruned.
-        assert!(
-            !matches.contains(&root.join("build").join("pkg_c").join("pixi.toml")),
-            "ignored subtree must be pruned, got: {matches:?}"
+        let mut matches = matches;
+        matches.sort();
+        assert_eq!(
+            matches,
+            vec![
+                root.join("src").join("pkg_b").join("pixi.toml"),
+                root.join("src").join("pkg_c").join("pyproject.toml"),
+            ],
         );
     }
 }
