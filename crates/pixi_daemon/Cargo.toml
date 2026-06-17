@@ -10,11 +10,18 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
+futures = { workspace = true }
 notify = { workspace = true }
 pixi_compute_engine = { workspace = true }
 pixi_compute_fs = { workspace = true }
 pixi_vfs = { workspace = true }
+rattler_conda_types = { workspace = true }
+rattler_virtual_packages = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "process", "rt", "sync", "time"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 filetime = { workspace = true }

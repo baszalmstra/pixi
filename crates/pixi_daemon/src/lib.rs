@@ -5,6 +5,15 @@
 //! events invalidate filesystem compute keys immediately, while glob mtime
 //! values are recomputed lazily when a client asks for them.
 
+mod ipc;
+
+pub use ipc::{
+    DaemonClient, DaemonEndpoint, DaemonIpcError, DaemonPong, DaemonStatus, DaemonStopResult,
+    IpcInputGlobMTimeProvider, SpawnDaemonOptions, SpawnedDaemon, ensure_daemon_running,
+    input_glob_mtime_workspace, ping_workspace, serve_workspace, serve_workspace_until_shutdown,
+    spawn_daemon_and_connect, status_workspace, stop_workspace, system_virtual_packages_workspace,
+};
+
 use std::{
     collections::BTreeSet,
     io,
@@ -24,7 +33,7 @@ use notify::{
 };
 use pixi_compute_engine::{ComputeEngine, ComputeEngineStats, ComputeError, GraphVersion};
 use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, FsError, GlobMTime, InputGlobSpec};
-use pixi_vfs::{IndexedVfs, VfsStats};
+use pixi_vfs::{IndexedVfs, VfsStats, WalkMode};
 
 const DEFAULT_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -147,6 +156,27 @@ impl WorkspaceFsDaemon {
             engine_stats: self.engine.stats(),
             vfs_stats: self.vfs.stats(),
         })
+    }
+
+    /// Return the exact files matched by an ordered input-glob spec under `root`.
+    ///
+    /// Like [`Self::input_glob_mtime`], watcher events only invalidate daemon
+    /// state; this request recomputes lazily when necessary and otherwise reuses
+    /// the indexed VFS aggregate.
+    pub async fn input_glob_files(
+        &self,
+        root: impl AsRef<Path>,
+        spec: InputGlobSpec,
+    ) -> Result<Vec<PathBuf>, DaemonError> {
+        let root = self.resolve_request_root(root.as_ref())?;
+        validate_spec_scope(&spec)?;
+        self.vfs
+            .matching_paths_for_spec(&root, spec, WalkMode::Hybrid)
+            .map_err(|error| {
+                DaemonError::Filesystem(FsError::Indexed {
+                    message: error.to_string(),
+                })
+            })
     }
 
     /// Coarsely reset all daemon-owned filesystem state.

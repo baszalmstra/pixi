@@ -7,7 +7,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use itertools::{Either, Itertools};
 use once_cell::sync::OnceCell;
 use pixi_command_dispatcher::{
@@ -225,6 +225,9 @@ pub async fn verify_platform_satisfiability(
     // specific [`PlatformUnsat`] variant carrying the offending spec
     // so re-locking is forced with informative diagnostics.
     let mut resolved_records = Vec::new();
+    let mut source_backend_futures =
+        CancellationAwareFutures::new(ctx.command_dispatcher.executor());
+    let mut source_backend_checks = 0usize;
     for record in unresolved_records {
         match record {
             UnresolvedPixiRecord::Binary(record) => {
@@ -242,10 +245,14 @@ pub async fn verify_platform_satisfiability(
                     // content-pinned identifier we can use to detect
                     // edits to e.g. host-dependencies. Skipping the
                     // backend here would silently accept stale lock files.
-                    let resolved =
-                        verify_partial_source_record_against_backend(ctx, &platform_setup, &record)
-                            .await?;
-                    resolved_records.push(PixiRecord::Source(resolved));
+                    let ctx = ctx;
+                    let platform_setup = &platform_setup;
+                    source_backend_checks += 1;
+                    source_backend_futures.push(async move {
+                        verify_partial_source_record_against_backend(ctx, platform_setup, &record)
+                            .await
+                            .map(PixiRecord::Source)
+                    });
                 } else {
                     // Fully immutable + full record: the source is
                     // content-pinned (git commit / url+sha), so the
@@ -268,6 +275,16 @@ pub async fn verify_platform_satisfiability(
                 }
             }
         }
+    }
+
+    if source_backend_checks > 0 {
+        tracing::debug!(
+            source_backend_checks,
+            "verifying mutable or partial source records against build backends",
+        );
+    }
+    while let Some(record) = source_backend_futures.next().await {
+        resolved_records.push(record?);
     }
 
     // Create a lookup table from package name to package record. Returns an error

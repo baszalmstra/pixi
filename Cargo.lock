@@ -6451,6 +6451,7 @@ dependencies = [
  "pixi_config",
  "pixi_consts",
  "pixi_core",
+ "pixi_daemon",
  "pixi_diff",
  "pixi_git",
  "pixi_global",
@@ -6538,6 +6539,7 @@ dependencies = [
  "pixi_compute_sources",
  "pixi_config",
  "pixi_consts",
+ "pixi_daemon",
  "pixi_git",
  "pixi_glob",
  "pixi_path",
@@ -6620,6 +6622,7 @@ dependencies = [
  "pixi_compute_engine",
  "pixi_glob",
  "pixi_vfs",
+ "serde",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6750,6 +6753,7 @@ dependencies = [
  "pixi_compute_reporters",
  "pixi_config",
  "pixi_consts",
+ "pixi_daemon",
  "pixi_diff",
  "pixi_git",
  "pixi_glob",
@@ -6824,13 +6828,19 @@ name = "pixi_daemon"
 version = "0.1.0"
 dependencies = [
  "filetime",
+ "futures",
  "notify",
  "pixi_compute_engine",
  "pixi_compute_fs",
  "pixi_vfs",
+ "rattler_conda_types",
+ "rattler_virtual_packages",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7476,6 +7486,7 @@ dependencies = [
  "ignore",
  "parking_lot 0.12.5",
  "pixi_glob",
+ "serde",
  "tempfile",
  "thiserror 2.0.18",
 ]

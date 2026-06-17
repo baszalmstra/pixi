@@ -13,10 +13,10 @@ use clap::{CommandFactory, Parser};
 use indicatif::ProgressDrawTarget;
 use miette::IntoDiagnostic;
 use pixi_consts::consts;
-use pixi_core::environment::LockFileUsage;
+use pixi_core::{WorkspaceLocator, environment::LockFileUsage};
 use pixi_progress::global_multi_progress;
 
-use std::{env, io::IsTerminal};
+use std::{env, io::IsTerminal, path::PathBuf};
 use tracing::level_filters::LevelFilter;
 
 pub mod add;
@@ -27,6 +27,7 @@ pub mod cli_interface;
 pub mod command_info;
 pub mod completion;
 pub mod config;
+pub mod daemon;
 pub mod exec;
 pub mod global;
 pub mod has_specs;
@@ -93,6 +94,22 @@ pub struct Args {
     /// List all installed commands (built-in and extensions)
     #[clap(long = "list", help_heading = consts::CLAP_GLOBAL_OPTIONS)]
     list: bool,
+
+    /// Run the experimental per-workspace daemon in the foreground.
+    #[clap(long, hide = true)]
+    daemon: bool,
+
+    /// Workspace root used by hidden daemon smoke/test modes.
+    #[clap(long, hide = true, value_name = "PATH")]
+    daemon_root: Option<PathBuf>,
+
+    /// Connect to the experimental daemon and print a ping response.
+    #[clap(long, hide = true)]
+    daemon_ping: bool,
+
+    /// Spawn the experimental daemon, connect to it, print a ping response, then stop it.
+    #[clap(long, hide = true)]
+    daemon_spawn_ping: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -162,6 +179,8 @@ pub enum Command {
     Clean(clean::Args),
     Completion(completion::Args),
     Config(config::Args),
+    #[clap(hide = true)]
+    Daemon(daemon::Args),
     #[clap(visible_alias = "x")]
     Exec(exec::Args),
     #[clap(visible_alias = "g")]
@@ -270,6 +289,40 @@ pub async fn execute() -> miette::Result<()> {
     // Setup logging for the application.
     setup_logging(&args, use_colors)?;
 
+    if args.daemon {
+        let root = daemon_root(&args)?;
+        pixi_daemon::serve_workspace(root).await.into_diagnostic()?;
+        return Ok(());
+    }
+
+    if args.daemon_ping {
+        let root = daemon_root(&args)?;
+        let pong = pixi_daemon::ping_workspace(root).await.into_diagnostic()?;
+        eprintln!(
+            "pong protocol={} root={}",
+            pong.protocol_version,
+            pong.workspace_root.display()
+        );
+        return Ok(());
+    }
+
+    if args.daemon_spawn_ping {
+        let root = daemon_root(&args)?;
+        let executable = std::env::current_exe().into_diagnostic()?;
+        let daemon = pixi_daemon::spawn_daemon_and_connect(pixi_daemon::SpawnDaemonOptions::new(
+            root, executable,
+        ))
+        .await
+        .into_diagnostic()?;
+        eprintln!(
+            "pong spawned={} endpoint={}",
+            daemon.spawned(),
+            daemon.endpoint().display_address()
+        );
+        daemon.kill_spawned().await.into_diagnostic()?;
+        return Ok(());
+    }
+
     let (Some(command), global_options) = (args.command, args.global_options) else {
         // match CI expectations
         std::process::exit(2);
@@ -277,6 +330,14 @@ pub async fn execute() -> miette::Result<()> {
 
     // Execute the command
     execute_command(command, &global_options).await
+}
+
+fn daemon_root(args: &Args) -> miette::Result<PathBuf> {
+    if let Some(root) = &args.daemon_root {
+        return Ok(root.clone());
+    }
+
+    Ok(WorkspaceLocator::for_cli().locate()?.root().to_path_buf())
 }
 
 #[cfg(feature = "console-subscriber")]
@@ -313,7 +374,7 @@ fn setup_logging(args: &Args, use_colors: bool) -> miette::Result<()> {
         EnvFilter::builder()
             .with_default_directive(level_filter.into())
             .parse(format!(
-                "apple_codesign=off,pixi={pixi_level},pixi_command_dispatcher={pixi_level},pixi_core={pixi_level},rattler_upload={pixi_level},uv_resolver={pixi_level},resolvo={low_level_filter}"
+                "apple_codesign=off,pixi={pixi_level},pixi_command_dispatcher={pixi_level},pixi_core={pixi_level},pixi_daemon={pixi_level},rattler_upload={pixi_level},uv_resolver={pixi_level},resolvo={low_level_filter}"
             ))
             .into_diagnostic()?
     } else {
@@ -321,7 +382,7 @@ fn setup_logging(args: &Args, use_colors: bool) -> miette::Result<()> {
         // Parse RUST_LOG because we need to set it other our other directives
         let env_directives = env::var("RUST_LOG").unwrap_or_default();
         let original_directives = format!(
-            "apple_codesign=off,pixi={pixi_level},pixi_command_dispatcher={pixi_level},pixi_core={pixi_level},rattler_upload={pixi_level},uv_resolver={pixi_level},resolvo={low_level_filter}",
+            "apple_codesign=off,pixi={pixi_level},pixi_command_dispatcher={pixi_level},pixi_core={pixi_level},pixi_daemon={pixi_level},rattler_upload={pixi_level},uv_resolver={pixi_level},resolvo={low_level_filter}",
         );
         // Concatenate both directives where the LOG overrides the potential original directives
         let final_directives = if env_directives.is_empty() {
@@ -358,6 +419,7 @@ pub async fn execute_command(
     match command {
         Command::Completion(cmd) => completion::execute(cmd),
         Command::Config(cmd) => config::execute(cmd).await,
+        Command::Daemon(cmd) => daemon::execute(cmd).await,
         Command::Init(cmd) => init::execute(cmd).await,
         Command::Add(cmd) => add::execute(cmd).await,
         Command::Clean(cmd) => clean::execute(cmd).await,

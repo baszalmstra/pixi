@@ -15,6 +15,7 @@ use std::os::unix::fs::symlink;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::{Debug, Formatter},
+    future::Future,
     hash::Hash,
     path::{Path, PathBuf},
     sync::Arc,
@@ -63,9 +64,7 @@ use rattler_lock::LockFile;
 use crate::lock_file::LockedPackageKind;
 use rattler_networking::{LazyClient, s3_middleware};
 use rattler_repodata_gateway::Gateway;
-use rattler_virtual_packages::{
-    Cuda, EnvOverride, LibC, Linux, Osx, Override, VirtualPackageOverrides, VirtualPackages,
-};
+use rattler_virtual_packages::{Cuda, EnvOverride, LibC, Linux, Osx, Override};
 pub use registry::{WorkspaceRegistry, WorkspaceRegistryError};
 pub use solve_group::SolveGroup;
 use tokio::sync::Semaphore;
@@ -186,6 +185,13 @@ pub struct Workspace {
     /// The concurrent request semaphore
     concurrent_downloads_semaphore: OnceCell<Arc<Semaphore>>,
 
+    /// Shared daemon client for daemon-backed workspace queries.
+    daemon_client: OnceCell<pixi_daemon::DaemonClient>,
+
+    /// Raw system virtual packages returned by the daemon client. Client-local
+    /// environment overrides are applied per call on top of this cached value.
+    system_virtual_packages: OnceCell<Vec<GenericVirtualPackage>>,
+
     /// Optional backend override for testing purposes
     backend_override: Option<BackendOverride>,
 }
@@ -227,17 +233,64 @@ pub enum PlatformSource {
 pub enum PlatformOverrides {
     /// Ignore `PIXI_OVERRIDE_PLATFORM` and `CONDA_OVERRIDE_*`.
     NoOverrides,
-    /// Honor `PIXI_OVERRIDE_PLATFORM` for the subdir and `CONDA_OVERRIDE_*` for
-    /// the detected virtual packages (via [`VirtualPackageOverrides::from_env`]).
+    /// Honor `PIXI_OVERRIDE_PLATFORM` for the subdir and client-process
+    /// `CONDA_OVERRIDE_*` values for the detected virtual packages.
     EnvironmentVariableOverrides,
 }
 
-/// Apply `CONDA_OVERRIDE_*` env vars to `packages`, matching upstream rattler
-/// semantics: unset keeps the current version, non-empty replaces it (adding
-/// the package if it wasn't detected at all), and empty removes the package
-/// entirely. Rattler drives this per slot via `detect_with_fallback`;
-/// `Ok(Some(v))` = use v, `Ok(None)` = disabled, error = leave untouched.
-fn apply_environment_variable_overrides(packages: &mut Vec<GenericVirtualPackage>) {
+/// Apply client-process `CONDA_OVERRIDE_*` env vars to `packages`, matching
+/// upstream rattler semantics: unset keeps the current version, non-empty
+/// replaces it (adding the package if it wasn't detected at all), and empty
+/// removes the package entirely. Rattler drives this per slot via
+/// `detect_with_fallback`; `Ok(Some(v))` = use v, `Ok(None)` = disabled, error
+/// = leave untouched.
+///
+/// Use this after fetching raw system virtual packages from another process,
+/// such as the Pixi daemon, so CLI-local environment overrides are honored even
+/// when the daemon has a different environment.
+fn use_daemon_from_env() -> bool {
+    std::env::var("PIXI_USE_DAEMON").is_ok_and(|value| {
+        matches!(
+            value.as_str(),
+            "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+        )
+    })
+}
+
+static DAEMON_QUERY_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+
+fn block_on_daemon_query<F, T>(future: F) -> miette::Result<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current()
+        && matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        )
+    {
+        return Ok(tokio::task::block_in_place(|| handle.block_on(future)));
+    }
+
+    // `Workspace::host_platform` is synchronous. If it is called without a
+    // multi-thread Tokio runtime, use one process-global helper runtime instead
+    // of creating a short-lived runtime. `DaemonClient` owns a background
+    // response-reader task for multiplexed IPC connections; that task must not
+    // be tied to a runtime that is dropped immediately after the query.
+    let runtime = DAEMON_QUERY_RUNTIME
+        .get_or_try_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("pixi-daemon-query")
+                .build()
+        })
+        .into_diagnostic()
+        .context("failed to create daemon query runtime")?;
+    Ok(runtime.block_on(future))
+}
+
+pub fn apply_virtual_package_environment_overrides(packages: &mut Vec<GenericVirtualPackage>) {
     let env = Override::DefaultEnvVar;
     packages.retain_mut(|package| {
         let base = package.version.clone();
@@ -393,6 +446,8 @@ impl Workspace {
             s3_config,
             repodata_gateway: Default::default(),
             concurrent_downloads_semaphore: OnceCell::default(),
+            daemon_client: OnceCell::default(),
+            system_virtual_packages: OnceCell::default(),
             backend_override: None,
         }
     }
@@ -784,6 +839,84 @@ impl Workspace {
     /// [`RayonPrimer`](crate::rayon_primer::RayonPrimer) in the install /
     /// solve / instantiate-backend reporter slots; UI reporters override.
     pub fn command_dispatcher_builder(&self) -> miette::Result<CommandDispatcherBuilder> {
+        let daemon_client = self.daemon_client()?;
+        let tool_platform = self.config().tool_platform();
+        let tool_virtual_packages = self.tool_virtual_packages()?;
+        Ok(self
+            .command_dispatcher_builder_with_tool_virtual_packages(
+                tool_platform,
+                tool_virtual_packages,
+            )?
+            .with_daemon_client(daemon_client))
+    }
+
+    /// Create the daemon client for this workspace. `PIXI_USE_DAEMON` selects a
+    /// process daemon with auto-start; otherwise Pixi uses an in-process daemon
+    /// implementation with the same client API.
+    pub fn daemon_client(&self) -> miette::Result<pixi_daemon::DaemonClient> {
+        self.daemon_client
+            .get_or_try_init(|| self.create_daemon_client())
+            .cloned()
+    }
+
+    fn create_daemon_client(&self) -> miette::Result<pixi_daemon::DaemonClient> {
+        if use_daemon_from_env() {
+            let executable = std::env::current_exe()
+                .into_diagnostic()
+                .context("failed to determine current executable for daemon auto-start")?;
+            Ok(pixi_daemon::DaemonClient::with_spawn_options(
+                pixi_daemon::SpawnDaemonOptions::new(self.root(), executable),
+            ))
+        } else {
+            pixi_daemon::DaemonClient::in_process(self.root())
+                .into_diagnostic()
+                .context("failed to start in-process Pixi daemon")
+        }
+    }
+
+    /// Return raw system virtual packages from the daemon client. The raw daemon
+    /// result is cached; client-process `CONDA_OVERRIDE_*` values are applied by
+    /// callers on top of the cached value.
+    fn system_virtual_packages(&self) -> miette::Result<Vec<GenericVirtualPackage>> {
+        self.system_virtual_packages
+            .get_or_try_init(|| {
+                let client = self.daemon_client()?;
+                let packages =
+                    block_on_daemon_query(async move { client.system_virtual_packages().await })?
+                        .into_diagnostic()
+                        .context("failed to query system virtual packages from the Pixi daemon")?;
+                tracing::debug!(
+                    workspace_root = %self.root().display(),
+                    virtual_package_count = packages.len(),
+                    "resolved system virtual packages through the Pixi daemon client",
+                );
+                Ok(packages)
+            })
+            .cloned()
+    }
+
+    /// Return tool virtual packages using the cached daemon-backed system
+    /// virtual packages plus client-process `CONDA_OVERRIDE_*` values.
+    fn tool_virtual_packages(&self) -> miette::Result<Vec<GenericVirtualPackage>> {
+        let tool_platform = self.config().tool_platform();
+        let host = self.host_platform(
+            PlatformSource::Defaults,
+            PlatformOverrides::EnvironmentVariableOverrides,
+        );
+        if tool_platform.only_platform() != host.subdir().only_platform() {
+            return Ok(vec![]);
+        }
+
+        let mut virtual_packages = self.system_virtual_packages()?;
+        apply_virtual_package_environment_overrides(&mut virtual_packages);
+        Ok(virtual_packages)
+    }
+
+    fn command_dispatcher_builder_with_tool_virtual_packages(
+        &self,
+        tool_platform: Platform,
+        tool_virtual_packages: Vec<GenericVirtualPackage>,
+    ) -> miette::Result<CommandDispatcherBuilder> {
         let cache_dir = AbsPathBuf::new(pixi_config::get_cache_dir()?)
             .expect("cache dir is not absolute")
             .into_assume_dir();
@@ -791,26 +924,6 @@ impl Workspace {
             .expect("pixi dir is not absolute")
             .into_assume_dir();
         let cache_dirs = CacheDirs::new(cache_dir).with_workspace(workspace_dir);
-
-        // Determine the tool platform to use
-        let tool_platform = self.config().tool_platform();
-        let host = self.host_platform(
-            PlatformSource::Defaults,
-            PlatformOverrides::EnvironmentVariableOverrides,
-        );
-        let tool_virtual_packages =
-            if tool_platform.only_platform() == host.subdir().only_platform() {
-                // If the tool platform is the same as the current platform, we just assume the
-                // same virtual packages apply.
-                self.host_platform(
-                    PlatformSource::AutoDetected,
-                    PlatformOverrides::EnvironmentVariableOverrides,
-                )
-                .declared_virtual_packages()
-                .to_vec()
-            } else {
-                vec![]
-            };
 
         let root_dir = AbsPathBuf::new(self.root().to_path_buf())
             .expect("root dir is not absolute")
@@ -892,15 +1005,18 @@ impl Workspace {
             PlatformSource::Defaults => PixiPlatform::from_subdir(subdir)
                 .declared_virtual_packages()
                 .to_vec(),
-            PlatformSource::AutoDetected => {
-                VirtualPackages::detect(&VirtualPackageOverrides::default())
-                    .map(|detected| detected.into_generic_virtual_packages().collect())
-                    .unwrap_or_default()
-            }
+            PlatformSource::AutoDetected => self.system_virtual_packages().unwrap_or_else(|error| {
+                tracing::warn!(
+                    %error,
+                    workspace_root = %self.root().display(),
+                    "failed to query daemon-backed system virtual packages; continuing without detected virtual packages",
+                );
+                Vec::new()
+            }),
         };
 
         if let PlatformOverrides::EnvironmentVariableOverrides = overrides {
-            apply_environment_variable_overrides(&mut virtual_packages);
+            apply_virtual_package_environment_overrides(&mut virtual_packages);
         }
 
         PixiPlatform::from_required_virtual_packages(subdir, virtual_packages)
@@ -1292,7 +1408,7 @@ mod tests {
     fn override_adds_undetected_virtual_package() {
         let packages = temp_env::with_var("CONDA_OVERRIDE_CUDA", Some("12.0"), || {
             let mut packages = Vec::new();
-            apply_environment_variable_overrides(&mut packages);
+            apply_virtual_package_environment_overrides(&mut packages);
             packages
         });
 
@@ -1325,7 +1441,7 @@ mod tests {
                 libc_package("__glibc", "2.28"),
                 libc_package("__musl", "1.2"),
             ];
-            apply_environment_variable_overrides(&mut packages);
+            apply_virtual_package_environment_overrides(&mut packages);
             packages
         });
 
@@ -1342,7 +1458,7 @@ mod tests {
                 libc_package("__musl", "1.2"),
                 libc_package("__eglibc", "2.30"),
             ];
-            apply_environment_variable_overrides(&mut packages);
+            apply_virtual_package_environment_overrides(&mut packages);
             packages
         });
 

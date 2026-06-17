@@ -17,6 +17,8 @@ use std::{
 use derive_more::Display;
 use pixi_build_types::InputGlobSet;
 use pixi_compute_engine::{ComputeCtx, Key};
+use pixi_compute_fs::InputGlobSpec;
+use pixi_daemon::DaemonClient;
 
 /// Inputs for [`InputGlobSetWalkKey`].  Holds the resolved walk root and
 /// the walker knobs; everything that affects the result is part of the
@@ -115,8 +117,24 @@ impl Key for InputGlobSetWalkKey {
         name = "input-glob-set-walk",
         fields(root = %self.0.root.display()),
     )]
-    async fn compute(&self, _ctx: &mut ComputeCtx) -> Self::Value {
+    async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
         let spec = self.0.clone();
+        if let Some(client) = ctx.global_data().try_get::<DaemonClient>().cloned() {
+            let input_spec = InputGlobSpec::new(spec.patterns.clone())
+                .with_markers(spec.markers.clone())
+                .with_exclude_hidden(spec.exclude_hidden);
+            match client.input_glob_files(spec.root.clone(), input_spec).await {
+                Ok(paths) => return Ok(Arc::new(paths)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        root = %spec.root.display(),
+                        "daemon input-glob file query failed; falling back to local glob walk",
+                    );
+                }
+            }
+        }
+
         tokio::task::spawn_blocking(move || {
             let matches = pixi_glob::GlobSet::create(spec.patterns.iter().map(String::as_str))
                 .with_ignore_marker_filenames(spec.markers.iter().map(String::as_str))

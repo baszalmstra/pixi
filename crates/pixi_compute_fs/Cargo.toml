@@ -13,6 +13,7 @@ version = "0.1.0"
 futures = { workspace = true }
 pixi_compute_engine = { workspace = true }
 pixi_vfs = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

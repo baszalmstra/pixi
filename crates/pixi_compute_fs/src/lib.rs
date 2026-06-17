@@ -18,6 +18,7 @@ use pixi_compute_engine::{
 };
 pub use pixi_vfs::GlobSetSpec as InputGlobSpec;
 use pixi_vfs::{EntryKind, IndexedVfs, WalkMode};
+use serde::{Deserialize, Serialize};
 
 /// Filesystem entry kind used by metadata and directory listings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,7 +48,7 @@ pub struct DirectoryEntry {
 }
 
 /// Newest modification time for paths matched by a glob.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GlobMTime {
     NoMatches,
     MatchesFound {
@@ -55,6 +56,22 @@ pub enum GlobMTime {
         designated_file: PathBuf,
     },
 }
+
+/// External provider for input-glob mtime queries.
+///
+/// Dispatchers can register an [`InputGlobMTimeProviderRef`] in the compute
+/// engine's global data to route glob-mtime reads through another service
+/// while retaining the same compute key shape.
+pub trait InputGlobMTimeProvider: Send + Sync + 'static {
+    fn input_glob_mtime(
+        &self,
+        root: PathBuf,
+        spec: InputGlobSpec,
+    ) -> BoxFuture<'static, Result<GlobMTime, FsError>>;
+}
+
+/// Type stored in compute-engine global data for daemon-backed glob mtimes.
+pub type InputGlobMTimeProviderRef = Arc<dyn InputGlobMTimeProvider>;
 
 /// Error returned by filesystem graph reads.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -166,6 +183,12 @@ impl Key for InputGlobMTimeKey {
     type Value = Result<GlobMTime, FsError>;
 
     async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
+        if let Some(provider) = input_glob_mtime_provider(ctx) {
+            return provider
+                .input_glob_mtime(self.root.clone(), self.spec.clone())
+                .await;
+        }
+
         indexed_vfs(ctx)
             .and_then(|vfs| {
                 vfs.latest_mtime_for_spec(&self.root, self.spec.clone(), WalkMode::Hybrid)
@@ -184,6 +207,12 @@ fn indexed_vfs(ctx: &ComputeCtx) -> Result<Arc<IndexedVfs>, FsError> {
         .try_get::<Arc<IndexedVfs>>()
         .cloned()
         .ok_or_else(missing_indexed_vfs_error)
+}
+
+fn input_glob_mtime_provider(ctx: &ComputeCtx) -> Option<InputGlobMTimeProviderRef> {
+    ctx.global_data()
+        .try_get::<InputGlobMTimeProviderRef>()
+        .cloned()
 }
 
 fn indexed_vfs_from_engine(engine: &ComputeEngine) -> Result<Arc<IndexedVfs>, UpdateError> {

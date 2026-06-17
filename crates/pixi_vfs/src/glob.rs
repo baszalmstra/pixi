@@ -16,6 +16,7 @@ use ignore::{
     Match as IgnoreMatch,
     overrides::{Override, OverrideBuilder},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     VfsError,
@@ -26,7 +27,7 @@ use crate::{
 };
 
 /// Newest modification time for paths matched by a glob.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GlobMTime {
     /// The query matched no files.
     NoMatches,
@@ -43,7 +44,7 @@ pub enum GlobMTime {
 }
 
 /// Ordered input-glob semantics for a VFS latest-mtime query.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GlobSetSpec {
     /// Ordered include/exclude patterns. Leading `!` denotes an exclusion.
     pub patterns: Vec<String>,
@@ -210,6 +211,38 @@ impl IndexedVfs {
                 walk,
             },
         ))
+    }
+
+    /// Return the exact files matched by an ordered Pixi-style glob set.
+    ///
+    /// This uses the same indexed query state as [`Self::latest_mtime_for_spec`]:
+    /// warm queries can reuse the active aggregate, while cold or invalidated
+    /// queries perform one disk walk and store the result for later watcher
+    /// invalidation and mtime queries.
+    pub fn matching_paths_for_spec(
+        &self,
+        root: impl AsRef<Path>,
+        spec: GlobSetSpec,
+        mode: WalkMode,
+    ) -> Result<Vec<PathBuf>, VfsError> {
+        let root = root.as_ref().to_path_buf();
+        let query_key = GlobQueryKey::new(root.clone(), spec.clone());
+        self.latest_mtime_for_spec_inner(root.clone(), spec, mode, false)?;
+
+        let index = self.inner.index.lock();
+        let Some(query) = index.query(&query_key) else {
+            return Err(VfsError::IndexMiss {
+                needed: "active glob-set query",
+                path: root,
+            });
+        };
+        let mut paths = query
+            .matched_files
+            .iter()
+            .map(|file| index.file_path(*file).to_path_buf())
+            .collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
     }
 
     /// Mark a known file's metadata as dirty without dirtying directory

@@ -28,9 +28,11 @@ use pixi_build_frontend::BackendOverride;
 use pixi_compute_cache_dirs::CacheDirsKey;
 use pixi_compute_engine::ComputeEngine;
 use pixi_compute_env_vars::EnvVarsKey;
+use pixi_compute_fs::InputGlobMTimeProviderRef;
 use pixi_compute_sources::{
     GitCheckoutReporter, GitCheckoutSemaphore, RootDir, UrlCheckoutReporter, UrlCheckoutSemaphore,
 };
+use pixi_daemon::DaemonClient;
 use pixi_git::resolver::GitResolver;
 use pixi_glob::GlobHashCache;
 use pixi_path::{AbsPathBuf, AbsPresumedDirPathBuf};
@@ -56,6 +58,7 @@ pub struct CommandDispatcherBuilder {
     limits: Limits,
     executor: Executor,
     tool_platform: Option<(Platform, Vec<GenericVirtualPackage>)>,
+    daemon_client: Option<DaemonClient>,
     execute_link_scripts: bool,
     channel_config: Option<ChannelConfig>,
     enabled_protocols: Option<EnabledProtocols>,
@@ -284,6 +287,16 @@ impl CommandDispatcherBuilder {
         }
     }
 
+    /// Sets the daemon client used by compute keys that can be served by the
+    /// Pixi daemon. The client owns whether requests go to an external daemon
+    /// process or an in-process daemon implementation.
+    pub fn with_daemon_client(self, daemon_client: DaemonClient) -> Self {
+        Self {
+            daemon_client: Some(daemon_client),
+            ..self
+        }
+    }
+
     /// Set the limits to which this instance should adhere.
     pub fn with_limits(self, limits: Limits) -> Self {
         Self { limits, ..self }
@@ -416,6 +429,10 @@ impl CommandDispatcherBuilder {
             ChannelConfig::default_with_root_dir(path.to_path_buf())
         });
         let enabled_protocols = self.enabled_protocols.unwrap_or_default();
+        let daemon_client = self.daemon_client;
+        let daemon_input_glob_mtime_provider = daemon_client
+            .clone()
+            .map(|client| Arc::new(client) as InputGlobMTimeProviderRef);
 
         let workspace_env_registry = Arc::new(WorkspaceEnvRegistry::new());
 
@@ -472,6 +489,12 @@ impl CommandDispatcherBuilder {
             .with_spawn_hook(Arc::new(pixi_compute_reporters::OperationIdSpawnHook));
         // Register each per-key reporter the caller supplied; a missing
         // reporter is treated as "no progress UI for this kind of work."
+        if let Some(client) = daemon_client {
+            engine_builder = engine_builder.with_data(client);
+        }
+        if let Some(provider) = daemon_input_glob_mtime_provider {
+            engine_builder = engine_builder.with_data(provider);
+        }
         if let Some(r) = self.pixi_install_reporter.clone() {
             engine_builder = engine_builder.with_data(r);
         }
@@ -564,6 +587,31 @@ mod tests {
                 .try_get::<Arc<IndexedVfs>>()
                 .is_some(),
             "normal dispatchers must register IndexedVfs for pixi_compute_fs"
+        );
+    }
+
+    #[test]
+    fn finish_registers_daemon_client_for_input_glob_mtime_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon_client = DaemonClient::in_process(temp.path()).unwrap();
+        let dispatcher = CommandDispatcher::builder()
+            .with_daemon_client(daemon_client)
+            .finish();
+        assert!(
+            dispatcher
+                .engine()
+                .global_data()
+                .try_get::<DaemonClient>()
+                .is_some(),
+            "dispatchers with a daemon client must expose it to daemon-backed compute keys"
+        );
+        assert!(
+            dispatcher
+                .engine()
+                .global_data()
+                .try_get::<InputGlobMTimeProviderRef>()
+                .is_some(),
+            "dispatchers with a daemon client must route input-glob mtimes through it"
         );
     }
 }

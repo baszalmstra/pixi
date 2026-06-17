@@ -42,6 +42,7 @@ pixi_command_dispatcher = { workspace = true }
 pixi_compute_reporters = { workspace = true }
 pixi_config = { workspace = true }
 pixi_consts = { workspace = true }
+pixi_daemon = { workspace = true }
 pixi_diff = { workspace = true }
 pixi_git = { workspace = true }
 pixi_glob = { workspace = true }

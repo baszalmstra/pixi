@@ -57,6 +57,7 @@ pixi_compute_fs = { workspace = true }
 pixi_compute_network = { workspace = true }
 pixi_compute_reporters = { workspace = true }
 pixi_compute_sources = { workspace = true }
+pixi_daemon = { workspace = true }
 pixi_consts = { workspace = true }
 pixi_git = { workspace = true }
 pixi_glob = { workspace = true }

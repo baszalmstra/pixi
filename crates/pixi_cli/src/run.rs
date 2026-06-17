@@ -29,13 +29,13 @@ use pixi_core::{
         },
     },
 };
-use pixi_manifest::{HasWorkspaceManifest, PixiPlatformName, TaskName};
+use pixi_manifest::{FeaturesExt, HasWorkspaceManifest, PixiPlatformName, TaskName};
 use pixi_progress::global_multi_progress;
 use pixi_task::{
     AmbiguousTask, CanSkip, ExecutableTask, FailedToParseShellScript, InvalidWorkingDirectory,
     PreferExecutable, SearchEnvironments, TaskAndEnvironment, TaskGraph, get_task_env,
 };
-use rattler_conda_types::Platform;
+use rattler_conda_types::{Arch, Platform};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
@@ -218,6 +218,21 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     if args.lock_and_install_config.allow_installs() {
         environment.emit_emulation_warning();
+    }
+
+    // If no runnable host-subdir candidate exists, fail before the lock-file
+    // freshness check. The lock-file fallback in runnability validation can
+    // only help when at least one declared environment platform uses the
+    // current host subdir or one of its architecture fallbacks; otherwise the
+    // command cannot run locally and checking source metadata first just adds
+    // avoidable latency.
+    if args.lock_and_install_config.allow_installs()
+        && user_platform.is_none()
+        && installed_platform.is_none()
+        && best_declared_platform.is_none()
+        && !environment_has_host_candidate_subdir(&environment)
+    {
+        return Err(environment.unsupported_platform_error().into());
     }
 
     // Top-level progress, kept here so we can clear it between phases.
@@ -480,6 +495,39 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     }
 
     Ok(())
+}
+
+fn environment_has_host_candidate_subdir(environment: &Environment<'_>) -> bool {
+    let current = environment
+        .workspace()
+        .host_platform(
+            PlatformSource::Defaults,
+            PlatformOverrides::EnvironmentVariableOverrides,
+        )
+        .subdir();
+    let candidate_subdirs = environment
+        .workspace_manifest()
+        .workspace
+        .candidate_subdirs(current);
+    let env_platforms = environment.platforms();
+    let declared_platforms = environment
+        .workspace_manifest()
+        .workspace
+        .platforms
+        .iter()
+        .filter(|platform| env_platforms.contains(platform.name()))
+        .collect::<Vec<_>>();
+
+    // Preserve the existing single-WASM fallback behavior from
+    // `possible_pixi_platforms`; do not fail early for that special case.
+    if declared_platforms.len() == 1 && declared_platforms[0].subdir().arch() == Some(Arch::Wasm32)
+    {
+        return true;
+    }
+
+    declared_platforms
+        .iter()
+        .any(|platform| candidate_subdirs.contains(&platform.subdir()))
 }
 
 /// Called when a command was not found.

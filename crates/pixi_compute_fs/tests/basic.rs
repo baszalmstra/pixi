@@ -7,7 +7,10 @@ use std::{
 };
 
 use pixi_compute_engine::{ComputeCtx, ComputeEngine, Key};
-use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, FsEntryKind, FsError};
+use pixi_compute_fs::{
+    ComputeCtxFsExt, ComputeEngineFsExt, FsEntryKind, FsError, GlobMTime, InputGlobMTimeProvider,
+    InputGlobMTimeProviderRef, InputGlobSpec,
+};
 use pixi_vfs::{EntryKind, IndexedVfs, VfsBackend, VfsBackendEntry, VfsBackendMetadata};
 use tempfile::tempdir;
 
@@ -699,4 +702,46 @@ async fn vfs_backend_is_swappable_for_tests() {
         .unwrap();
 
     assert_eq!(&*contents, b"vfs bytes");
+}
+
+#[derive(Clone)]
+struct FakeInputGlobMTimeProvider {
+    value: GlobMTime,
+}
+
+impl InputGlobMTimeProvider for FakeInputGlobMTimeProvider {
+    fn input_glob_mtime(
+        &self,
+        _root: PathBuf,
+        _spec: InputGlobSpec,
+    ) -> futures::future::BoxFuture<'static, Result<GlobMTime, FsError>> {
+        let value = self.value.clone();
+        Box::pin(async move { Ok(value) })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn input_glob_mtime_uses_registered_provider() {
+    let expected = GlobMTime::MatchesFound {
+        modified_at: std::time::SystemTime::UNIX_EPOCH,
+        designated_file: PathBuf::from("from-provider.rs"),
+    };
+    let provider: InputGlobMTimeProviderRef = Arc::new(FakeInputGlobMTimeProvider {
+        value: expected.clone(),
+    });
+    let engine = ComputeEngine::builder()
+        .with_data(Arc::new(IndexedVfs::default()))
+        .with_data(provider)
+        .build();
+
+    let value = engine
+        .with_ctx(async |ctx| {
+            ctx.input_glob_mtime("ignored-root", InputGlobSpec::new(["*.rs"]))
+                .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(value, expected);
 }
