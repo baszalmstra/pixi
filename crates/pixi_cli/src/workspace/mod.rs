@@ -11,6 +11,7 @@ pub mod name;
 pub mod platform;
 pub mod register;
 pub mod requires_pixi;
+pub mod system_requirements;
 pub mod version;
 
 #[derive(Debug, Parser)]
@@ -23,6 +24,7 @@ pub enum Command {
     Feature(feature::Args),
     Export(export::Args),
     Name(name::Args),
+    SystemRequirements(system_requirements::Args),
     Register(register::Args),
     RequiresPixi(requires_pixi::Args),
 }
@@ -47,6 +49,7 @@ pub async fn execute(cmd: Args) -> miette::Result<()> {
         Command::Feature(args) => feature::execute(args).await?,
         Command::Export(cmd) => export::execute(cmd).await?,
         Command::Name(args) => name::execute(args).await?,
+        Command::SystemRequirements(args) => system_requirements::execute(args).await?,
         Command::Register(args) => register::execute(args).await?,
         Command::RequiresPixi(args) => requires_pixi::execute(args).await?,
     };

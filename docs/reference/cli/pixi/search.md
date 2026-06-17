@@ -23,7 +23,7 @@ pixi search [OPTIONS] <PACKAGE>
 :  The channels to consider as a name or a url. Multiple channels can be specified by using this field multiple times
 <br>May be provided more than once.
 - <a id="arg---platform" href="#arg---platform">`--platform (-p) <PLATFORM>`</a>
-:  The platform to search packages for. By default, searches all platforms from the manifest (or all known platforms if no manifest is found). Accepts a workspace platform name; a bare conda subdir (e.g. `linux-64`) is also accepted
+:  The platform(s) to search for. By default, searches all platforms from the manifest (or all known platforms if no manifest is found)
 - <a id="arg---limit" href="#arg---limit">`--limit (-l) <LIMIT>`</a>
 :  Limit the number of versions shown per package, -1 for no limit
 <br>**default**: `5`

@@ -5,7 +5,7 @@ use std::{
 };
 
 use derive_more::Display;
-use rattler_conda_types::PackageName;
+use rattler_conda_types::{PackageName, Platform};
 
 use super::{EnvironmentSpec, WorkspaceEnvRef, WorkspaceEnvRegistry};
 
@@ -142,11 +142,11 @@ impl EnvironmentRef {
     /// Platform label without registry access; for logging/formatting
     /// from contexts that don't hold the registry. If the registry is
     /// available, prefer [`resolve`](Self::resolve).
-    pub fn display_platform(&self) -> String {
+    pub fn display_platform(&self) -> Platform {
         match self {
-            EnvironmentRef::Workspace(ws) => ws.platform().to_string(),
+            EnvironmentRef::Workspace(ws) => ws.platform(),
             EnvironmentRef::Derived { parent, .. } => parent.display_platform(),
-            EnvironmentRef::Ephemeral(eph) => eph.spec.build_environment.host_platform.to_string(),
+            EnvironmentRef::Ephemeral(eph) => eph.spec.build_environment.host_platform,
         }
     }
 }
@@ -163,10 +163,10 @@ impl DerivedParent {
     }
 
     /// Display-only platform for this parent, without registry access.
-    pub fn display_platform(&self) -> String {
+    pub fn display_platform(&self) -> Platform {
         match self {
-            DerivedParent::Workspace(ws) => ws.platform().to_string(),
-            DerivedParent::Ephemeral(eph) => eph.spec.build_environment.host_platform.to_string(),
+            DerivedParent::Workspace(ws) => ws.platform(),
+            DerivedParent::Ephemeral(eph) => eph.spec.build_environment.host_platform,
         }
     }
 }

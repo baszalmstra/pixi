@@ -634,15 +634,13 @@ impl PixiControl {
             .0;
 
         // Create a task graph from the command line arguments.
-        let fallback_platform = pixi_manifest::PixiPlatform::from_subdir(Platform::current());
-        let search_env_platform = explicit_environment
-            .as_ref()
-            .and_then(|e| e.best_declared_platform())
-            .unwrap_or(&fallback_platform);
         let search_env = SearchEnvironments::from_opt_env(
             &project,
             explicit_environment.clone(),
-            Some(search_env_platform),
+            explicit_environment
+                .as_ref()
+                .map(|e| e.best_platform())
+                .or(Some(Platform::current())),
         );
         let task_graph = TaskGraph::from_cmd_args(
             &project,
@@ -718,7 +716,6 @@ impl PixiControl {
                 config: Default::default(),
                 config_source: isolated_config_source(),
                 all: false,
-                platform: None,
                 skip: None,
                 skip_with_deps: None,
                 only: None,
@@ -839,7 +836,7 @@ impl TasksControl<'_> {
                 name,
                 commands: vec![],
                 depends_on: None,
-                platform: platform.map(Into::into),
+                platform,
                 feature: feature_name.non_default().map(str::to_owned),
                 cwd: None,
                 default_environment: None,
@@ -866,7 +863,7 @@ impl TasksControl<'_> {
             },
             operation: task::Operation::Remove(task::RemoveArgs {
                 names: vec![name],
-                platform: platform.map(Into::into),
+                platform,
                 feature: feature_name,
             }),
         })
@@ -878,7 +875,7 @@ impl TasksControl<'_> {
         TaskAliasBuilder {
             manifest_path: Some(self.pixi.manifest_path()),
             args: AliasArgs {
-                platform: platform.map(Into::into),
+                platform,
                 alias: name,
                 depends_on: vec![],
                 description: None,

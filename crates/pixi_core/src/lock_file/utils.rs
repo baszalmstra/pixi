@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use pixi_manifest::{FeaturesExt, PixiPlatformName};
+use pixi_manifest::FeaturesExt;
 use pixi_record::{LockFileResolver, UnresolvedPixiRecord};
+use rattler_conda_types::Platform;
 use rattler_lock::{LockFile, LockFileBuilder, LockedPackage};
 use tokio::sync::Semaphore;
 
@@ -65,7 +66,7 @@ impl<'a> From<&'a LockedPackage> for LockedPackageKind<'a> {
 pub fn filter_lock_file<
     'p,
     'lock,
-    F: FnMut(&Environment<'p>, &PixiPlatformName, LockedPackageKind<'_>) -> bool,
+    F: FnMut(&Environment<'p>, Platform, LockedPackageKind<'_>) -> bool,
 >(
     workspace: &'p Workspace,
     lock_file: &'lock LockFile,
@@ -108,14 +109,10 @@ pub fn filter_lock_file<
         writer.builder.set_pypi_indexes(environment_name, indexes);
 
         for (lock_platform, packages) in environment.packages_by_platform() {
-            // A name that isn't a valid pixi platform name can't be matched, so
-            // keep its packages verbatim (raw name) instead of dropping them.
-            let platform = PixiPlatformName::try_from(lock_platform.name().as_str()).ok();
-            let platform_str = lock_platform.name().to_string();
+            let platform = lock_platform.subdir();
+            let platform_str = platform.to_string();
             for package in packages {
-                if let Some(platform) = &platform
-                    && !should_keep(&project_env, platform, package.into())
-                {
+                if !should_keep(&project_env, platform, package.into()) {
                     continue;
                 }
                 match package {
@@ -126,9 +123,7 @@ pub fn filter_lock_file<
                             // defensively.
                             continue;
                         };
-                        if let UnresolvedPixiRecord::Source(arc) = &mut record
-                            && let Some(platform) = &platform
-                        {
+                        if let UnresolvedPixiRecord::Source(arc) = &mut record {
                             let src = Arc::make_mut(arc);
                             src.build_packages.retain(|p| {
                                 should_keep(

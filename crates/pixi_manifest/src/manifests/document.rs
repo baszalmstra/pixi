@@ -4,14 +4,14 @@ use miette::{Diagnostic, NamedSource};
 use pixi_consts::consts;
 use pixi_pypi_spec::{PixiPypiSpec, PypiPackageName};
 use pixi_spec::PixiSpec;
-use rattler_conda_types::PackageName;
+use rattler_conda_types::{PackageName, Platform};
 use thiserror::Error;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::{
-    FeatureName, ManifestKind, ManifestProvenance, PixiPlatform, PixiPlatformName,
-    PypiDependencyLocation, SpecType, TargetSelector, Task, TomlError,
-    manifests::table_name::TableName, toml::TomlDocument, utils::WithSourceCode,
+    FeatureName, LibCSystemRequirement, ManifestKind, ManifestProvenance, PypiDependencyLocation,
+    SpecType, SystemRequirements, Task, TomlError, manifests::table_name::TableName,
+    toml::TomlDocument, utils::WithSourceCode,
 };
 
 /// Discriminates between a 'pixi.toml' and a 'pyproject.toml' manifest.
@@ -89,6 +89,27 @@ impl ManifestDocument {
         ManifestDocument::PyProjectToml(TomlDocument::new(
             DocumentMut::from_str(empty_content.as_str()).unwrap(),
         ))
+    }
+
+    /// Converts the document into a string with provenance.
+    #[cfg(test)]
+    pub(crate) fn into_source_with_provenance(self) -> crate::WithProvenance<String> {
+        use std::path::PathBuf;
+
+        use crate::{AssociateProvenance, ManifestProvenance};
+
+        let kind = self.kind();
+        let document = match self {
+            ManifestDocument::PyProjectToml(document) => document,
+            ManifestDocument::PixiToml(document) => document,
+            ManifestDocument::MojoProjectToml(document) => document,
+        };
+        document
+            .to_string()
+            .with_provenance(ManifestProvenance::new(
+                PathBuf::from(consts::PYPROJECT_MANIFEST),
+                kind,
+            ))
     }
 
     /// Reads the contents of the manifest from a provenance.
@@ -220,7 +241,7 @@ impl ManifestDocument {
     pub fn remove_pypi_dependency(
         &mut self,
         dep: &PypiPackageName,
-        platform: Option<PixiPlatformName>,
+        platform: Option<Platform>,
         feature_name: &FeatureName,
     ) -> Result<(), TomlError> {
         // For 'pyproject.toml' manifest, try and remove the dependency from native
@@ -242,7 +263,7 @@ impl ManifestDocument {
         let table_name = TableName::new()
             .with_prefix(self.table_prefix())
             .with_feature_name(Some(feature_name))
-            .with_target(platform.map(TargetSelector::Platform))
+            .with_platform(platform.as_ref())
             .with_table(Some(consts::PYPI_DEPENDENCIES));
 
         self.manifest_mut()
@@ -289,13 +310,13 @@ impl ManifestDocument {
         &mut self,
         dep: &PackageName,
         spec_type: SpecType,
-        platform: Option<PixiPlatformName>,
+        platform: Option<Platform>,
         feature_name: &FeatureName,
     ) -> Result<(), TomlError> {
         let table_name = TableName::new()
             .with_prefix(self.table_prefix())
             .with_feature_name(Some(feature_name))
-            .with_target(platform.map(TargetSelector::Platform))
+            .with_platform(platform.as_ref())
             .with_table(Some(spec_type.name()));
 
         self.manifest_mut()
@@ -312,12 +333,12 @@ impl ManifestDocument {
         name: &PackageName,
         spec: &PixiSpec,
         spec_type: SpecType,
-        target: Option<&TargetSelector>,
+        platform: Option<Platform>,
         feature_name: &FeatureName,
     ) -> Result<(), TomlError> {
         let dependency_table = TableName::new()
             .with_prefix(self.table_prefix())
-            .with_target(target.cloned())
+            .with_platform(platform.as_ref())
             .with_feature_name(Some(feature_name))
             .with_table(Some(spec_type.name()));
 
@@ -359,7 +380,7 @@ impl ManifestDocument {
         &mut self,
         requirement: &pep508_rs::Requirement,
         pixi_requirement: Option<&PixiPypiSpec>,
-        target: Option<&TargetSelector>,
+        platform: Option<Platform>,
         feature_name: &FeatureName,
         editable: Option<bool>,
         location: Option<PypiDependencyLocation>,
@@ -372,7 +393,7 @@ impl ManifestDocument {
         //  - When an editable install is requested
         if matches!(self, ManifestDocument::PixiToml(_))
             || matches!(location, Some(PypiDependencyLocation::PixiPypiDependencies))
-            || target.is_some()
+            || platform.is_some()
             || editable.is_some_and(|e| e)
         {
             let mut pypi_requirement = match pixi_requirement {
@@ -385,7 +406,7 @@ impl ManifestDocument {
 
             let dependency_table_name = TableName::new()
                 .with_prefix(self.table_prefix())
-                .with_target(target.cloned())
+                .with_platform(platform.as_ref())
                 .with_feature_name(Some(feature_name))
                 .with_table(Some(consts::PYPI_DEPENDENCIES));
 
@@ -537,7 +558,7 @@ impl ManifestDocument {
     pub fn pypi_dependency_location(
         &self,
         package_name: &PypiPackageName,
-        target: Option<&TargetSelector>,
+        platform: Option<Platform>,
         feature_name: &FeatureName,
     ) -> Option<PypiDependencyLocation> {
         // For both 'pyproject.toml' and 'pixi.toml' manifest,
@@ -545,7 +566,7 @@ impl ManifestDocument {
         let table_name = TableName::new()
             .with_prefix(self.table_prefix())
             .with_feature_name(Some(feature_name))
-            .with_target(target.cloned())
+            .with_platform(platform.as_ref())
             .with_table(Some(consts::PYPI_DEPENDENCIES));
 
         let pypi_dependency_table = self.manifest().get_nested_table(&table_name.as_keys()).ok();
@@ -591,7 +612,7 @@ impl ManifestDocument {
     pub fn remove_task(
         &mut self,
         name: &str,
-        platform: Option<&PixiPlatform>,
+        platform: Option<Platform>,
         feature_name: &FeatureName,
     ) -> Result<(), TomlError> {
         // Get the task table either from the target platform or the default tasks.
@@ -599,7 +620,7 @@ impl ManifestDocument {
         // anyways
         let task_table = TableName::new()
             .with_prefix(self.table_prefix())
-            .with_target(platform.map(PixiPlatform::as_target_selector))
+            .with_platform(platform.as_ref())
             .with_feature_name(Some(feature_name))
             .with_table(Some("tasks"));
 
@@ -611,17 +632,17 @@ impl ManifestDocument {
     }
 
     /// Adds a task to the TOML manifest
-    pub fn add_task<'a>(
-        &'a mut self,
-        name: &'a str,
+    pub fn add_task(
+        &mut self,
+        name: &str,
         task: Task,
-        platform: Option<&'a PixiPlatform>,
-        feature_name: &'a FeatureName,
+        platform: Option<Platform>,
+        feature_name: &FeatureName,
     ) -> Result<(), TomlError> {
         // Get the task table either from the target platform or the default tasks.
         let task_table = TableName::new()
             .with_prefix(self.table_prefix())
-            .with_target(platform.map(PixiPlatform::as_target_selector))
+            .with_platform(platform.as_ref())
             .with_feature_name(Some(feature_name))
             .with_table(Some("tasks"));
 
@@ -701,27 +722,92 @@ impl ManifestDocument {
         Ok(feature_table.remove(feature_name.as_str()).is_some())
     }
 
-    /// Remove the `[system-requirements]` table from the document. When
-    /// `feature_name` is `Some` and refers to a named feature, removes
-    /// `[feature.X.system-requirements]`; otherwise removes the workspace-level
-    /// table. No-op if the table doesn't exist.
-    pub fn remove_system_requirements_section(
+    pub fn add_system_requirements(
         &mut self,
-        feature_name: Option<&FeatureName>,
-    ) -> Result<(), TomlError> {
-        let table_name = TableName::new()
+        system_requirements: &SystemRequirements,
+        feature_name: &FeatureName,
+    ) -> Result<bool, TomlError> {
+        let system_requirements_table = TableName::new()
             .with_prefix(self.table_prefix())
-            .with_feature_name(feature_name);
-        let keys = table_name.as_keys();
-        // Don't materialise the parent table just to remove a child from it: a
-        // missing parent (e.g. `[feature.X]`) means there's nothing to remove.
-        if self.manifest_mut().get_nested_table(&keys).is_err() {
-            return Ok(());
+            .with_feature_name(Some(feature_name))
+            .with_table(Some(consts::SYSTEM_REQUIREMENTS));
+
+        let mut inserted = false;
+
+        if let Some(linux) = &system_requirements.linux {
+            inserted |= self
+                .manifest_mut()
+                .get_or_insert_nested_table(&system_requirements_table.as_keys())?
+                .insert("linux", toml_edit::Item::from(linux.to_string()))
+                .is_some();
         }
-        self.manifest_mut()
-            .get_or_insert_nested_table(&keys)?
-            .remove(consts::SYSTEM_REQUIREMENTS);
-        Ok(())
+
+        if let Some(cuda) = &system_requirements.cuda {
+            inserted |= self
+                .manifest_mut()
+                .get_or_insert_nested_table(&system_requirements_table.as_keys())?
+                .insert("cuda", toml_edit::Item::from(cuda.to_string()))
+                .is_some();
+        }
+
+        if let Some(macos) = &system_requirements.macos {
+            inserted |= self
+                .manifest_mut()
+                .get_or_insert_nested_table(&system_requirements_table.as_keys())?
+                .insert("macos", toml_edit::Item::from(macos.to_string()))
+                .is_some();
+        }
+
+        if let Some(libc) = &system_requirements.libc {
+            match libc {
+                LibCSystemRequirement::GlibC(version) => {
+                    inserted |= self
+                        .manifest_mut()
+                        .get_or_insert_nested_table(&system_requirements_table.as_keys())?
+                        .insert("libc", toml_edit::Item::from(version.to_string()))
+                        .is_some();
+                }
+                LibCSystemRequirement::OtherFamily(family_and_version) => {
+                    if let Some(family) = &family_and_version.family {
+                        let mut libc_table = Table::new();
+                        libc_table.insert("family", toml_edit::value(family));
+                        libc_table.insert(
+                            "version",
+                            toml_edit::Item::from(family_and_version.version.clone().to_string()),
+                        );
+                        inserted |= self
+                            .manifest_mut()
+                            .get_or_insert_nested_table(&system_requirements_table.as_keys())?
+                            .insert(
+                                "libc",
+                                toml_edit::Item::from(libc_table.into_inline_table()),
+                            )
+                            .is_some();
+                    } else {
+                        inserted |= self
+                            .manifest_mut()
+                            .get_or_insert_nested_table(&system_requirements_table.as_keys())?
+                            .insert(
+                                "libc",
+                                toml_edit::Item::from(
+                                    family_and_version.version.clone().to_string(),
+                                ),
+                            )
+                            .is_some();
+                    }
+                }
+            }
+        }
+
+        if let Some(archspec) = &system_requirements.archspec {
+            inserted |= self
+                .manifest_mut()
+                .get_or_insert_nested_table(&system_requirements_table.as_keys())?
+                .insert("archspec", archspec.into())
+                .is_some();
+        }
+
+        Ok(inserted)
     }
 
     /// Sets the name of the project

@@ -4,13 +4,9 @@ use pixi_core::{
     environment::sanity_check_workspace,
     workspace::{PypiDeps, UpdateDeps, WorkspaceMut},
 };
-use pixi_manifest::{
-    DependencyOverwriteBehavior, FeatureName, HasWorkspaceManifest, KnownPreviewFeature, SpecType,
-};
+use pixi_manifest::{DependencyOverwriteBehavior, FeatureName, KnownPreviewFeature, SpecType};
 use pixi_spec::{GitSpec, SourceSpec, Subdirectory};
 use rattler_conda_types::{MatchSpec, PackageName};
-
-use crate::workspace::platforms::resolve_platforms;
 
 mod options;
 
@@ -25,18 +21,10 @@ pub async fn add_conda_dep(
 ) -> miette::Result<(Option<UpdateDeps>, Vec<String>)> {
     sanity_check_workspace(workspace.workspace()).await?;
 
-    // Resolve the requested platforms, accepting bare subdirs as subdir
-    // platforms, and add any that the workspace does not yet declare.
-    let workspace_platforms = workspace
-        .workspace()
-        .workspace_manifest()
-        .workspace
-        .platforms
-        .clone();
-    let pixi_platforms = resolve_platforms(&workspace_platforms, &dep_options.platforms)?;
+    // Add the platform if it is not already present
     workspace
         .manifest()
-        .add_platforms(pixi_platforms.iter(), &FeatureName::DEFAULT)?;
+        .add_platforms(dep_options.platforms.iter(), &FeatureName::DEFAULT)?;
 
     let mut match_specs = IndexMap::default();
     let mut source_specs = IndexMap::default();
@@ -89,7 +77,6 @@ pub async fn add_conda_dep(
     // TODO: add dry_run logic to add
     let dry_run = false;
 
-    let targets = workspace.target_selectors_for_platforms(&dep_options.platforms);
     let (update_deps, skipped) = match Box::pin(workspace.update_dependencies(
         match_specs,
         IndexMap::default(),
@@ -97,7 +84,7 @@ pub async fn add_conda_dep(
         dep_options.no_install,
         &dep_options.lock_file_usage,
         &dep_options.feature,
-        &targets,
+        &dep_options.platforms,
         false,
         dry_run,
         DependencyOverwriteBehavior::OverwriteIfExplicit,
@@ -126,23 +113,14 @@ pub async fn add_pypi_dep(
 ) -> miette::Result<(Option<UpdateDeps>, Vec<String>)> {
     sanity_check_workspace(workspace.workspace()).await?;
 
-    // Resolve the requested platforms, accepting bare subdirs as subdir
-    // platforms, and add any that the workspace does not yet declare.
-    let workspace_platforms = workspace
-        .workspace()
-        .workspace_manifest()
-        .workspace
-        .platforms
-        .clone();
-    let pixi_platforms = resolve_platforms(&workspace_platforms, &options.platforms)?;
+    // Add the platform if it is not already present
     workspace
         .manifest()
-        .add_platforms(pixi_platforms.iter(), &FeatureName::DEFAULT)?;
+        .add_platforms(options.platforms.iter(), &FeatureName::DEFAULT)?;
 
     // TODO: add dry_run logic to add
     let dry_run = false;
 
-    let targets = workspace.target_selectors_for_platforms(&options.platforms);
     let (update_deps, skipped) = match Box::pin(workspace.update_dependencies(
         IndexMap::default(),
         pypi_deps,
@@ -150,7 +128,7 @@ pub async fn add_pypi_dep(
         options.no_install,
         &options.lock_file_usage,
         &options.feature,
-        &targets,
+        &options.platforms,
         editable,
         dry_run,
         DependencyOverwriteBehavior::OverwriteIfExplicit,

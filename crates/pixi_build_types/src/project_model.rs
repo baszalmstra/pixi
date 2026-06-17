@@ -142,7 +142,6 @@ pub enum TargetSelector {
     Linux,
     Win,
     MacOs,
-    Subdir(String),
     Platform(String),
 }
 
@@ -153,7 +152,6 @@ impl Display for TargetSelector {
             TargetSelector::Linux => write!(f, "linux"),
             TargetSelector::Win => write!(f, "win"),
             TargetSelector::MacOs => write!(f, "macos"),
-            TargetSelector::Subdir(s) => write!(f, "{s}"),
             TargetSelector::Platform(p) => write!(f, "{p}"),
         }
     }
@@ -166,37 +164,8 @@ impl FromStr for TargetSelector {
             "unix" => Ok(TargetSelector::Unix),
             "linux" => Ok(TargetSelector::Linux),
             "win" => Ok(TargetSelector::Win),
-            // `macos` (wire form) and `osx` (conda subdir family).
-            "macos" | "osx" => Ok(TargetSelector::MacOs),
-            other => {
-                let other = other.to_string();
-                if rattler_conda_types::Platform::from_str(&other).is_ok() {
-                    Ok(TargetSelector::Subdir(other))
-                } else {
-                    Ok(TargetSelector::Platform(s.to_string()))
-                }
-            }
-        }
-    }
-}
-
-impl Hash for TargetSelector {
-    /// Custom hash implementation that uses discriminant values to keep the
-    /// hash as stable as possible when adding new enum variants.
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self {
-            TargetSelector::Unix => 0u8.hash(state),
-            TargetSelector::Linux => 1u8.hash(state),
-            TargetSelector::Win => 2u8.hash(state),
-            TargetSelector::MacOs => 3u8.hash(state),
-            TargetSelector::Subdir(s) => {
-                4u8.hash(state);
-                s.hash(state);
-            }
-            TargetSelector::Platform(p) => {
-                5u8.hash(state);
-                p.hash(state);
-            }
+            "macos" => Ok(TargetSelector::MacOs),
+            _ => Ok(TargetSelector::Platform(s.to_string())),
         }
     }
 }
@@ -714,6 +683,23 @@ impl Hash for ProjectModel {
             .field("targets", targets)
             .field("version", version)
             .finish(state);
+    }
+}
+
+impl Hash for TargetSelector {
+    /// Custom hash implementation that uses discriminant values to keep the
+    /// hash as stable as possible when adding new enum variants.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            TargetSelector::Unix => 0u8.hash(state),
+            TargetSelector::Linux => 1u8.hash(state),
+            TargetSelector::Win => 2u8.hash(state),
+            TargetSelector::MacOs => 3u8.hash(state),
+            TargetSelector::Platform(p) => {
+                4u8.hash(state);
+                p.hash(state);
+            }
+        }
     }
 }
 

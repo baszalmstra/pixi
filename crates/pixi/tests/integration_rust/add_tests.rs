@@ -113,9 +113,7 @@ async fn add_with_channel() {
     let project = pixi.workspace().unwrap();
     let mut specs = project
         .default_environment()
-        .combined_dependencies(Some(&pixi_manifest::PixiPlatform::from_subdir(
-            Platform::current(),
-        )))
+        .combined_dependencies(Some(Platform::current()))
         .into_specs();
 
     let (name, spec) = specs.next().unwrap();
@@ -179,28 +177,19 @@ async fn add_functionality_union() {
     let project = pixi.workspace().unwrap();
 
     // Should contain all added dependencies
-    let dependencies = project.default_environment().dependencies(
-        SpecType::Run,
-        Some(&pixi_manifest::PixiPlatform::from_subdir(
-            Platform::current(),
-        )),
-    );
+    let dependencies = project
+        .default_environment()
+        .dependencies(SpecType::Run, Some(Platform::current()));
     let (name, _) = dependencies.into_specs().next().unwrap();
     assert_eq!(name, PackageName::try_from("rattler").unwrap());
-    let host_deps = project.default_environment().dependencies(
-        SpecType::Host,
-        Some(&pixi_manifest::PixiPlatform::from_subdir(
-            Platform::current(),
-        )),
-    );
+    let host_deps = project
+        .default_environment()
+        .dependencies(SpecType::Host, Some(Platform::current()));
     let (name, _) = host_deps.into_specs().next().unwrap();
     assert_eq!(name, PackageName::try_from("libcomputer").unwrap());
-    let build_deps = project.default_environment().dependencies(
-        SpecType::Build,
-        Some(&pixi_manifest::PixiPlatform::from_subdir(
-            Platform::current(),
-        )),
-    );
+    let build_deps = project
+        .default_environment()
+        .dependencies(SpecType::Build, Some(Platform::current()));
     let (name, _) = build_deps.into_specs().next().unwrap();
     assert_eq!(name, PackageName::try_from("libidk").unwrap());
 
@@ -246,13 +235,10 @@ async fn add_functionality_os() {
 
     let pixi = PixiControl::new().unwrap();
 
-    pixi.init_with_platforms(vec![
-        Platform::current().to_string(),
-        Platform::LinuxS390X.to_string(),
-    ])
-    .with_local_channel(channel_dir.path())
-    .await
-    .unwrap();
+    pixi.init()
+        .with_local_channel(channel_dir.path())
+        .await
+        .unwrap();
 
     // Add a package
     pixi.add("rattler==1")
@@ -1226,10 +1212,9 @@ preview = ["pixi-build"]
     assert!(result.is_ok());
 
     let workspace = pixi.workspace().unwrap();
-    let linux64 = pixi_manifest::PixiPlatform::from_subdir(Platform::Linux64);
     let deps = workspace
         .default_environment()
-        .combined_dependencies(Some(&linux64));
+        .combined_dependencies(Some(Platform::Linux64));
 
     let (name, spec) = deps
         .into_specs()

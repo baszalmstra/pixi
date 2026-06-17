@@ -8,11 +8,11 @@ use std::{
     str::FromStr,
 };
 
-use crate::PixiPlatform;
 use crate::workspace::JINJA_ENV;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use miette::{Diagnostic, SourceSpan};
+use rattler_conda_types::Platform;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use toml_edit::{Array, InlineTable, Item, Table, Value};
@@ -485,9 +485,8 @@ static DEFAULT_ENV: EnvironmentName = EnvironmentName::Default;
 #[derive(Debug, Clone)]
 pub struct TaskRenderContext<'a> {
     /// The platform for which the task is being rendered.
-    /// This corresponds to the environment's best platform. `None` when no
-    /// workspace platform supports the current system.
-    pub platform: Option<&'a PixiPlatform>,
+    /// This corresponds to the environment's best platform.
+    pub platform: Platform,
 
     /// The name of the environment for which the task is being rendered.
     pub environment_name: &'a EnvironmentName,
@@ -505,7 +504,7 @@ pub struct TaskRenderContext<'a> {
 impl Default for TaskRenderContext<'_> {
     fn default() -> Self {
         Self {
-            platform: None,
+            platform: Platform::current(),
             environment_name: &DEFAULT_ENV,
             manifest_path: None,
             args: None,
@@ -533,32 +532,27 @@ impl<'a> TaskRenderContext<'a> {
         let mut pixi_vars: HashMap<String, minijinja::Value> = HashMap::new();
 
         // Add platform as a string
-        let subdir = self.platform.map(|p| p.subdir());
         pixi_vars.insert(
             "platform".to_string(),
-            minijinja::Value::from(
-                self.platform
-                    .map(|p| p.name().to_string())
-                    .unwrap_or_default(),
-            ),
+            minijinja::Value::from(self.platform.to_string()),
         );
 
         // Add platform detection boolean flags
         pixi_vars.insert(
             "is_win".to_string(),
-            minijinja::Value::from(subdir.is_some_and(|s| s.is_windows())),
+            minijinja::Value::from(self.platform.is_windows()),
         );
         pixi_vars.insert(
             "is_unix".to_string(),
-            minijinja::Value::from(subdir.is_some_and(|s| s.is_unix())),
+            minijinja::Value::from(self.platform.is_unix()),
         );
         pixi_vars.insert(
             "is_linux".to_string(),
-            minijinja::Value::from(subdir.is_some_and(|s| s.is_linux())),
+            minijinja::Value::from(self.platform.is_linux()),
         );
         pixi_vars.insert(
             "is_osx".to_string(),
-            minijinja::Value::from(subdir.is_some_and(|s| s.is_osx())),
+            minijinja::Value::from(self.platform.is_osx()),
         );
 
         // Add environment object
@@ -1098,7 +1092,6 @@ mod tests {
     use insta::assert_snapshot;
     use rattler_conda_types::Platform;
 
-    use crate::PixiPlatform;
     use crate::task::{Alias, Dependency, DependencyArg, Task};
 
     use super::quote;
@@ -1140,13 +1133,9 @@ mod tests {
     fn test_template_string_pixi_vars_always_available() {
         // pixi variables should always be available, even without typed args
         let t = TemplateString::from("echo {{ pixi.platform }}");
-        let current_platform = PixiPlatform::from_subdir(Platform::current());
 
         // No args -> pixi.platform still works
-        let context = TaskRenderContext {
-            platform: Some(&current_platform),
-            ..TaskRenderContext::default()
-        };
+        let context = TaskRenderContext::default();
         let rendered = t
             .render(&context)
             .expect("pixi.platform should be available without args");
@@ -1155,7 +1144,6 @@ mod tests {
         // Free-form args -> pixi.platform still works
         let free_args = ArgValues::FreeFormArgs(vec!["bar".into()]);
         let context = TaskRenderContext {
-            platform: Some(&current_platform),
             args: Some(&free_args),
             ..TaskRenderContext::default()
         };
@@ -1187,10 +1175,9 @@ mod tests {
             args: vec![],
             extra: vec![],
         };
-        let linux64_platform = PixiPlatform::from_subdir(Platform::Linux64);
 
         let context = TaskRenderContext {
-            platform: Some(&linux64_platform),
+            platform: Platform::Linux64,
             environment_name: &env_name,
             manifest_path: Some(&manifest_path),
             args: Some(&args),
@@ -1247,9 +1234,8 @@ mod tests {
             args: vec![],
             extra: vec![],
         };
-        let linux64_platform = PixiPlatform::from_subdir(Platform::Linux64);
         let context = TaskRenderContext {
-            platform: Some(&linux64_platform),
+            platform: Platform::Linux64,
             args: Some(&args),
             ..TaskRenderContext::default()
         };
@@ -1268,9 +1254,8 @@ mod tests {
             }],
             extra: vec![],
         };
-        let linux64_platform = PixiPlatform::from_subdir(Platform::Linux64);
         let context = TaskRenderContext {
-            platform: Some(&linux64_platform),
+            platform: Platform::Linux64,
             args: Some(&args),
             ..TaskRenderContext::default()
         };

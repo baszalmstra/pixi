@@ -7,7 +7,7 @@ mod feature;
 mod manifest;
 mod package;
 mod package_target;
-pub(crate) mod platform;
+mod platform;
 mod preview;
 mod pypi_options;
 pub mod pyproject;
@@ -29,16 +29,14 @@ pub use manifest::ExternalWorkspaceProperties;
 pub use manifest::TomlManifest;
 use miette::LabeledSpan;
 pub use package::{PackageDefaults, PackageError, TomlPackage, WorkspacePackageProperties};
-pub use platform::{InlineVirtualPackage, TomlPlatform, inline_virtual_package_specs};
+pub use platform::TomlPlatform;
 pub use preview::TomlPreview;
 pub use pyproject::PyProjectToml;
+use rattler_conda_types::Platform;
 pub use target::TomlTarget;
 use toml_span::{DeserError, Span};
 pub use workspace::TomlWorkspace;
 
-use rattler_conda_types::Platform;
-
-use crate::PixiPlatform;
 use crate::{TargetSelector, TomlError, error::GenericError, utils::PixiSpanned};
 
 pub trait FromTomlStr {
@@ -66,38 +64,12 @@ enum PlatformSpan {
 fn create_unsupported_selector_warning(
     platform_span: PlatformSpan,
     selector: &PixiSpanned<TargetSelector>,
-    matching_platforms: &[&PixiPlatform],
+    matching_platforms: &[Platform],
 ) -> GenericError {
     let (feature_or_workspace, span) = match platform_span {
         PlatformSpan::Feature(name, span) => (Cow::Owned(format!("feature '{name}'")), span),
         PlatformSpan::Workspace(span) => (Cow::Borrowed("workspace"), span),
     };
-
-    // Build the suggestion list:
-    //   1. workspace platforms whose name resolves under the selector (these are already declared,
-    //      so they are the cheapest fix), and
-    //   2. for family selectors (`unix`, `linux`, `win`, `osx`) the conda subdirs the family
-    //      covers, so the user also sees not-yet-defined options they could add.
-    let mut suggestions: Vec<String> = matching_platforms
-        .iter()
-        .map(|p| p.name().to_string())
-        .collect();
-    if matches!(
-        &selector.value,
-        TargetSelector::Linux | TargetSelector::Unix | TargetSelector::Win | TargetSelector::MacOs
-    ) {
-        for subdir in Platform::all()
-            .filter(|p| selector.value.matches(&PixiPlatform::from_subdir(*p)))
-            .map(|p| p.to_string())
-        {
-            if !suggestions.contains(&subdir) {
-                suggestions.push(subdir);
-            }
-        }
-    }
-    if suggestions.is_empty() {
-        suggestions.push(selector.value.to_string());
-    }
 
     GenericError::new(format!(
         "The target selector '{}' does not match any of the platforms supported by the {}",
@@ -111,15 +83,18 @@ fn create_unsupported_selector_warning(
         )),
         Range::<usize>::from(span),
     ))
-    .with_help(match suggestions.as_slice() {
-        [single] => format!(
-            "Add '{single}' to the supported platforms, using `pixi project platform add {single}`",
+    .with_help(match matching_platforms.len() {
+        0 => unreachable!("There should be at least one matching platform"),
+        1 => format!(
+            "Add {0} to the supported platforms, using `pixi project platform add {0}`",
+            matching_platforms[0]
         ),
-        many => format!(
+        _ => format!(
             "Add one of {0} to the supported platforms, using `pixi project platform add {1}`",
-            many.iter()
+            matching_platforms
+                .iter()
                 .format_with(", ", |p, f| f(&format_args!("'{p}'"))),
-            many[0],
+            matching_platforms[0]
         ),
     })
 }

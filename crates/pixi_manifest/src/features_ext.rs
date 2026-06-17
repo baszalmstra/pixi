@@ -2,15 +2,17 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use indexmap::{IndexMap, IndexSet};
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 use miette::Diagnostic;
 use pixi_spec::{ExcludeNewer, ResolvedExcludeNewer};
 use pixi_spec_containers::DependencyMap;
-use rattler_conda_types::{ChannelConfig, ChannelUrl, NamedChannelOrUrl, ParseChannelError};
+use rattler_conda_types::{
+    ChannelConfig, ChannelUrl, NamedChannelOrUrl, ParseChannelError, Platform,
+};
 
 use crate::{
-    CondaConstraints, CondaDependencies, PixiPlatform, PixiPlatformName, PrioritizedChannel,
-    PyPiDependencies, SpecType,
+    CondaConstraints, CondaDependencies, PrioritizedChannel, PyPiDependencies, SpecType,
+    SystemRequirements,
     dependencies::CondaDevDependencies,
     has_features_iter::HasFeaturesIter,
     has_manifest_ref::HasWorkspaceManifest,
@@ -169,25 +171,36 @@ pub trait FeaturesExt<'source>: HasWorkspaceManifest<'source> + HasFeaturesIter<
     /// Features can specify which platforms they support through the
     /// `platforms` key. If a feature does not specify any platforms the
     /// features defined by the project are used.
-    fn platforms(&self) -> HashSet<PixiPlatformName> {
+    fn platforms(&self) -> HashSet<Platform> {
         self.features()
             .map(|feature| {
-                let it = match &feature.platforms {
-                    Some(platforms) => Either::Left(platforms.iter()),
-                    None => Either::Right(
-                        self.workspace_manifest()
-                            .workspace
-                            .platforms
-                            .iter()
-                            .map(|p| p.name()),
-                    ),
-                };
-                it.cloned().collect::<HashSet<_>>()
+                match &feature.platforms {
+                    Some(platforms) => platforms,
+                    None => &self.workspace_manifest().workspace.platforms,
+                }
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
             })
             .reduce(|accumulated_platforms, feat| {
-                accumulated_platforms.intersection(&feat).cloned().collect()
+                accumulated_platforms.intersection(&feat).copied().collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Returns the system requirements for this collection.
+    ///
+    /// The system requirements of the collection are the union of the system
+    /// requirements of all the features in the collection. If multiple
+    /// features specify a requirement for the same system package, the
+    /// highest is chosen.
+    fn local_system_requirements(&self) -> SystemRequirements {
+        self.features()
+            .map(|feature| &feature.system_requirements)
+            .fold(SystemRequirements::default(), |acc, req| {
+                acc.union(req)
+                    .expect("system requirements should have been validated upfront")
+            })
     }
 
     /// Returns true if any of the features has any reference to a pypi
@@ -202,7 +215,7 @@ pub trait FeaturesExt<'source>: HasWorkspaceManifest<'source> + HasFeaturesIter<
     /// features define a requirement for the same package that both
     /// requirements are returned. The different requirements per package
     /// are sorted in the same order as the features they came from.
-    fn pypi_dependencies<'a>(&'a self, platform: Option<&'a PixiPlatform>) -> PyPiDependencies {
+    fn pypi_dependencies(&self, platform: Option<Platform>) -> PyPiDependencies {
         let deps: Vec<_> = self
             .features()
             .filter(|f| f.supports_platform(platform))
@@ -220,11 +233,7 @@ pub trait FeaturesExt<'source>: HasWorkspaceManifest<'source> + HasFeaturesIter<
     ///
     /// If the `platform` is `None` no platform specific dependencies are taken
     /// into consideration.
-    fn dependencies<'a>(
-        &'a self,
-        kind: SpecType,
-        platform: Option<&'a PixiPlatform>,
-    ) -> CondaDependencies {
+    fn dependencies(&self, kind: SpecType, platform: Option<Platform>) -> CondaDependencies {
         let deps: Vec<_> = self
             .features()
             .filter(|f| f.supports_platform(platform))
@@ -245,10 +254,7 @@ pub trait FeaturesExt<'source>: HasWorkspaceManifest<'source> + HasFeaturesIter<
     ///
     /// If the `platform` is `None` no platform specific dependencies are taken
     /// into consideration.
-    fn combined_dependencies<'a>(
-        &'a self,
-        platform: Option<&'a PixiPlatform>,
-    ) -> CondaDependencies {
+    fn combined_dependencies(&self, platform: Option<Platform>) -> CondaDependencies {
         let deps: Vec<_> = self
             .features()
             .filter(|f| f.supports_platform(platform))
@@ -262,10 +268,7 @@ pub trait FeaturesExt<'source>: HasWorkspaceManifest<'source> + HasFeaturesIter<
     /// Dev dependencies from all features in the group are collected and
     /// merged. If multiple features define the same dev dependency, the
     /// last one wins (later features override earlier ones).
-    fn combined_dev_dependencies<'a>(
-        &'a self,
-        platform: Option<&'a PixiPlatform>,
-    ) -> CondaDevDependencies {
+    fn combined_dev_dependencies(&self, platform: Option<Platform>) -> CondaDevDependencies {
         let deps: Vec<_> = self
             .features()
             .filter(|f| f.supports_platform(platform))
@@ -283,7 +286,7 @@ pub trait FeaturesExt<'source>: HasWorkspaceManifest<'source> + HasFeaturesIter<
     ///
     /// If the `platform` is `None`, no platform specific constraints are taken
     /// into consideration.
-    fn combined_constraints<'a>(&'a self, platform: Option<&'a PixiPlatform>) -> CondaConstraints {
+    fn combined_constraints(&self, platform: Option<Platform>) -> CondaConstraints {
         let constraints: Vec<_> = self
             .features()
             .filter(|f| f.supports_platform(platform))

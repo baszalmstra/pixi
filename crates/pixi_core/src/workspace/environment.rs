@@ -10,18 +10,15 @@ use itertools::Either;
 use pixi_consts::consts;
 use pixi_manifest::{
     self as manifest, EnvironmentName, Feature, FeatureName, FeaturesExt, HasFeaturesIter,
-    HasWorkspaceManifest, PixiPlatform, PixiPlatformName, Task, TaskName, WorkspaceManifest,
+    HasWorkspaceManifest, SystemRequirements, Task, TaskName, WorkspaceManifest,
 };
-use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, Platform};
+use rattler_conda_types::{Arch, ChannelConfig, Platform};
 
 use super::{
     SolveGroup,
     errors::{UnknownTask, UnsupportedPlatformError},
 };
-use crate::{
-    Workspace,
-    workspace::{HasWorkspaceRef, PlatformOverrides, PlatformSource},
-};
+use crate::{Workspace, workspace::HasWorkspaceRef};
 
 /// Describes a single environment from a project manifest. This is used to
 /// describe environments that can be installed and activated.
@@ -105,50 +102,6 @@ impl<'p> Environment<'p> {
             .join(self.environment.name.as_str())
     }
 
-    /// The platforms recorded in this environment's `conda-meta/pixi` marker
-    /// file: `(resolved, minimum_supported)`. Both are `None` when the
-    /// environment isn't installed yet or was written by an older pixi.
-    pub fn installed_platforms(
-        &self,
-    ) -> (
-        Option<crate::environment::PlatformData>,
-        Option<crate::environment::PlatformData>,
-    ) {
-        match crate::environment::read_environment_file(&self.dir()) {
-            Ok(Some(file)) => (file.resolved_platform, file.minimum_supported_platform),
-            _ => (None, None),
-        }
-    }
-
-    /// The name of the workspace platform this environment was last installed
-    /// for, recovered by matching the resolved platform in `conda-meta/pixi`
-    /// (subdir + virtual packages) against the declared platforms. Lets `pixi
-    /// run` default to what the user installed for without a repeated
-    /// `--platform`. `None` when the environment isn't installed or its
-    /// resolved platform is no longer declared.
-    pub fn installed_resolved_platform_name(&self) -> Option<PixiPlatformName> {
-        self.installed_resolved_platform()
-            .map(|platform| platform.name().clone())
-    }
-
-    /// The declared platform [`Self::installed_resolved_platform_name`] refers
-    /// to, returned by reference to avoid a second name-based lookup.
-    pub fn installed_resolved_platform(&self) -> Option<&'p PixiPlatform> {
-        let (resolved, _) = self.installed_platforms();
-        let resolved = resolved?;
-        self.workspace_manifest()
-            .workspace
-            .platforms
-            .iter()
-            .find(|platform| {
-                platform.subdir() == resolved.subdir()
-                    && virtual_packages_match(
-                        platform.declared_virtual_packages(),
-                        resolved.virtual_packages(),
-                    )
-            })
-    }
-
     /// We store a hash of the lock file and all activation env variables in a
     /// file in the cache. The current name is
     /// `activation_environment-name.json`.
@@ -163,93 +116,56 @@ impl<'p> Environment<'p> {
             .join(self.activation_cache_name())
     }
 
-    /// Returns the platform that pixi will install/activate this environment
-    /// for on the current system, or `None` if none of the platforms supported
-    /// by this environment can run here.
-    ///
-    /// The candidate list comes from
-    /// [`manifest::Workspace::possible_pixi_platforms`], which applies the current
-    /// system's subdir (honoring `PIXI_OVERRIDE_PLATFORM`), the standard
-    /// architecture fallbacks (osx-arm64 → osx-64, win-arm64 → win-64,
-    /// win-64 → win-32, single-WASM workspace), and virtual-package
-    /// compatibility with this machine. We then keep only those candidates
-    /// the environment itself declares support for, and return the most
-    /// preferred one.
-    pub fn best_declared_platform(&self) -> Option<&'p PixiPlatform> {
-        let current = self
-            .workspace
-            .host_platform(
-                PlatformSource::Defaults,
-                PlatformOverrides::EnvironmentVariableOverrides,
-            )
-            .subdir();
-        let system_virtual_packages = self
-            .workspace
-            .host_platform(
-                PlatformSource::AutoDetected,
-                PlatformOverrides::EnvironmentVariableOverrides,
-            )
-            .declared_virtual_packages()
-            .to_vec();
-        let env_platforms = self.platforms();
-        self.workspace_manifest()
-            .workspace
-            .possible_pixi_platforms(current, &system_virtual_packages)
-            .into_iter()
-            .find(|p| env_platforms.contains(p.name()))
+    /// Returns the best platform for the current platform & environment.
+    pub fn best_platform(&self) -> Platform {
+        self.best_platform_with_current(Platform::current())
     }
 
-    /// Picks the workspace platform install/solve should target, with
-    /// `override_platform` skipping [`Self::best_declared_platform`]'s host-VP
-    /// filter so `pixi install --platform <name>` can target a subdir
-    /// the local machine can't satisfy. Returns `None` if the override
-    /// names a platform the environment doesn't list; falls through to
-    /// [`Self::best_declared_platform`] when the override is `None`.
-    pub fn named_or_best_declared_platform(
-        &self,
-        override_platform: Option<&PixiPlatformName>,
-    ) -> Option<&'p PixiPlatform> {
-        let Some(name) = override_platform else {
-            return self.best_declared_platform();
-        };
-        let env_platforms = self.platforms();
-        if !env_platforms.is_empty() && !env_platforms.contains(name) {
-            return None;
-        }
-        self.workspace_manifest().workspace.platform_by_name(name)
-    }
+    /// If the PIXI_OVERRIDE_PLATFORM environment variable is set to a valid
+    /// platform string, that platform is used instead.
+    fn best_platform_with_current(&self, current: Platform) -> Platform {
+        let current = std::env::var(consts::PIXI_OVERRIDE_PLATFORM)
+            .map(|val| {
+                val.parse::<Platform>().unwrap_or_else(|_| {
+                    tracing::warn!("Invalid value for PIXI_OVERRIDE_PLATFORM='{val}', ignoring.");
+                    current
+                })
+            })
+            .unwrap_or(current);
 
-    /// Builds an [`UnsupportedPlatformError`] for the case where
-    /// [`Self::best_declared_platform`] has just returned `None`, diagnosing which
-    /// virtual packages declared by the workspace's host-subdir platforms
-    /// this machine doesn't provide so the user can see what to mock.
-    pub fn unsupported_platform_error(&self) -> UnsupportedPlatformError {
-        let current = self
-            .workspace
-            .host_platform(
-                PlatformSource::Defaults,
-                PlatformOverrides::EnvironmentVariableOverrides,
-            )
-            .subdir();
-        let system_virtual_packages = self
-            .workspace
-            .host_platform(
-                PlatformSource::AutoDetected,
-                PlatformOverrides::EnvironmentVariableOverrides,
-            )
-            .declared_virtual_packages()
-            .to_vec();
-        let env_platforms = self.platforms();
-        let unsatisfied_requirements = self
-            .workspace_manifest()
-            .workspace
-            .unsatisfied_platform_requirements(current, &system_virtual_packages, &env_platforms);
-        UnsupportedPlatformError {
-            environments_platforms: env_platforms.into_iter().collect(),
-            environment: self.name().clone(),
-            platform: current,
-            unsatisfied_requirements,
+        // If the current platform is supported, return it.
+        if self.platforms().contains(&current) {
+            return current;
         }
+
+        // If the current platform is osx-arm64 and the environment supports osx-64,
+        // return osx-64.
+        if current.is_osx() && self.platforms().contains(&Platform::Osx64) {
+            return Platform::Osx64;
+        }
+
+        // If the current platform is win-arm64 and the environment supports win-64,
+        // return win-64.
+        if current.is_windows() && self.platforms().contains(&Platform::Win64) {
+            return Platform::Win64;
+        }
+
+        // If the current platform is win-64 and the environment supports win-32,
+        // return win-32.
+        if current == Platform::Win64 && self.platforms().contains(&Platform::Win32) {
+            return Platform::Win32;
+        }
+
+        if self.platforms().len() == 1 {
+            // Take the first platform and see if it is a WASM one.
+            if let Some(platform) = self.platforms().iter().next()
+                && platform.arch() == Some(Arch::Wasm32)
+            {
+                return *platform;
+            }
+        }
+
+        current
     }
 
     /// Emits a one-time warning if this environment requires platform emulation
@@ -264,9 +180,7 @@ impl<'p> Environment<'p> {
         }
 
         let current = Platform::current();
-        let Some(best) = self.best_declared_platform().map(|p| p.subdir()) else {
-            return;
-        };
+        let best = self.best_platform();
         if current == best {
             return;
         }
@@ -324,7 +238,7 @@ impl<'p> Environment<'p> {
     /// returned.
     pub fn tasks(
         &self,
-        platform: Option<&'p PixiPlatform>,
+        platform: Option<Platform>,
     ) -> Result<IndexMap<&'p TaskName, &'p Task>, UnsupportedPlatformError> {
         self.validate_platform_support(platform)?;
         let result = self
@@ -339,7 +253,7 @@ impl<'p> Environment<'p> {
     /// Return all tasks available for the given environment
     /// This will not return task prefixed with _
     pub fn get_filtered_tasks(&self) -> HashSet<TaskName> {
-        self.tasks(self.best_declared_platform())
+        self.tasks(Some(self.best_platform()))
             .into_iter()
             .flat_map(|tasks| {
                 tasks.into_iter().filter_map(|(key, _)| {
@@ -358,13 +272,13 @@ impl<'p> Environment<'p> {
     pub fn task(
         &self,
         name: &TaskName,
-        platform: Option<&'p PixiPlatform>,
+        platform: Option<Platform>,
     ) -> Result<&'p Task, UnknownTask<'_>> {
         match self.tasks(platform).map(|tasks| tasks.get(name).copied()) {
             Err(_) | Ok(None) => Err(UnknownTask {
                 project: self.workspace,
                 environment: self.name().clone(),
-                platform: platform.map(|p| p.name().clone()),
+                platform,
                 task_name: name.clone(),
             }),
             Ok(Some(task)) => Ok(task),
@@ -375,14 +289,13 @@ impl<'p> Environment<'p> {
     ///
     /// Resolves for the best platform target.
     pub fn feature_tasks(&self) -> HashMap<&'p FeatureName, HashMap<&'p TaskName, &'p Task>> {
-        let best = self.best_declared_platform();
         self.features()
             .map(|feature| {
                 (
                     &feature.name,
                     feature
                         .targets
-                        .resolve(best)
+                        .resolve(Some(self.best_platform()))
                         .flat_map(|target| target.tasks.iter())
                         .collect::<HashMap<_, _>>(),
                 )
@@ -390,12 +303,38 @@ impl<'p> Environment<'p> {
             .collect()
     }
 
+    /// Returns the system requirements for this environment.
+    ///
+    /// The system requirements of the environment are the union of the system
+    /// requirements of all the features that make up the environment. If
+    /// multiple features specify a requirement for the same system package,
+    /// the highest is chosen.
+    ///
+    /// If an environment defines a solve group the system requirements of all
+    /// environments in the solve group are also combined. This means that
+    /// if two environments in the same solve group specify conflicting
+    /// system requirements that the highest system requirements are chosen.
+    ///
+    /// This is done to ensure that the requirements of all environments in the
+    /// same solve group are compatible with each other.
+    ///
+    /// If you want to get the system requirements for this environment without
+    /// taking the solve group into account, use the
+    /// [`FeaturesExt::local_system_requirements`] method.
+    pub fn system_requirements(&self) -> SystemRequirements {
+        if let Some(solve_group) = self.solve_group() {
+            solve_group.system_requirements()
+        } else {
+            self.local_system_requirements()
+        }
+    }
+
     /// Returns the activation scripts that should be run when activating this
     /// environment.
     ///
     /// The activation scripts of all features are combined in the order they
     /// are defined for the environment.
-    pub fn activation_scripts(&self, platform: Option<&PixiPlatform>) -> Vec<String> {
+    pub fn activation_scripts(&self, platform: Option<Platform>) -> Vec<String> {
         self.features()
             .filter_map(|f| f.activation_scripts(platform))
             .flatten()
@@ -408,7 +347,7 @@ impl<'p> Environment<'p> {
     ///
     /// The environment variables of all features are combined in the order they
     /// are defined for the environment.
-    pub fn activation_env(&self, platform: Option<&PixiPlatform>) -> IndexMap<String, String> {
+    pub fn activation_env(&self, platform: Option<Platform>) -> IndexMap<String, String> {
         self.features()
             .map(|f| f.activation_env(platform))
             .fold(IndexMap::new(), |mut acc, env| {
@@ -422,16 +361,15 @@ impl<'p> Environment<'p> {
     /// Validates that the given platform is supported by this environment.
     fn validate_platform_support(
         &self,
-        platform: Option<&PixiPlatform>,
+        platform: Option<Platform>,
     ) -> Result<(), UnsupportedPlatformError> {
         if let Some(platform) = platform
-            && !self.platforms().contains(platform.name())
+            && !self.platforms().contains(&platform)
         {
             return Err(UnsupportedPlatformError {
                 environments_platforms: self.platforms().into_iter().collect(),
                 environment: self.name().clone(),
-                platform: platform.subdir(),
-                unsatisfied_requirements: Vec::new(),
+                platform,
             });
         }
 
@@ -442,18 +380,6 @@ impl<'p> Environment<'p> {
     pub fn channel_config(&self) -> ChannelConfig {
         self.workspace().channel_config()
     }
-}
-
-/// Whether two virtual-package lists hold the same entries, order-independent.
-fn virtual_packages_match(a: &[GenericVirtualPackage], b: &[GenericVirtualPackage]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut a: Vec<&GenericVirtualPackage> = a.iter().collect();
-    let mut b: Vec<&GenericVirtualPackage> = b.iter().collect();
-    a.sort();
-    b.sort();
-    a == b
 }
 
 impl<'p> HasWorkspaceRef<'p> for Environment<'p> {
@@ -543,10 +469,7 @@ mod tests {
         let channels = manifest.default_environment().platforms();
         assert_eq!(
             channels,
-            HashSet::from_iter([
-                pixi_manifest::PixiPlatformName::from(Platform::Linux64),
-                pixi_manifest::PixiPlatformName::from(Platform::Osx64),
-            ])
+            HashSet::from_iter([Platform::Linux64, Platform::Osx64,])
         );
     }
 
@@ -579,13 +502,12 @@ mod tests {
 
         assert_eq!(task, "echo default");
 
-        let linux64 = pixi_manifest::PixiPlatform::from_subdir(Platform::Linux64);
         let task_osx = manifest
             .default_environment()
-            .task(&"foo".into(), Some(&linux64))
+            .task(&"foo".into(), Some(Platform::Linux64))
             .unwrap()
             .as_single_command(&pixi_manifest::task::TaskRenderContext {
-                platform: Some(&linux64),
+                platform: Platform::Linux64,
                 ..pixi_manifest::task::TaskRenderContext::default()
             })
             .unwrap()
@@ -593,8 +515,12 @@ mod tests {
 
         assert_eq!(task_osx, "echo linux");
 
-        let osx64 = pixi_manifest::PixiPlatform::from_subdir(Platform::Osx64);
-        assert!(manifest.default_environment().tasks(Some(&osx64)).is_err())
+        assert!(
+            manifest
+                .default_environment()
+                .tasks(Some(Platform::Osx64))
+                .is_err()
+        )
     }
     #[test]
     fn test_filtered_tasks() {
@@ -695,9 +621,8 @@ mod tests {
             foo_env.activation_scripts(None),
             vec!["foo.bat".to_string(), "default.bat".to_string()]
         );
-        let linux64 = pixi_manifest::PixiPlatform::from_subdir(Platform::Linux64);
         assert_eq!(
-            foo_env.activation_scripts(Some(&linux64)),
+            foo_env.activation_scripts(Some(Platform::Linux64)),
             vec!["foo.bat".to_string(), "linux.bat".to_string()]
         );
     }
@@ -736,9 +661,8 @@ mod tests {
                 "DEFAULT_VAR".to_string() => "1".to_string(),
             }
         );
-        let linux64 = pixi_manifest::PixiPlatform::from_subdir(Platform::Linux64);
         assert_eq!(
-            default_env.activation_env(Some(&linux64)),
+            default_env.activation_env(Some(Platform::Linux64)),
             indexmap! {
                 "LINUX_VAR".to_string() => "1".to_string(),
                 "DEFAULT_VAR".to_string() => "1".to_string(),
@@ -1408,8 +1332,7 @@ mod tests {
         .unwrap();
         let env = manifest.default_environment();
         // This should also work on OsxArm64
-        let osx64 = pixi_manifest::PixiPlatform::from_subdir(Platform::Osx64);
-        assert!(env.validate_platform_support(Some(&osx64)).is_ok());
+        assert!(env.validate_platform_support(Some(Platform::Osx64)).is_ok());
 
         let manifest = Workspace::from_str(
             Path::new("pixi.toml"),
@@ -1422,8 +1345,10 @@ mod tests {
         )
         .unwrap();
         let env = manifest.default_environment();
-        let emscripten = pixi_manifest::PixiPlatform::from_subdir(Platform::EmscriptenWasm32);
-        assert!(env.validate_platform_support(Some(&emscripten)).is_ok());
+        assert!(
+            env.validate_platform_support(Some(Platform::EmscriptenWasm32))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1440,11 +1365,10 @@ mod tests {
         )
         .unwrap();
         let env = manifest.default_environment();
-        // Simulate a win-64 current platform via PIXI_OVERRIDE_PLATFORM.
-        let best = temp_env::with_var(consts::PIXI_OVERRIDE_PLATFORM, Some("win-64"), || {
-            env.best_declared_platform().map(|p| p.subdir())
-        });
-        assert_eq!(best, Some(Platform::Win32));
+        assert_eq!(
+            env.best_platform_with_current(Platform::Win64),
+            Platform::Win32
+        );
     }
 
     #[test]
@@ -1638,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_best_declared_platform_override_env_var() {
+    fn test_best_platform_override_env_var() {
         let _lock = ENV_VAR_MUTEX.lock().unwrap();
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1655,22 +1579,12 @@ mod tests {
         let _guard = EnvVarGuard;
 
         let env = workspace.default_environment();
-        // No declared platforms → None even with a valid override.
-        assert!(env.best_declared_platform().is_none());
-        // The host_platform helper honours the override.
-        assert_eq!(
-            workspace
-                .host_platform(
-                    PlatformSource::Defaults,
-                    PlatformOverrides::EnvironmentVariableOverrides
-                )
-                .subdir(),
-            Platform::LinuxAarch64,
-        );
+        let result = env.best_platform();
+        assert_eq!(result, Platform::LinuxAarch64);
     }
 
     #[test]
-    fn test_best_declared_platform_override_invalid_value() {
+    fn test_best_platform_override_invalid_value() {
         let _lock = ENV_VAR_MUTEX.lock().unwrap();
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1687,17 +1601,7 @@ mod tests {
         let _guard = EnvVarGuard;
 
         let env = workspace.default_environment();
-        // No declared platforms → None regardless of the (invalid) override.
-        assert!(env.best_declared_platform().is_none());
-        // The host_platform helper still falls back to Platform::current() on invalid values.
-        assert_eq!(
-            workspace
-                .host_platform(
-                    PlatformSource::Defaults,
-                    PlatformOverrides::EnvironmentVariableOverrides
-                )
-                .subdir(),
-            Platform::current(),
-        );
+        let result = env.best_platform();
+        assert_eq!(result, Platform::current());
     }
 }

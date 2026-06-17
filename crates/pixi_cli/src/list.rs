@@ -11,7 +11,6 @@ use pixi_api::{
 };
 use pixi_consts::consts;
 use pixi_core::WorkspaceLocator;
-use pixi_manifest::PixiPlatformName;
 use rattler_conda_types::Platform;
 use serde::Serialize;
 
@@ -164,11 +163,9 @@ pub struct Args {
     #[arg()]
     pub regex: Option<String>,
 
-    /// The platform to list packages for. Defaults to the platform best
-    /// matching this machine. Accepts a workspace platform name; a bare
-    /// conda subdir (e.g. `linux-64`) is also accepted.
+    /// The platform to list packages for. Defaults to the current platform.
     #[arg(long)]
-    pub platform: Option<PixiPlatformName>,
+    pub platform: Option<Platform>,
 
     /// Whether to output in json format
     #[arg(long, alias = "json-pretty")]
@@ -209,13 +206,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     let lock_file_usage = args.lock_file_update_config.lock_file_usage()?;
     let environment = workspace.environment_from_name_or_env_var(args.environment.clone())?;
-    let platform_display: String = match &args.platform {
-        Some(p) => p.to_string(),
-        None => environment
-            .best_declared_platform()
-            .map(|p| p.name().to_string())
-            .unwrap_or_else(|| Platform::current().to_string()),
-    };
+    let platform = args.platform.unwrap_or_else(|| environment.best_platform());
 
     let workspace_ctx = WorkspaceContext::new(CliInterface {}, workspace.clone());
     let mut packages_to_output = workspace_ctx
@@ -246,7 +237,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         miette::bail!(
             "No packages found in '{}' environment for '{}' platform.",
             environment.name().fancy_display(),
-            consts::ENVIRONMENT_STYLE.apply_to(&platform_display),
+            consts::ENVIRONMENT_STYLE.apply_to(platform),
         );
     }
 
@@ -257,10 +248,6 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     } else {
         if !environment.is_default() {
             eprintln!("Environment: {}", environment.name().fancy_display());
-        }
-        if let Some(platform) = crate::shared::platform_note::installed_platform_note(&environment)
-        {
-            eprintln!("Installed for: {platform}");
         }
 
         // print packages as table

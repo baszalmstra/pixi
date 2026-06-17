@@ -1,7 +1,6 @@
 mod install_subset;
 mod outdated;
 mod package_identifier;
-mod platform_rename;
 mod platform_setup;
 mod records_by_name;
 mod reporter;

@@ -6,13 +6,11 @@ use pixi_core::{
     UpdateLockFileOptions, WorkspaceLocator,
     environment::{InstallFilter, get_update_lock_file_and_prefixes},
     lock_file::{LockFileDerivedData, PackageFilterNames, ReinstallPackages, UpdateMode},
-    workspace::{HasWorkspaceRef, PlatformOverrides, PlatformSource},
 };
-use pixi_manifest::PixiPlatformName;
+use pixi_manifest::FeaturesExt;
 use std::fmt::Write;
 
 use crate::cli_config::WorkspaceConfig;
-use crate::shared::install_platform::resolve_install_platform;
 
 /// Install an environment, both updating the lock file and installing the
 /// environment.
@@ -55,11 +53,6 @@ pub struct Args {
     #[arg(long, short, conflicts_with = "environment")]
     pub all: bool,
 
-    /// Install for the given platform; a warning is printed when it
-    /// doesn't run on this machine.
-    #[arg(long, short)]
-    pub platform: Option<PixiPlatformName>,
-
     /// Skip installation of specific packages present in the lock file. This
     /// uses a soft exclusion: the package will be skipped but its dependencies
     /// are installed.
@@ -92,8 +85,6 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         workspace = workspace.with_backend_override(backend_override);
     }
 
-    let target_platform = resolve_install_platform(&workspace, args.platform.as_ref())?;
-
     // Install either:
     //
     // 1. specific environments
@@ -123,7 +114,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     if args.all {
         let (supported, skipped): (Vec<_>, Vec<_>) = environments
             .into_iter()
-            .partition(|env| env.best_declared_platform().is_some());
+            .partition(|env| env.platforms().contains(&env.best_platform()));
 
         if !skipped.is_empty() {
             tracing::warn!(
@@ -147,7 +138,6 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     // Update the prefixes by installing all packages
     let (LockFileDerivedData { lock_file, .. }, _) = get_update_lock_file_and_prefixes(
         &environments,
-        target_platform.as_ref(),
         Some(pixi_reporters::TopLevelProgress::from_global()),
         UpdateMode::Revalidate,
         UpdateLockFileOptions {
@@ -177,17 +167,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         .expect("failed to write into message buffer");
 
         if skip_opts {
-            // Use the platform the install actually targeted (honoring a
-            // `--platform` override), falling back to the host subdir. Unlike
-            // `best_declared_platform()`, this never panics when the chosen platform is
-            // not runnable on the current host (e.g. a cross-target install).
-            let host_platform = environment.workspace().host_platform(
-                PlatformSource::Defaults,
-                PlatformOverrides::EnvironmentVariableOverrides,
-            );
-            let platform = environment
-                .named_or_best_declared_platform(target_platform.as_ref())
-                .unwrap_or(&host_platform);
+            let platform = environment.best_platform();
             let locked_env = lock_file
                 .environment(environment.name().as_str())
                 .expect("lock file is missing installed environment");
@@ -218,8 +198,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 );
             }
 
-            if num_skipped > 0 {
-                if num_skipped < SKIP_CUTOFF {
+            if !num_skipped > 0 {
+                if num_skipped > 0 && num_skipped < SKIP_CUTOFF {
                     let mut skipped_packages_vec: Vec<_> = names.ignored.into_iter().collect();
                     skipped_packages_vec.sort();
 
@@ -229,15 +209,24 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                         skipped_packages_vec.join("', '")
                     )
                     .expect("failed to write into message buffer");
-                } else if matched.is_empty() {
-                    write!(&mut message, " excluding {num_skipped} other packages")
-                        .expect("failed to write into message buffer");
+                } else if num_skipped > 0 {
+                    let num_matched = matched.len();
+                    if num_matched > 0 {
+                        write!(
+                            &mut message,
+                            " excluding '{}' and {} other packages",
+                            matched.into_iter().join("', '"),
+                            num_skipped
+                        )
+                        .expect("failed to write into message buffer")
+                    } else {
+                        write!(&mut message, " excluding {num_skipped} other packages")
+                            .expect("failed to write into message buffer")
+                    }
                 } else {
                     write!(
                         &mut message,
-                        " excluding '{}' and {} other packages",
-                        matched.into_iter().join("', '"),
-                        num_skipped
+                        " no packages were skipped (check if cli args were correct)"
                     )
                     .expect("failed to write into message buffer");
                 }

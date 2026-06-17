@@ -28,9 +28,10 @@ use once_cell::sync::OnceCell;
 use pixi_command_dispatcher::executor::CancellationAwareFutures;
 use pixi_command_dispatcher::{CommandDispatcher, CommandDispatcherError};
 use pixi_consts::consts;
-use pixi_manifest::{EnvironmentName, FeaturesExt, PixiPlatformName};
+use pixi_manifest::{EnvironmentName, FeaturesExt};
 use pixi_record::LockFileResolver;
 use pixi_uv_context::UvResolutionContext;
+use rattler_conda_types::Platform;
 use rattler_lock::{LockFile, LockedPackage};
 
 /// Cache for build-related resources that can be shared between
@@ -47,11 +48,11 @@ pub struct PypiEnvironmentBuildCache {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BuildCacheKey {
     pub environment: EnvironmentName,
-    pub platform: PixiPlatformName,
+    pub platform: Platform,
 }
 
 impl BuildCacheKey {
-    pub fn new(environment: EnvironmentName, platform: PixiPlatformName) -> Self {
+    pub fn new(environment: EnvironmentName, platform: Platform) -> Self {
         Self {
             environment,
             platform,
@@ -67,11 +68,11 @@ impl BuildCacheKey {
 pub struct OutdatedEnvironments<'p> {
     /// The conda environments that are considered out of date with the
     /// lock file.
-    pub conda: HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
+    pub conda: HashMap<Environment<'p>, HashSet<Platform>>,
 
     /// The pypi environments that are considered out of date with the
     /// lock file.
-    pub pypi: HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
+    pub pypi: HashMap<Environment<'p>, HashSet<Platform>>,
 
     /// Records the environments for which the lock file content should also be
     /// discarded. This is the case for instance when the order of the
@@ -97,7 +98,7 @@ pub struct OutdatedEnvironments<'p> {
 
     /// Locked pypi records with metadata, resolved during the satisfiability
     /// check. Forwarded to the update path to avoid re-reading source trees.
-    pub locked_pypi_records: HashMap<(Environment<'p>, PixiPlatformName), LockedPypiRecordsByName>,
+    pub locked_pypi_records: HashMap<(Environment<'p>, Platform), LockedPypiRecordsByName>,
 }
 
 /// A struct that stores whether the locked content of certain environments
@@ -166,7 +167,7 @@ impl<'p> OutdatedEnvironments<'p> {
                     platforms
                         .iter()
                         .filter(|p| env_platforms.contains(p))
-                        .cloned(),
+                        .copied(),
                 );
             }
         }
@@ -178,7 +179,7 @@ impl<'p> OutdatedEnvironments<'p> {
                     platforms
                         .iter()
                         .filter(|p| env_platforms.contains(p))
-                        .cloned(),
+                        .copied(),
                 );
             }
         }
@@ -189,7 +190,7 @@ impl<'p> OutdatedEnvironments<'p> {
             outdated_pypi
                 .entry(environment.clone())
                 .or_default()
-                .extend(platforms.iter().cloned());
+                .extend(platforms.iter().copied());
         }
 
         // Find environments that are present in the lock-file but no longer exist in
@@ -226,8 +227,8 @@ impl<'p> OutdatedEnvironments<'p> {
 
 #[derive(Debug, Default)]
 struct UnsatisfiableTargets<'p> {
-    outdated_conda: HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
-    outdated_pypi: HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
+    outdated_conda: HashMap<Environment<'p>, HashSet<Platform>>,
+    outdated_pypi: HashMap<Environment<'p>, HashSet<Platform>>,
     disregard_locked_content: DisregardLockedContent<'p>,
 }
 
@@ -247,7 +248,7 @@ async fn find_unsatisfiable_targets<'p>(
     OnceCell<UvResolutionContext>,
     HashMap<BuildCacheKey, Arc<PypiEnvironmentBuildCache>>,
     HashMap<PathBuf, pypi_metadata::LocalPackageMetadata>,
-    HashMap<(Environment<'p>, PixiPlatformName), LockedPypiRecordsByName>,
+    HashMap<(Environment<'p>, Platform), LockedPypiRecordsByName>,
 ) {
     let mut verified_environments = HashMap::new();
     let mut locked_pypi_by_env_platform = HashMap::new();
@@ -279,7 +280,7 @@ async fn find_unsatisfiable_targets<'p>(
                 .outdated_conda
                 .entry(environment.clone())
                 .or_default()
-                .extend(platforms.iter().cloned());
+                .extend(platforms.iter().copied());
 
             continue;
         };
@@ -295,7 +296,7 @@ async fn find_unsatisfiable_targets<'p>(
                 .outdated_conda
                 .entry(environment.clone())
                 .or_default()
-                .extend(platforms.iter().cloned());
+                .extend(platforms.iter().copied());
 
             match unsat {
                 EnvironmentUnsat::AdditionalPlatformsInLockFile(platforms) => {
@@ -320,12 +321,8 @@ async fn find_unsatisfiable_targets<'p>(
                 | EnvironmentUnsat::InvalidChannel(_)
                 | EnvironmentUnsat::ChannelPriorityMismatch { .. }
                 | EnvironmentUnsat::SolveStrategyMismatch { .. }
-                | EnvironmentUnsat::ExcludeNewerMismatch(..)
-                | EnvironmentUnsat::PlatformDefinitionChanged(_) => {
+                | EnvironmentUnsat::ExcludeNewerMismatch(..) => {
                     // We cannot trust any of the locked contents.
-                    // For PlatformDefinitionChanged: the records under the
-                    // affected platform were solved under different subdir/VP
-                    // assumptions and must be re-derived from scratch.
                     unsatisfiable_targets
                         .disregard_locked_content
                         .conda
@@ -365,7 +362,7 @@ async fn find_unsatisfiable_targets<'p>(
             let ctx = VerifySatisfiabilityContext {
                 environment: &environment,
                 command_dispatcher: command_dispatcher.clone(),
-                platform: platform.clone(),
+                platform,
                 project_root: project.root(),
                 uv_context: &uv_context,
                 config: project_config,
@@ -387,7 +384,7 @@ async fn find_unsatisfiable_targets<'p>(
                     match outcome {
                         Ok((verified_env, locked_pypi)) => {
                             verified_environments
-                                .insert((environment.clone(), platform.clone()), verified_env);
+                                .insert((environment.clone(), platform), verified_env);
                             locked_pypi_by_env_platform
                                 .insert((environment.clone(), platform), locked_pypi);
                         }
@@ -434,7 +431,7 @@ async fn find_unsatisfiable_targets<'p>(
         'platform: for platform in solve_group.platforms() {
             let mut envs = Vec::with_capacity(solve_group.environments().len());
             for env in solve_group.environments() {
-                if let Some(verified_env) = verified_environments.remove(&(env, platform.clone())) {
+                if let Some(verified_env) = verified_environments.remove(&(env, platform)) {
                     envs.push(verified_env);
                 } else {
                     // If the environment is not verified, the solve group will already be outdated.
@@ -456,7 +453,7 @@ async fn find_unsatisfiable_targets<'p>(
                     .outdated_conda
                     .entry(env.clone())
                     .or_default()
-                    .insert(platform.clone());
+                    .insert(platform);
             }
         }
     }
@@ -495,11 +492,11 @@ async fn find_unsatisfiable_targets<'p>(
 /// lock file all the environments in the same solve-group have to be
 /// recomputed.
 fn map_outdated_targets_to_solve_groups<'p>(
-    outdated_conda: &HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
-    outdated_pypi: &HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
+    outdated_conda: &HashMap<Environment<'p>, HashSet<Platform>>,
+    outdated_pypi: &HashMap<Environment<'p>, HashSet<Platform>>,
 ) -> (
-    HashMap<SolveGroup<'p>, HashSet<PixiPlatformName>>,
-    HashMap<SolveGroup<'p>, HashSet<PixiPlatformName>>,
+    HashMap<SolveGroup<'p>, HashSet<Platform>>,
+    HashMap<SolveGroup<'p>, HashSet<Platform>>,
 ) {
     let mut conda_solve_groups_out_of_date = HashMap::new();
     let mut pypi_solve_groups_out_of_date = HashMap::new();
@@ -512,7 +509,7 @@ fn map_outdated_targets_to_solve_groups<'p>(
         conda_solve_groups_out_of_date
             .entry(solve_group)
             .or_insert_with(HashSet::new)
-            .extend(platforms.iter().cloned());
+            .extend(platforms.iter().copied());
     }
 
     // For each environment that is out of date, add it to the solve group.
@@ -523,7 +520,7 @@ fn map_outdated_targets_to_solve_groups<'p>(
         pypi_solve_groups_out_of_date
             .entry(solve_group)
             .or_insert_with(HashSet::new)
-            .extend(platforms.iter().cloned());
+            .extend(platforms.iter().copied());
     }
 
     (
@@ -542,9 +539,9 @@ fn map_outdated_targets_to_solve_groups<'p>(
 fn find_inconsistent_solve_groups<'p>(
     project: &'p Workspace,
     lock_file: &LockFile,
-    outdated_conda: &HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
-    conda_solve_groups_out_of_date: &mut HashMap<SolveGroup<'p>, HashSet<PixiPlatformName>>,
-    pypi_solve_groups_out_of_date: &mut HashMap<SolveGroup<'p>, HashSet<PixiPlatformName>>,
+    outdated_conda: &HashMap<Environment<'p>, HashSet<Platform>>,
+    conda_solve_groups_out_of_date: &mut HashMap<SolveGroup<'p>, HashSet<Platform>>,
+    pypi_solve_groups_out_of_date: &mut HashMap<SolveGroup<'p>, HashSet<Platform>>,
 ) {
     let solve_groups = project.solve_groups();
     let solve_groups_and_platforms = solve_groups.iter().flat_map(|solve_group| {
@@ -632,19 +629,19 @@ fn find_inconsistent_solve_groups<'p>(
             tracing::info!(
                 "the locked conda packages in solve group {} are not consistent for all environments for platform {}",
                 consts::SOLVE_GROUP_STYLE.apply_to(solve_group.name()),
-                consts::PLATFORM_STYLE.apply_to(&platform)
+                consts::PLATFORM_STYLE.apply_to(platform)
             );
             conda_solve_groups_out_of_date
                 .entry(solve_group.clone())
                 .or_default()
-                .insert(platform.clone());
+                .insert(platform);
         }
 
         if pypi_package_mismatch && !conda_package_mismatch {
             tracing::info!(
                 "the locked pypi packages in solve group {} are not consistent for all environments for platform {}",
                 consts::SOLVE_GROUP_STYLE.apply_to(solve_group.name()),
-                consts::PLATFORM_STYLE.apply_to(&platform)
+                consts::PLATFORM_STYLE.apply_to(platform)
             );
             pypi_solve_groups_out_of_date
                 .entry(solve_group.clone())

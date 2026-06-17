@@ -7,12 +7,12 @@ use itertools::Either;
 use ordermap::OrderSet;
 use pixi_consts::consts;
 use pixi_manifest::{
-    EnvironmentName, Feature, HasFeaturesIter, HasWorkspaceManifest, PixiPlatform,
+    EnvironmentName, Feature, HasFeaturesIter, HasWorkspaceManifest, SystemRequirements,
     WorkspaceManifest,
 };
 use pixi_spec::SourceLocationSpec;
 use pixi_utils::prefix::Prefix;
-use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, PackageName};
+use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, PackageName, Platform};
 
 use crate::{
     Workspace,
@@ -103,10 +103,18 @@ impl<'p> GroupedEnvironment<'p> {
             }
         }
     }
-    /// Returns the virtual packages from the group, sourced from the
-    /// platform's declared virtual packages with default fillers.
-    pub fn virtual_packages(&self, platform: &PixiPlatform) -> Vec<GenericVirtualPackage> {
-        get_minimal_virtual_packages(platform)
+    /// Returns the system requirements of the group.
+    pub(crate) fn system_requirements(&self) -> SystemRequirements {
+        match self {
+            GroupedEnvironment::Group(group) => group.system_requirements(),
+            GroupedEnvironment::Environment(env) => env.system_requirements(),
+        }
+    }
+
+    /// Returns the virtual packages from the group based on the system
+    /// requirements.
+    pub fn virtual_packages(&self, platform: Platform) -> Vec<GenericVirtualPackage> {
+        get_minimal_virtual_packages(platform, &self.system_requirements())
             .into_iter()
             .map(GenericVirtualPackage::from)
             .collect()
@@ -124,7 +132,7 @@ impl<'p> GroupedEnvironment<'p> {
     /// last one wins (later features override earlier ones).
     pub fn combined_dev_dependencies(
         &self,
-        platform: Option<&PixiPlatform>,
+        platform: Option<Platform>,
     ) -> IndexMap<PackageName, OrderSet<SourceLocationSpec>> {
         let mut result = IndexMap::new();
         for feature in self.features().rev() {

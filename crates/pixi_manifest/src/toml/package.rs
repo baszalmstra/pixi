@@ -629,7 +629,7 @@ impl TomlPackage {
 /// jinja context.
 fn target_selector_expression(selector: &TargetSelector) -> ConditionalExpression {
     match selector {
-        TargetSelector::Platform(_) | TargetSelector::Subdir(_) => {
+        TargetSelector::Platform(_) => {
             ConditionalExpression::new(format!("host_platform == '{selector}'"))
         }
         other => ConditionalExpression::new(other.to_string()),

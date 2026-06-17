@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use indicatif::ProgressBar;
 use pixi_consts::consts;
-use pixi_manifest::PixiPlatformName;
+use rattler_conda_types::Platform;
 
 use crate::workspace::grouped_environment::GroupedEnvironmentName;
 
@@ -15,7 +15,7 @@ pub(crate) struct SolveProgressBar {
 impl SolveProgressBar {
     pub(crate) fn new(
         pb: ProgressBar,
-        platform: PixiPlatformName,
+        platform: Platform,
         environment_name: GroupedEnvironmentName,
     ) -> Self {
         let name_and_platform = format!(

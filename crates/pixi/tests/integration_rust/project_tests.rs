@@ -91,10 +91,9 @@ async fn parse_project() {
     setup_tracing();
 
     fn dependency_names(project: &Workspace, platform: Platform) -> Vec<String> {
-        let pp = pixi_manifest::PixiPlatform::from_subdir(platform);
         project
             .default_environment()
-            .combined_dependencies(Some(&pp))
+            .combined_dependencies(Some(platform))
             .iter()
             .map(|dep| dep.0.as_normalized().to_string())
             .collect()

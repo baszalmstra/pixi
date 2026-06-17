@@ -16,8 +16,8 @@
 use pixi_command_dispatcher::{
     BuildEnvironment, CommandDispatcher, EnvironmentSpec, WorkspaceEnvRef,
 };
-use pixi_manifest::{FeaturesExt, PixiPlatform};
-use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, ParseChannelError};
+use pixi_manifest::FeaturesExt;
+use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, ParseChannelError, Platform};
 use thiserror::Error;
 
 use crate::workspace::{Environment, HasWorkspaceRef, errors::VariantsError};
@@ -58,10 +58,9 @@ pub(crate) enum PlatformSetupError {
 /// caches.
 pub(crate) fn build_platform_setup(
     environment: &Environment<'_>,
-    platform: &PixiPlatform,
+    platform: Platform,
     command_dispatcher: &CommandDispatcher,
 ) -> Result<PlatformSetup, PlatformSetupError> {
-    let subdir = platform.subdir();
     let channel_config = environment.workspace().channel_config();
     let channels = environment
         .channels()
@@ -76,15 +75,15 @@ pub(crate) fn build_platform_setup(
         .map(GenericVirtualPackage::from)
         .collect();
     let build_environment = BuildEnvironment {
-        host_platform: subdir,
-        build_platform: subdir,
+        host_platform: platform,
+        build_platform: platform,
         host_virtual_packages: virtual_packages.clone(),
         build_virtual_packages: virtual_packages.clone(),
     };
 
     let workspace_env_ref = command_dispatcher.workspace_env_registry().allocate(
         environment.name().as_str().to_string(),
-        platform.name().to_string(),
+        platform,
         EnvironmentSpec {
             channels,
             build_environment,

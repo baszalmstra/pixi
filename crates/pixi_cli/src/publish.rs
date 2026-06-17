@@ -563,12 +563,10 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         )
         .finish();
 
-    let target_pixi_platform = pixi_manifest::PixiPlatform::from_subdir(args.target_platform);
-    let build_pixi_platform = pixi_manifest::PixiPlatform::from_subdir(args.build_platform);
     let VariantConfig {
         mut variant_configuration,
         mut variant_files,
-    } = workspace.variants(&target_pixi_platform)?;
+    } = workspace.variants(args.target_platform)?;
 
     // Overlay CLI `--variant KEY=VAL[,VAL...]` overrides on top of the workspace
     // variants. Multiple `--variant` flags with the same key accumulate values,
@@ -585,14 +583,14 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     let build_virtual_packages: Vec<GenericVirtualPackage> = workspace
         .default_environment()
-        .virtual_packages(&build_pixi_platform)
+        .virtual_packages(args.build_platform)
         .into_iter()
         .map(GenericVirtualPackage::from)
         .collect();
 
     let host_virtual_packages: Vec<GenericVirtualPackage> = workspace
         .default_environment()
-        .virtual_packages(&target_pixi_platform)
+        .virtual_packages(args.target_platform)
         .into_iter()
         .map(GenericVirtualPackage::from)
         .collect();

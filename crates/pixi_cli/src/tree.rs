@@ -9,13 +9,12 @@ use console::Color;
 use fancy_display::FancyDisplay;
 use miette::WrapErr;
 use pep508_rs::{ExtraName, MarkerEnvironment, Requirement};
-use pixi_api::workspace::platforms::resolve_platforms;
 use pixi_core::workspace::Environment;
 use pixi_core::{WorkspaceLocator, lock_file::UpdateLockFileOptions};
-use pixi_manifest::{FeaturesExt, HasWorkspaceManifest as _, PixiPlatform, PixiPlatformName};
+use pixi_manifest::FeaturesExt;
 use pixi_uv_conversions::to_marker_environment;
 use pypi_modifiers::pypi_marker_env::determine_marker_environment;
-use rattler_conda_types::PackageName;
+use rattler_conda_types::{PackageName, Platform};
 use rattler_lock::{LockedPackage, PypiPackageData};
 use std::collections::HashMap;
 
@@ -40,11 +39,9 @@ pub struct Args {
     #[arg()]
     pub regex: Option<String>,
 
-    /// The platform to list packages for. Defaults to the platform best
-    /// matching this machine. Accepts a workspace platform name; a bare
-    /// conda subdir (e.g. `linux-64`) is also accepted.
+    /// The platform to list packages for. Defaults to the current platform.
     #[arg(long, short)]
-    pub platform: Option<PixiPlatformName>,
+    pub platform: Option<Platform>,
 
     #[clap(flatten)]
     pub workspace_config: WorkspaceConfig,
@@ -90,42 +87,20 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         .0
         .into_lock_file();
 
-    let workspace_platforms = (&workspace)
-        .workspace_manifest()
-        .workspace
-        .platforms
-        .clone();
-    let platform = match args.platform {
-        Some(name) => resolve_platforms(&workspace_platforms, std::slice::from_ref(&name))?
-            .into_iter()
-            .next()
-            .expect("resolve_platforms preserves length"),
-        None => environment
-            .best_declared_platform()
-            .cloned()
-            .ok_or_else(|| {
-                miette::miette!(
-                    "no platform supported by environment '{}' matches the current system",
-                    environment.name()
-                )
-            })?,
-    };
+    let platform = args.platform.unwrap_or_else(|| environment.best_platform());
     let locked_deps = lock_file
         .environment(environment.name().as_str())
         .and_then(|env| {
-            let p = lock_file.platform(platform.name().as_str())?;
+            let p = lock_file.platform(&platform.to_string())?;
             env.packages(p).map(Vec::from_iter)
         })
         .unwrap_or_default();
 
-    let dep_map = DependencyMapBuilder::new(&environment, &platform, &locked_deps).build();
+    let dep_map = DependencyMapBuilder::new(&environment, platform, &locked_deps).build();
     let direct_deps = direct_dependencies(&environment, &platform, &dep_map);
 
     if !environment.is_default() {
         eprintln!("Environment: {}", environment.name().fancy_display());
-    }
-    if let Some(platform) = crate::shared::platform_note::installed_platform_note(&environment) {
-        eprintln!("Installed for: {platform}");
     }
 
     let stdout = std::io::stdout();
@@ -155,7 +130,7 @@ pub(crate) struct PypiExtrasResolver {
 impl PypiExtrasResolver {
     pub fn new(
         environment: &Environment<'_>,
-        platform: &PixiPlatform,
+        platform: Platform,
         locked_deps: &[&LockedPackage],
     ) -> Self {
         let marker_env = Self::build_marker_env(locked_deps, platform);
@@ -199,7 +174,7 @@ impl PypiExtrasResolver {
 
     fn build_marker_env(
         locked_deps: &[&LockedPackage],
-        platform: &PixiPlatform,
+        platform: Platform,
     ) -> Option<MarkerEnvironment> {
         let python_record = locked_deps
             .iter()
@@ -212,7 +187,7 @@ impl PypiExtrasResolver {
 
     fn propagate(
         environment: &Environment<'_>,
-        platform: &PixiPlatform,
+        platform: Platform,
         locked_deps: &[&LockedPackage],
         marker_env: Option<&MarkerEnvironment>,
     ) -> HashMap<String, Vec<ExtraName>> {
@@ -287,7 +262,7 @@ pub(crate) struct DependencyMapBuilder<'a> {
 impl<'a> DependencyMapBuilder<'a> {
     pub fn new(
         environment: &Environment<'_>,
-        platform: &PixiPlatform,
+        platform: Platform,
         locked_deps: &'a [&'a LockedPackage],
     ) -> Self {
         Self {
@@ -400,11 +375,11 @@ impl<'a> DependencyMapBuilder<'a> {
 /// Extract the direct Conda and PyPI dependencies from the environment
 pub fn direct_dependencies(
     environment: &Environment<'_>,
-    platform: &PixiPlatform,
+    platform: &Platform,
     dep_map: &HashMap<String, Package>,
 ) -> HashSet<String> {
     let mut project_dependency_names = environment
-        .combined_dependencies(Some(platform))
+        .combined_dependencies(Some(*platform))
         .names()
         .filter(|p| {
             if let Some(value) = dep_map.get(p.as_source()) {
@@ -418,7 +393,7 @@ pub fn direct_dependencies(
 
     project_dependency_names.extend(
         environment
-            .pypi_dependencies(Some(platform))
+            .pypi_dependencies(Some(*platform))
             .into_iter()
             .filter(|(name, _)| {
                 if let Some(value) = dep_map.get(&*name.as_normalized().as_dist_info_name()) {
@@ -436,7 +411,6 @@ pub fn direct_dependencies(
 mod tests {
     use super::*;
     use pixi_core::Workspace;
-    use rattler_conda_types::Platform;
     use rattler_lock::LockFile;
 
     /// Render the PyPI subset of an example workspace through the production
@@ -446,29 +420,22 @@ mod tests {
 
         let workspace = Workspace::from_path(manifest).unwrap();
         let environment = workspace.default_environment();
-        let pixi_platform = (&workspace)
-            .workspace_manifest()
-            .workspace
-            .platforms
-            .iter()
-            .find(|p| p.subdir() == platform)
-            .expect("test workspace must declare the requested platform");
         let lock_file = LockFile::from_path(&workspace.lock_file_path()).unwrap();
         let pkgs: Vec<&LockedPackage> = lock_file
             .environment(environment.name().as_str())
             .and_then(|env| {
-                let p = lock_file.platform(pixi_platform.name().as_str())?;
+                let p = lock_file.platform(&platform.to_string())?;
                 env.packages(p).map(Vec::from_iter)
             })
             .unwrap_or_default();
 
         let dep_map: HashMap<String, Package> =
-            DependencyMapBuilder::new(&environment, pixi_platform, &pkgs)
+            DependencyMapBuilder::new(&environment, platform, &pkgs)
                 .build()
                 .into_iter()
                 .filter(|(_, p)| p.source == PackageSource::Pypi)
                 .collect();
-        let mut direct_deps = direct_dependencies(&environment, pixi_platform, &dep_map);
+        let mut direct_deps = direct_dependencies(&environment, &platform, &dep_map);
         direct_deps.retain(|n| dep_map.contains_key(n));
 
         let mut buf: Vec<u8> = Vec::new();

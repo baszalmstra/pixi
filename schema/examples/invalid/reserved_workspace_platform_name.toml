@@ -1,6 +1,0 @@
-"$schema" = "./../../schema.json"
-
-[workspace]
-channels = ["conda-forge"]
-name = "demo"
-platforms = [{ name = "linux", platform = "linux-64", cuda = "12" }]

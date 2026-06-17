@@ -12,7 +12,8 @@ use pixi_core::{
     lock_file::{LockedPackageKind, UpdateContext, filter_lock_file},
 };
 use pixi_diff::{LockFileDiff, LockFileJsonDiff};
-use pixi_manifest::{EnvironmentName, PixiPlatformName};
+use pixi_manifest::EnvironmentName;
+use rattler_conda_types::Platform;
 use rattler_lock::LockFile;
 
 use crate::cli_config::WorkspaceConfig;
@@ -60,11 +61,9 @@ pub struct UpdateSpecsArgs {
     pub environments: Option<Vec<EnvironmentName>>,
 
     /// The platforms to update. If none is specified, all platforms are
-    /// updated. Accepts a workspace platform name; a bare conda subdir
-    /// (e.g. `linux-64`) is also accepted so users don't have to declare
-    /// a platform before targeting it.
+    /// updated.
     #[clap(long = "platform", short = 'p')]
-    pub platforms: Option<Vec<PixiPlatformName>>,
+    pub platforms: Option<Vec<Platform>>,
 }
 
 /// A distilled version of `UpdateSpecsArgs`.
@@ -73,7 +72,7 @@ pub struct UpdateSpecsArgs {
 struct UpdateSpecs {
     packages: Option<HashSet<String>>,
     environments: Option<HashSet<EnvironmentName>>,
-    platforms: Option<HashSet<PixiPlatformName>>,
+    platforms: Option<HashSet<Platform>>,
 }
 
 impl From<UpdateSpecsArgs> for UpdateSpecs {
@@ -92,7 +91,7 @@ impl UpdateSpecs {
     fn should_relax(
         &self,
         environment_name: &EnvironmentName,
-        platform: &PixiPlatformName,
+        platform: &Platform,
         package_name: &str,
     ) -> bool {
         // Check if the platform is in the list of platforms to update.
@@ -237,9 +236,9 @@ fn ensure_package_exists(
         .iter()
         .flat_map(|env| env.packages_by_platform())
         .filter_map(|(lock_p, packages)| {
-            let name = PixiPlatformName::try_from(lock_p.name().as_str()).ok()?;
+            let p = lock_p.subdir();
             if let Some(platforms) = &specs.platforms
-                && !platforms.contains(&name)
+                && !platforms.contains(&p)
             {
                 return None;
             }
@@ -299,6 +298,6 @@ fn unlock_packages(project: &Workspace, lock_file: &LockFile, specs: &UpdateSpec
             LockedPackageKind::Conda(name) => name.as_normalized(),
             LockedPackageKind::Pypi(name) => name.as_ref(),
         };
-        !specs.should_relax(env.name(), platform, name)
+        !specs.should_relax(env.name(), &platform, name)
     })
 }

@@ -1,11 +1,13 @@
 use std::fmt::{self, Display, Formatter};
 
-use crate::{FeatureName, TargetSelector};
+use rattler_conda_types::Platform;
+
+use crate::FeatureName;
 
 /// Struct that is used to access a table in `pixi.toml` or `pyproject.toml`.
 pub struct TableName<'a> {
     prefix: Option<&'static str>,
-    target: Option<TargetSelector>,
+    platform: Option<&'a Platform>,
     feature_name: Option<&'a FeatureName>,
     table: Option<&'a str>,
 }
@@ -21,7 +23,7 @@ impl<'a> TableName<'a> {
     pub fn new() -> Self {
         Self {
             prefix: None,
-            target: None,
+            platform: None,
             feature_name: None,
             table: None,
         }
@@ -34,8 +36,8 @@ impl<'a> TableName<'a> {
     }
 
     /// Set the platform of the table.
-    pub fn with_target(mut self, target: Option<TargetSelector>) -> Self {
-        self.target = target;
+    pub fn with_platform(mut self, platform: Option<&'a Platform>) -> Self {
+        self.platform = platform;
         self
     }
 
@@ -76,9 +78,9 @@ impl TableName<'_> {
                     .as_str(),
             );
         }
-        if let Some(target) = &self.target {
+        if let Some(platform) = self.platform {
             keys.push("target");
-            keys.push(target.as_str());
+            keys.push(platform.as_str());
         }
         if let Some(table) = self.table {
             keys.push(table);
@@ -151,9 +153,7 @@ mod tests {
             "target.linux-64.dependencies".to_string(),
             TableName::new()
                 .with_feature_name(Some(&FeatureName::DEFAULT))
-                .with_target(Some(TargetSelector::Subdir(
-                    rattler_conda_types::Platform::Linux64,
-                )))
+                .with_platform(Some(&Platform::Linux64))
                 .with_table(Some("dependencies"))
                 .to_string()
         );
@@ -171,9 +171,7 @@ mod tests {
             "feature.test.target.linux-64.dependencies".to_string(),
             TableName::new()
                 .with_feature_name(Some(&feature_name))
-                .with_target(Some(TargetSelector::Subdir(
-                    rattler_conda_types::Platform::Linux64,
-                )))
+                .with_platform(Some(&Platform::Linux64))
                 .with_table(Some("dependencies"))
                 .to_string()
         );

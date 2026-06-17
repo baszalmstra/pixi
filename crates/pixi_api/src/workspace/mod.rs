@@ -1,7 +1,5 @@
 //! This module contains everything which is related to a Pixi workspace.
 
-pub mod platforms;
-
 pub(crate) mod add;
 pub use add::{DependencyOptions, GitOptions};
 
