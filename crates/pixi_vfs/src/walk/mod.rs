@@ -1,14 +1,12 @@
 //! Filesystem walking support for glob aggregates.
 //!
-//! The walker can operate purely from indexed state, purely from the backend,
-//! or in a hybrid repair mode. The public type in this module is [`WalkMode`];
-//! the work-stealing implementation lives in the private `parallel` module.
+//! The public type in this module is [`WalkMode`]. The rich glob-set traversal
+//! lives in `glob.rs`; the private `parallel` module now contains shared
+//! aggregate commit helpers retained for compatibility with the module layout.
 
 pub(crate) mod parallel;
 
 use std::time::Duration;
-
-use crate::index::{DirId, FileId, Index, NodeId};
 
 /// Controls where the indexed walker is allowed to read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,12 +54,4 @@ pub struct WalkDiagnostics {
     pub dirs_indexed: usize,
     /// Number of matching file records inserted/updated during commit.
     pub files_indexed: usize,
-}
-
-pub(crate) fn node_as_dir(index: &Index, node: NodeId) -> Option<DirId> {
-    index.node_dir(node)
-}
-
-pub(crate) fn node_as_file(index: &Index, node: NodeId) -> Option<FileId> {
-    index.node_file(node)
 }

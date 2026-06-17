@@ -189,7 +189,7 @@ fn literal_non_recursive_glob_does_not_scan_subdirectories() {
 }
 
 #[test]
-fn refresh_file_respects_non_recursive_glob_boundaries() {
+fn basename_meta_glob_uses_rich_recursive_matching() {
     let temp = tempdir().unwrap();
     let root = temp.path();
     let root_file = root.join("root.rs");
@@ -206,6 +206,31 @@ fn refresh_file_respects_non_recursive_glob_boundaries() {
     assert_eq!(
         vfs.latest_mtime(root, "*.rs", WalkMode::ForceDisk).unwrap(),
         GlobMTime::MatchesFound {
+            modified_at: nested_time,
+            designated_file: nested_file,
+        }
+    );
+}
+
+#[test]
+fn refresh_file_respects_literal_glob_boundaries() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let root_file = root.join("root.rs");
+    let nested_file = root.join("src").join("lib.rs");
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(&root_file, b"root").unwrap();
+    std::fs::write(&nested_file, b"nested").unwrap();
+    let root_time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+    let nested_time = SystemTime::UNIX_EPOCH + Duration::from_secs(20);
+    set_mtime(&root_file, root_time);
+    set_mtime(&nested_file, nested_time);
+
+    let vfs = IndexedVfs::default();
+    assert_eq!(
+        vfs.latest_mtime(root, "root.rs", WalkMode::ForceDisk)
+            .unwrap(),
+        GlobMTime::MatchesFound {
             modified_at: root_time,
             designated_file: root_file.clone(),
         }
@@ -214,7 +239,8 @@ fn refresh_file_respects_non_recursive_glob_boundaries() {
     let changed = vfs.refresh_file(&nested_file).unwrap();
     assert!(changed.is_empty());
     assert_eq!(
-        vfs.latest_mtime(root, "*.rs", WalkMode::IndexOnly).unwrap(),
+        vfs.latest_mtime(root, "root.rs", WalkMode::IndexOnly)
+            .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: root_time,
             designated_file: root_file,
@@ -304,7 +330,7 @@ fn refresh_file_updates_active_query_state_incrementally() {
 }
 
 #[test]
-fn results_match_existing_parallel_glob_mtime() {
+fn results_match_pixi_glob_mtime() {
     let temp = tempdir().unwrap();
     let root = temp.path();
     build_fixture(root, 8, 8);

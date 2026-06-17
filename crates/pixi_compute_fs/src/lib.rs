@@ -17,7 +17,7 @@ use pixi_compute_engine::{
     ComputeCtx, ComputeEngine, ComputeUpdater, Key, UpdateError, UpdateResult,
 };
 pub use pixi_vfs::GlobSetSpec as InputGlobSpec;
-use pixi_vfs::{EntryKind, GlobSpec, IndexedVfs, WalkMode};
+use pixi_vfs::{EntryKind, IndexedVfs, WalkMode};
 
 /// Filesystem entry kind used by metadata and directory listings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -166,12 +166,11 @@ impl Key for GlobMTimeKey {
     type Value = Result<GlobMTime, FsError>;
 
     async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
-        indexed_vfs(ctx)
-            .and_then(|vfs| {
-                vfs.latest_mtime(&self.root, &self.pattern, WalkMode::Hybrid)
-                    .map_err(fs_error_from_vfs)
-            })
-            .map(glob_mtime_from_indexed)
+        ctx.compute(&InputGlobMTimeKey {
+            root: self.root.clone(),
+            spec: InputGlobSpec::new([self.pattern.clone()]),
+        })
+        .await
     }
 
     fn equality(a: &Self::Value, b: &Self::Value) -> bool {
@@ -345,8 +344,8 @@ impl ComputeCtxFsExt for ComputeCtx {
         pattern: impl AsRef<str>,
     ) -> BoxFuture<'_, Result<GlobMTime, FsError>> {
         let root = root.as_ref().to_path_buf();
-        let pattern = pattern.as_ref().to_owned();
-        async move { self.compute(&GlobMTimeKey { root, pattern }).await }.boxed()
+        let spec = InputGlobSpec::new([pattern.as_ref()]);
+        async move { self.compute(&InputGlobMTimeKey { root, spec }).await }.boxed()
     }
 
     fn input_glob_mtime(
@@ -454,8 +453,8 @@ fn changed_file(updater: &mut ComputeUpdater, path: PathBuf) -> Result<(), Updat
     Ok(())
 }
 
-type GlobReplacementMap = BTreeMap<(PathBuf, GlobSpec), GlobMTime>;
-type GlobInvalidationSet = BTreeSet<(PathBuf, GlobSpec)>;
+type GlobReplacementMap = BTreeMap<(PathBuf, InputGlobSpec), GlobMTime>;
+type GlobInvalidationSet = BTreeSet<(PathBuf, InputGlobSpec)>;
 
 fn refresh_indexed_vfs_file(
     engine: &ComputeEngine,
@@ -535,31 +534,19 @@ fn apply_glob_replacements_except(
 fn changed_glob_if_new(
     updater: &mut ComputeUpdater,
     root: PathBuf,
-    spec: GlobSpec,
+    spec: InputGlobSpec,
 ) -> Result<(), UpdateError> {
-    match spec {
-        GlobSpec::Pattern(pattern) => {
-            updater.changed_if_new(GlobMTimeKey { root, pattern })?;
-        }
-        GlobSpec::Set(spec) => {
-            updater.changed_if_new(InputGlobMTimeKey { root, spec })?;
-        }
-    }
+    updater.changed_if_new(InputGlobMTimeKey { root, spec })?;
     Ok(())
 }
 
 fn changed_glob_to(
     updater: &mut ComputeUpdater,
     root: PathBuf,
-    spec: GlobSpec,
+    spec: InputGlobSpec,
     current: GlobMTime,
 ) -> Result<(), UpdateError> {
-    match spec {
-        GlobSpec::Pattern(pattern) => {
-            updater.changed_to(GlobMTimeKey { root, pattern }, Ok(current))
-        }
-        GlobSpec::Set(spec) => updater.changed_to(InputGlobMTimeKey { root, spec }, Ok(current)),
-    }
+    updater.changed_to(InputGlobMTimeKey { root, spec }, Ok(current))
 }
 
 fn parent_path(path: &Path) -> Option<PathBuf> {

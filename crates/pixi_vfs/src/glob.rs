@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use glob::{MatchOptions, Pattern};
 use ignore::{
     Match as IgnoreMatch,
     overrides::{Override, OverrideBuilder},
@@ -22,9 +21,7 @@ use crate::{
     VfsError,
     index::{FileId, Index, VfsEntryKind},
     state::IndexedVfs,
-    walk::parallel::{
-        DiskDelta, MatchedFileDelta, WalkOutcome, WalkPlan, commit_disk_delta, walk_latest_mtime,
-    },
+    walk::parallel::{DiskDelta, MatchedFileDelta, WalkOutcome, commit_disk_delta},
     walk::{WalkDiagnostics, WalkMode},
 };
 
@@ -95,22 +92,13 @@ impl GlobSetSpec {
     }
 }
 
-/// Active glob aggregate identity.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum GlobSpec {
-    /// A single simple glob pattern.
-    Pattern(String),
-    /// A rich ordered glob set.
-    Set(GlobSetSpec),
-}
-
 /// One active glob aggregate changed after an index update.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlobQueryChange {
     /// Query root whose aggregate changed.
     pub root: PathBuf,
     /// Glob spec whose aggregate changed.
-    pub spec: GlobSpec,
+    pub spec: GlobSetSpec,
     /// Aggregate value before the index update.
     pub previous: GlobMTime,
     /// Aggregate value after the index update.
@@ -123,7 +111,7 @@ pub struct GlobQueryInvalidation {
     /// Query root whose aggregate was invalidated.
     pub root: PathBuf,
     /// Glob spec whose aggregate was invalidated.
-    pub spec: GlobSpec,
+    pub spec: GlobSetSpec,
 }
 
 /// Result of refreshing one changed filesystem path in the index.
@@ -159,8 +147,7 @@ impl IndexedVfs {
         pattern: impl AsRef<str>,
         mode: WalkMode,
     ) -> Result<GlobMTime, VfsError> {
-        self.latest_mtime_inner(root, pattern, mode, false)
-            .map(|(value, _)| value)
+        self.latest_mtime_for_spec(root, GlobSetSpec::new([pattern.as_ref()]), mode)
     }
 
     /// Compute the latest mtime and return diagnostic phase timings/counters.
@@ -173,58 +160,7 @@ impl IndexedVfs {
         pattern: impl AsRef<str>,
         mode: WalkMode,
     ) -> Result<(GlobMTime, LatestMTimeDiagnostics), VfsError> {
-        self.latest_mtime_inner(root, pattern, mode, true)
-    }
-
-    fn latest_mtime_inner(
-        &self,
-        root: impl AsRef<Path>,
-        pattern: impl AsRef<str>,
-        mode: WalkMode,
-        collect_diagnostics: bool,
-    ) -> Result<(GlobMTime, LatestMTimeDiagnostics), VfsError> {
-        let total_start = Instant::now();
-        let root = root.as_ref().to_path_buf();
-        let pattern = pattern.as_ref().to_owned();
-        let query_key = GlobQueryKey::new(root.clone(), GlobSpec::Pattern(pattern.clone()));
-
-        if mode != WalkMode::ForceDisk {
-            // Prefer the maintained aggregate. ForceDisk intentionally bypasses
-            // it so callers can repair or benchmark a fresh disk walk.
-            if let Some(result) = self.try_cached_query(&query_key, mode)? {
-                return Ok((
-                    result,
-                    LatestMTimeDiagnostics {
-                        total: total_start.elapsed(),
-                        cache_hit: true,
-                        walk: WalkDiagnostics::default(),
-                    },
-                ));
-            }
-        }
-
-        let plan = WalkPlan::new(root.clone(), pattern)?;
-        let (outcome, walk) =
-            walk_latest_mtime(self.inner.clone(), plan.clone(), mode, collect_diagnostics)?;
-        let current = outcome.current(&self.inner.index.lock());
-        self.inner.index.lock().store_query(
-            query_key,
-            QueryState::from_walk(
-                QueryMatcher::Pattern {
-                    root,
-                    pattern: plan.pattern,
-                },
-                outcome,
-            ),
-        );
-        Ok((
-            current,
-            LatestMTimeDiagnostics {
-                total: total_start.elapsed(),
-                cache_hit: false,
-                walk,
-            },
-        ))
+        self.latest_mtime_for_spec_inner(root, GlobSetSpec::new([pattern.as_ref()]), mode, true)
     }
 
     /// Compute latest mtime for an ordered Pixi-style glob set.
@@ -239,12 +175,31 @@ impl IndexedVfs {
         spec: GlobSetSpec,
         mode: WalkMode,
     ) -> Result<GlobMTime, VfsError> {
+        self.latest_mtime_for_spec_inner(root, spec, mode, false)
+            .map(|(value, _)| value)
+    }
+
+    fn latest_mtime_for_spec_inner(
+        &self,
+        root: impl AsRef<Path>,
+        spec: GlobSetSpec,
+        mode: WalkMode,
+        collect_diagnostics: bool,
+    ) -> Result<(GlobMTime, LatestMTimeDiagnostics), VfsError> {
+        let total_start = Instant::now();
         let root = root.as_ref().to_path_buf();
-        let query_key = GlobQueryKey::new(root.clone(), GlobSpec::Set(spec.clone()));
+        let query_key = GlobQueryKey::new(root.clone(), spec.clone());
 
         if mode != WalkMode::ForceDisk {
             if let Some(result) = self.try_cached_query(&query_key, mode)? {
-                return Ok(result);
+                return Ok((
+                    result,
+                    LatestMTimeDiagnostics {
+                        total: total_start.elapsed(),
+                        cache_hit: true,
+                        walk: WalkDiagnostics::default(),
+                    },
+                ));
             }
         }
         if mode == WalkMode::IndexOnly {
@@ -255,13 +210,20 @@ impl IndexedVfs {
         }
 
         let plan = GlobSetPlan::new(root.clone(), spec)?;
-        let outcome = walk_glob_set_disk(self.inner.clone(), &plan)?;
+        let (outcome, walk) = walk_glob_set_disk(self.inner.clone(), &plan, collect_diagnostics)?;
         let current = outcome.current(&self.inner.index.lock());
-        self.inner.index.lock().store_query(
-            query_key,
-            QueryState::from_walk(QueryMatcher::Set(plan), outcome),
-        );
-        Ok(current)
+        self.inner
+            .index
+            .lock()
+            .store_query(query_key, QueryState::from_walk(plan, outcome));
+        Ok((
+            current,
+            LatestMTimeDiagnostics {
+                total: total_start.elapsed(),
+                cache_hit: false,
+                walk,
+            },
+        ))
     }
 
     /// Mark a known file's metadata as dirty without dirtying directory
@@ -459,44 +421,20 @@ pub(crate) struct GlobQueryKey {
     /// Root directory supplied by the caller.
     pub(crate) root: PathBuf,
     /// Glob identity supplied by the caller.
-    pub(crate) spec: GlobSpec,
+    pub(crate) spec: GlobSetSpec,
 }
 
 impl GlobQueryKey {
-    fn new(root: PathBuf, spec: GlobSpec) -> Self {
+    fn new(root: PathBuf, spec: GlobSetSpec) -> Self {
         Self { root, spec }
-    }
-}
-
-#[derive(Clone)]
-enum QueryMatcher {
-    Pattern { root: PathBuf, pattern: Pattern },
-    Set(GlobSetPlan),
-}
-
-impl QueryMatcher {
-    fn matches_file(&self, path: &Path) -> bool {
-        match self {
-            Self::Pattern { root, pattern } => glob_matches(root, path, pattern),
-            Self::Set(plan) => plan.matches_file(path),
-        }
-    }
-
-    fn watch_root(&self) -> &Path {
-        match self {
-            Self::Pattern { root, .. } => root,
-            Self::Set(plan) => &plan.effective_root,
-        }
-    }
-
-    fn invalidate_on_path_level_change(&self, _path: &Path) -> bool {
-        matches!(self, Self::Set(plan) if !plan.markers.is_empty())
     }
 }
 
 #[derive(Clone)]
 struct GlobSetPlan {
     effective_root: PathBuf,
+    start_dir: PathBuf,
+    max_descend_from_start: Option<usize>,
     overrides: Override,
     markers: Vec<String>,
     skip_hidden_by_walker: bool,
@@ -514,6 +452,7 @@ impl GlobSetPlan {
             (root, Vec::new())
         };
 
+        let walk_bounds = WalkBounds::for_globs(&effective_root, &globs, !spec.markers.is_empty());
         let glob_patterns = globs
             .iter()
             .map(|glob| anchor_literal_pattern(glob.to_pattern()))
@@ -541,10 +480,12 @@ impl GlobSetPlan {
 
         Ok(Self {
             effective_root,
+            start_dir: walk_bounds.start_dir,
+            max_descend_from_start: walk_bounds.max_descend_from_start,
             overrides,
             markers: spec.markers,
             skip_hidden_by_walker,
-            collect_patterns: has_patterns,
+            collect_patterns: globs.iter().any(|glob| !glob.negated),
         })
     }
 
@@ -557,11 +498,142 @@ impl GlobSetPlan {
             IgnoreMatch::Whitelist(_)
         )
     }
+
+    fn should_descend(&self, depth_from_start: usize) -> bool {
+        self.max_descend_from_start
+            .is_none_or(|max| depth_from_start < max)
+    }
+}
+
+struct WalkBounds {
+    start_dir: PathBuf,
+    max_descend_from_start: Option<usize>,
+}
+
+impl WalkBounds {
+    fn for_globs(effective_root: &Path, globs: &[SimpleGlob], has_markers: bool) -> Self {
+        if has_markers {
+            return Self {
+                start_dir: effective_root.to_path_buf(),
+                max_descend_from_start: None,
+            };
+        }
+
+        let analyses = globs
+            .iter()
+            .filter(|glob| !glob.negated)
+            .map(|glob| PatternAnalysis::new(&glob.glob))
+            .collect::<Vec<_>>();
+        if analyses.is_empty() {
+            return Self {
+                start_dir: effective_root.to_path_buf(),
+                max_descend_from_start: Some(0),
+            };
+        }
+
+        let common_prefix =
+            common_path_prefix(analyses.iter().map(|analysis| &analysis.literal_prefix));
+        let common_depth = common_prefix.components().count();
+        let max_descend_from_start = if analyses
+            .iter()
+            .any(|analysis| analysis.max_descend_from_start.is_none())
+        {
+            None
+        } else {
+            analyses
+                .iter()
+                .map(|analysis| {
+                    analysis
+                        .max_descend_from_start
+                        .expect("checked all analyses are bounded")
+                        + analysis
+                            .literal_prefix
+                            .components()
+                            .count()
+                            .saturating_sub(common_depth)
+                })
+                .max()
+        };
+
+        Self {
+            start_dir: effective_root.join(common_prefix),
+            max_descend_from_start,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PatternAnalysis {
+    literal_prefix: PathBuf,
+    max_descend_from_start: Option<usize>,
+}
+
+impl PatternAnalysis {
+    fn new(pattern: &str) -> Self {
+        let normalized = pattern.replace('\\', "/");
+        let components = normalized
+            .split('/')
+            .filter(|component| !component.is_empty() && *component != ".")
+            .collect::<Vec<_>>();
+
+        let first_meta = components.iter().position(|component| has_meta(component));
+        let literal_prefix_components = match first_meta {
+            Some(index) => &components[..index],
+            None if components.is_empty() => &components[..],
+            None => &components[..components.len().saturating_sub(1)],
+        };
+        let literal_prefix = literal_prefix_components.iter().collect::<PathBuf>();
+
+        let has_recursive = components.iter().any(|component| *component == "**");
+        let basename_meta = first_meta.is_some() && components.len() == 1;
+        let max_descend_from_start = if has_recursive || basename_meta {
+            None
+        } else {
+            let dir_components_before_leaf = components.len().saturating_sub(1);
+            Some(dir_components_before_leaf.saturating_sub(literal_prefix_components.len()))
+        };
+
+        Self {
+            literal_prefix,
+            max_descend_from_start,
+        }
+    }
+}
+
+fn has_meta(component: &str) -> bool {
+    component.contains('*')
+        || component.contains('?')
+        || component.contains('[')
+        || component.contains('{')
+}
+
+fn common_path_prefix<'a>(paths: impl IntoIterator<Item = &'a PathBuf>) -> PathBuf {
+    let mut iter = paths.into_iter();
+    let Some(first) = iter.next() else {
+        return PathBuf::new();
+    };
+    let mut prefix = first
+        .components()
+        .map(|component| component.as_os_str().to_owned())
+        .collect::<Vec<_>>();
+    for path in iter {
+        let components = path
+            .components()
+            .map(|component| component.as_os_str().to_owned())
+            .collect::<Vec<_>>();
+        let len = prefix
+            .iter()
+            .zip(components.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        prefix.truncate(len);
+    }
+    prefix.into_iter().collect()
 }
 
 pub(crate) struct QueryState {
     /// Matcher used for incremental file refresh checks.
-    matcher: QueryMatcher,
+    matcher: GlobSetPlan,
     /// File ids currently matching this query.
     matched_files: HashSet<FileId>,
     /// Matching files ordered by `(modified_at, path, file_id)`.
@@ -572,7 +644,7 @@ pub(crate) struct QueryState {
 }
 
 impl QueryState {
-    fn from_walk(matcher: QueryMatcher, outcome: WalkOutcome) -> Self {
+    fn from_walk(matcher: GlobSetPlan, outcome: WalkOutcome) -> Self {
         Self {
             matcher,
             matched_files: outcome.matched_files,
@@ -586,11 +658,11 @@ impl QueryState {
     }
 
     pub(crate) fn affects_path(&self, path: &Path) -> bool {
-        path.starts_with(self.matcher.watch_root())
+        path.starts_with(&self.matcher.effective_root)
     }
 
-    fn invalidate_on_path_level_change(&self, path: &Path) -> bool {
-        self.matcher.invalidate_on_path_level_change(path)
+    fn invalidate_on_path_level_change(&self, _path: &Path) -> bool {
+        !self.matcher.markers.is_empty()
     }
 
     fn dirty_files(&self, index: &Index) -> Vec<FileId> {
@@ -624,14 +696,24 @@ impl QueryState {
 fn walk_glob_set_disk(
     inner: std::sync::Arc<crate::Inner>,
     plan: &GlobSetPlan,
-) -> Result<WalkOutcome, VfsError> {
+    collect_diagnostics: bool,
+) -> Result<(WalkOutcome, WalkDiagnostics), VfsError> {
+    let total_start = collect_diagnostics.then(Instant::now);
+    let disk_walk_start = collect_diagnostics.then(Instant::now);
+    let mut diagnostics = WalkDiagnostics::default();
     let mut delta = DiskDelta::default();
-    let mut stack = vec![plan.effective_root.clone()];
+    let mut stack = vec![(plan.start_dir.clone(), 0usize)];
 
-    while let Some(dir) = stack.pop() {
+    while let Some((dir, depth_from_start)) = stack.pop() {
+        if collect_diagnostics {
+            diagnostics.dirs_visited += 1;
+        }
         match marker_decision(&inner, plan, &dir)? {
             MarkerDecision::Prune => continue,
             MarkerDecision::Leaf(file) => {
+                if collect_diagnostics {
+                    diagnostics.matched_files_seen += 1;
+                }
                 delta.visited_dirs.push(dir);
                 delta.matched_files.push(file);
                 continue;
@@ -640,15 +722,25 @@ fn walk_glob_set_disk(
         }
 
         delta.visited_dirs.push(dir.clone());
+        let read_start = collect_diagnostics.then(Instant::now);
         let entries = match inner.read_dir_entries(&dir) {
             Ok(entries) => entries,
             Err(VfsError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                if let Some(read_start) = read_start {
+                    diagnostics.read_dir_cumulative += read_start.elapsed();
+                }
                 continue;
             }
             Err(error) => return Err(error),
         };
+        if let Some(read_start) = read_start {
+            diagnostics.read_dir_cumulative += read_start.elapsed();
+        }
 
         for entry in entries {
+            if collect_diagnostics {
+                diagnostics.entries_seen += 1;
+            }
             match entry.kind {
                 VfsEntryKind::Directory => {
                     if plan.skip_hidden_by_walker
@@ -656,10 +748,26 @@ fn walk_glob_set_disk(
                     {
                         continue;
                     }
-                    stack.push(entry.path);
+                    if plan.should_descend(depth_from_start) {
+                        stack.push((entry.path, depth_from_start + 1));
+                    }
                 }
                 kind => {
-                    if plan.collect_patterns && plan.matches_file(&entry.path) {
+                    if collect_diagnostics {
+                        diagnostics.file_candidates += 1;
+                    }
+                    if !plan.collect_patterns {
+                        continue;
+                    }
+                    let match_start = collect_diagnostics.then(Instant::now);
+                    let matches = plan.matches_file(&entry.path);
+                    if let Some(match_start) = match_start {
+                        diagnostics.glob_match_cumulative += match_start.elapsed();
+                    }
+                    if matches {
+                        if collect_diagnostics {
+                            diagnostics.matched_files_seen += 1;
+                        }
                         delta.matched_files.push(MatchedFileDelta {
                             path: entry.path,
                             kind,
@@ -672,8 +780,14 @@ fn walk_glob_set_disk(
         }
     }
 
-    let mut diagnostics = WalkDiagnostics::default();
-    Ok(commit_disk_delta(&inner, delta, false, &mut diagnostics))
+    if let Some(disk_walk_start) = disk_walk_start {
+        diagnostics.disk_walk = disk_walk_start.elapsed();
+    }
+    let outcome = commit_disk_delta(&inner, delta, collect_diagnostics, &mut diagnostics);
+    if let Some(total_start) = total_start {
+        diagnostics.total = total_start.elapsed();
+    }
+    Ok((outcome, diagnostics))
 }
 
 enum MarkerDecision {
@@ -767,23 +881,6 @@ pub(crate) fn latest_from_entries(entries: &BTreeSet<MatchEntry>, _index: &Index
         modified_at: designated.modified_at,
         designated_file: designated.path.clone(),
     }
-}
-
-/// Match a path against a glob pattern using slash-separated path components.
-pub(crate) fn glob_matches(root: &Path, path: &Path, pattern: &Pattern) -> bool {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    let relative = relative
-        .iter()
-        .map(|component| component.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
-    pattern.matches_with(
-        &relative,
-        MatchOptions {
-            require_literal_separator: true,
-            ..MatchOptions::new()
-        },
-    )
 }
 
 fn glob_set_build_error(error: ignore::Error) -> VfsError {

@@ -22,16 +22,15 @@ use std::{io, path::PathBuf};
 
 pub use backend::{EntryKind, RealVfsBackend, VfsBackend, VfsBackendEntry, VfsBackendMetadata};
 pub use glob::{
-    GlobMTime, GlobQueryChange, GlobQueryInvalidation, GlobSetSpec, GlobSpec,
-    LatestMTimeDiagnostics, VfsPathRefresh,
+    GlobMTime, GlobQueryChange, GlobQueryInvalidation, GlobSetSpec, LatestMTimeDiagnostics,
+    VfsPathRefresh,
 };
 pub use read::{VfsDirectoryEntry, VfsMetadata};
 pub use state::{IndexedVfs, VfsStats};
 pub use walk::{WalkDiagnostics, WalkMode};
 
-pub(crate) use glob::{GlobQueryKey, MatchEntry, QueryState, glob_matches, latest_from_entries};
+pub(crate) use glob::{GlobQueryKey, MatchEntry, QueryState, latest_from_entries};
 pub(crate) use state::Inner;
-pub(crate) use walk::{node_as_dir, node_as_file};
 
 /// Error returned by indexed VFS operations.
 #[derive(Debug, thiserror::Error)]

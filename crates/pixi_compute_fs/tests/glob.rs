@@ -8,7 +8,9 @@ use std::{
 };
 
 use pixi_compute_engine::{ComputeCtx, ComputeEngine, Key};
-use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, GlobMTime, InputGlobSpec};
+use pixi_compute_fs::{
+    ComputeCtxFsExt, ComputeEngineFsExt, GlobMTime, GlobMTimeKey, InputGlobSpec,
+};
 use pixi_vfs::IndexedVfs;
 use tempfile::tempdir;
 
@@ -415,6 +417,54 @@ async fn non_matching_file_change_keeps_glob_mtime_dependent_backdated() {
         compute_count.load(Ordering::SeqCst),
         1,
         "unchanged glob mtime should avoid dependent recompute"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_glob_mtime_key_delegates_to_rich_input_glob_key() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let old = root.join("old.rs");
+    let newest = root.join("newest.rs");
+    std::fs::write(&old, b"old").unwrap();
+    std::fs::write(&newest, b"newest").unwrap();
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    set_mtime(&old, base + Duration::from_secs(1));
+    set_mtime(&newest, base + Duration::from_secs(2));
+
+    let engine = ComputeEngine::builder()
+        .with_data(Arc::new(IndexedVfs::default()))
+        .build();
+    let key = GlobMTimeKey {
+        root: root.clone(),
+        pattern: "*.rs".to_string(),
+    };
+
+    assert_eq!(
+        engine.compute(&key).await.unwrap().unwrap(),
+        GlobMTime::MatchesFound {
+            modified_at: base + Duration::from_secs(2),
+            designated_file: newest,
+        }
+    );
+    let graph = pixi_compute_engine::DependencyGraph::from_engine(&engine);
+    assert!(
+        graph
+            .nodes()
+            .any(|node| node.type_name.ends_with("InputGlobMTimeKey")),
+        "legacy key should delegate to the rich input-glob key"
+    );
+
+    let new_old_time = base + Duration::from_secs(3);
+    set_mtime(&old, new_old_time);
+    engine.invalidate_file(&old).unwrap();
+
+    assert_eq!(
+        engine.compute(&key).await.unwrap().unwrap(),
+        GlobMTime::MatchesFound {
+            modified_at: new_old_time,
+            designated_file: old,
+        }
     );
 }
 
