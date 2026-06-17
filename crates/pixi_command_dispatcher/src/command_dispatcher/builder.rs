@@ -35,6 +35,7 @@ use pixi_git::resolver::GitResolver;
 use pixi_glob::GlobHashCache;
 use pixi_path::{AbsPathBuf, AbsPresumedDirPathBuf};
 use pixi_url::resolver::UrlResolver;
+use pixi_vfs::IndexedVfs;
 use rattler::package_cache::PackageCache;
 use rattler_conda_types::{ChannelConfig, GenericVirtualPackage, Platform};
 use rattler_networking::LazyClient;
@@ -460,6 +461,7 @@ impl CommandDispatcherBuilder {
             .with_data(data.build_backend_metadata_cache.clone())
             .with_data(data.package_cache.clone())
             .with_data(data.workspace_env_registry.clone())
+            .with_data(Arc::new(IndexedVfs::default()))
             .with_data(AllowExecuteLinkScripts(data.execute_link_scripts))
             .with_data(AllowLinkOptions {
                 allow_symbolic_links: data.allow_symbolic_links,
@@ -545,5 +547,23 @@ impl CommandDispatcherBuilder {
             data,
             engine,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finish_registers_indexed_vfs_for_compute_filesystem_keys() {
+        let dispatcher = CommandDispatcher::builder().finish();
+        assert!(
+            dispatcher
+                .engine()
+                .global_data()
+                .try_get::<Arc<IndexedVfs>>()
+                .is_some(),
+            "normal dispatchers must register IndexedVfs for pixi_compute_fs"
+        );
     }
 }

@@ -362,6 +362,25 @@ impl BuildBackendMetadataInner {
 
         let build_source_dir = build_source_checkout.path.as_dir_or_file_parent();
 
+        if let Ok(crate::input_globs::InputGlobLatestMTime::MatchesFound {
+            modified_at,
+            designated_file,
+        }) = crate::input_globs::latest_input_mtime(
+            ctx,
+            &cache_entry.input_glob_sets,
+            build_source_dir,
+        )
+        .await
+        {
+            if modified_at > cache_entry.timestamp {
+                tracing::info!(
+                    "found cached outputs but latest matching input '{}' has been modified, invalidating cache.",
+                    designated_file.as_std_path().display()
+                );
+                return Ok(Err(Some(cache_entry)));
+            }
+        }
+
         // Check the files that were explicitly mentioned.
         for source_file_path in cache_entry
             .input_files

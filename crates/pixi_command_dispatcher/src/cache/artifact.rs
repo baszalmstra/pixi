@@ -293,6 +293,21 @@ impl ArtifactCache {
         };
         drop(_guard);
 
+        if let Ok(crate::input_globs::InputGlobLatestMTime::MatchesFound { modified_at, .. }) =
+            crate::input_globs::latest_input_mtime(ctx, &sidecar.input_glob_sets, source_dir).await
+        {
+            let newest_recorded = sidecar
+                .input_files
+                .values()
+                .copied()
+                .max()
+                .map(std::time::SystemTime::from);
+            if newest_recorded.is_none() || newest_recorded.is_some_and(|mtime| modified_at > mtime)
+            {
+                return Ok(None);
+            }
+        }
+
         // Check every recorded file still matches its mtime.
         for (path, expected_mtime) in &sidecar.input_files {
             let modified = match fs_err::metadata(path).and_then(|m| m.modified()) {
@@ -454,9 +469,10 @@ impl From<pixi_glob::GlobSetError> for ArtifactCacheError {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, sync::Arc};
 
-    use pixi_compute_engine::ComputeEngine;
+    use pixi_compute_engine::{ComputeEngine, DependencyGraph};
+    use pixi_vfs::IndexedVfs;
     use rattler_conda_types::{PackageName, PackageRecord};
     use tempfile::TempDir;
 
@@ -482,6 +498,12 @@ mod tests {
 
     fn abs(path: impl Into<PathBuf>) -> AbsPathBuf {
         AbsPathBuf::new(path).unwrap()
+    }
+
+    fn engine_with_vfs() -> ComputeEngine {
+        ComputeEngine::builder()
+            .with_data(Arc::new(IndexedVfs::default()))
+            .build()
     }
 
     /// Drive [`ArtifactCache::lookup`] (which needs a `ComputeCtx`) through the
@@ -574,6 +596,52 @@ mod tests {
         assert_eq!(
             hit.record.package_record.name,
             stored.record.package_record.name
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_checks_compute_fs_glob_mtime() {
+        let tmp = TempDir::new().unwrap();
+        let cache = ArtifactCache::new(tmp.path().join("artifacts"));
+        let engine = engine_with_vfs();
+
+        let source = tmp.path().join("src");
+        fs_err::create_dir_all(&source).unwrap();
+        let input = source.join("main.py");
+        fs_err::write(&input, b"body").unwrap();
+
+        let scratch = tmp.path().join("scratch");
+        fs_err::create_dir_all(&scratch).unwrap();
+        let artifact = scratch.join("foo-1.0.0-h0.conda");
+        fs_err::write(&artifact, b"artifact").unwrap();
+
+        let key = key("linux-64-abc");
+        cache
+            .store(
+                &pkg("foo"),
+                &key,
+                &artifact,
+                vec![glob_group(&["**/*.py"])],
+                vec![abs(input.clone())],
+                dummy_record("foo"),
+            )
+            .await
+            .unwrap();
+
+        let got = lookup(&engine, &cache, &pkg("foo"), &key, &source)
+            .await
+            .unwrap();
+        assert!(
+            got.is_some(),
+            "unchanged sidecar should still be a cache hit"
+        );
+
+        let graph = DependencyGraph::from_engine(&engine);
+        assert!(
+            graph
+                .nodes()
+                .any(|node| node.type_name.ends_with("GlobMTimeKey")),
+            "artifact lookup should request the compute filesystem glob mtime key"
         );
     }
 

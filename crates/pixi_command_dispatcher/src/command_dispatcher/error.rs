@@ -135,10 +135,10 @@ impl<T, E> CommandDispatcherErrorResultExt<T, E> for Result<T, CommandDispatcher
 /// into a [`CommandDispatcherError`]-shaped result, mapping the inner
 /// domain error via `map_err`.
 ///
-/// `ComputeError::Canceled` becomes [`CommandDispatcherError::Cancelled`].
-/// `ComputeError::Cycle` is treated as `unreachable!`: every call site
-/// that uses this helper runs above the cycle-detection layer, where a
-/// cycle would have already been reported.
+/// `ComputeError::Canceled` and `ComputeError::Rejected` become
+/// [`CommandDispatcherError::Cancelled`]. `ComputeError::Cycle` is treated as
+/// `unreachable!`: every call site that uses this helper runs above the
+/// cycle-detection layer, where a cycle would have already been reported.
 pub trait ComputeResultExt<T, E> {
     fn map_err_into_dispatcher<F>(
         self,
@@ -157,7 +157,9 @@ impl<T, E> ComputeResultExt<T, E> for Result<Result<T, E>, ComputeError> {
             Err(ComputeError::Cycle(c)) => {
                 unreachable!("cycles should have been detected before reaching this call site, {c}")
             }
-            Err(ComputeError::Canceled) => Err(CommandDispatcherError::Cancelled),
+            Err(ComputeError::Canceled | ComputeError::Rejected) => {
+                Err(CommandDispatcherError::Cancelled)
+            }
         }
     }
 }
@@ -166,9 +168,9 @@ impl<T, E> ComputeResultExt<T, E> for Result<Result<T, E>, ComputeError> {
 /// [`ComputeEngine::with_ctx`](pixi_compute_engine::ComputeEngine::with_ctx)
 /// when the inner future already returns
 /// [`Result<T, CommandDispatcherError<E>>`]. Both a
-/// [`ComputeError::Canceled`] at the outer layer and a
-/// [`CommandDispatcherError::Cancelled`] at the inner layer collapse
-/// to [`CommandDispatcherError::Cancelled`].
+/// [`ComputeError::Canceled`] or [`ComputeError::Rejected`] at the outer layer
+/// and a [`CommandDispatcherError::Cancelled`] at the inner layer collapse to
+/// [`CommandDispatcherError::Cancelled`].
 pub(crate) fn flatten_with_ctx_result<T, E>(
     result: Result<Result<T, CommandDispatcherError<E>>, ComputeError>,
 ) -> Result<T, CommandDispatcherError<E>> {
@@ -177,7 +179,9 @@ pub(crate) fn flatten_with_ctx_result<T, E>(
         Err(ComputeError::Cycle(c)) => {
             unreachable!("cycles should have been detected before reaching this call site, {c}")
         }
-        Err(ComputeError::Canceled) => Err(CommandDispatcherError::Cancelled),
+        Err(ComputeError::Canceled | ComputeError::Rejected) => {
+            Err(CommandDispatcherError::Cancelled)
+        }
     }
 }
 

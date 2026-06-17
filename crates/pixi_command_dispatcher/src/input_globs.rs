@@ -10,14 +10,15 @@
 //! marker-free, hidden-excluding group) so the rest of the pipeline only
 //! ever deals with groups.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 
 use pixi_build_types::InputGlobSet;
 use pixi_compute_engine::ComputeCtx;
+use pixi_compute_fs::{ComputeCtxFsExt, FsError, GlobMTime};
 use pixi_glob::GlobSetError;
 use pixi_path::{AbsPath, AbsPathBuf};
 
-use crate::keys::InputGlobSetWalkKey;
+use crate::keys::{InputGlobSetWalkKey, InputGlobSetWalkSpec};
 
 /// Normalize a backend's `(input_globs, input_glob_sets)` pair into a
 /// single list of groups. The flat globs (if any) are folded into one
@@ -74,10 +75,139 @@ pub async fn collect_input_files(
     Ok(all)
 }
 
+/// Newest mtime observed across a backend's input glob groups.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputGlobLatestMTime {
+    NoMatches,
+    MatchesFound {
+        modified_at: SystemTime,
+        designated_file: AbsPathBuf,
+    },
+}
+
+/// Compute the newest modification time across all include patterns in the
+/// backend input glob groups.
+///
+/// This is used as a fast stale-cache detector, not as a replacement for exact
+/// input discovery. Groups using marker dispatch or exclude patterns are
+/// skipped because `glob_mtime` cannot represent those semantics yet; callers
+/// still run [`collect_input_files`] afterward when this helper does not prove
+/// the cache stale.
+pub async fn latest_input_mtime(
+    ctx: &mut ComputeCtx,
+    groups: &[InputGlobSet],
+    caller_root: &AbsPath,
+) -> Result<InputGlobLatestMTime, FsError> {
+    let queries = groups
+        .iter()
+        .filter(|group| can_use_glob_mtime(group))
+        .flat_map(|group| {
+            let spec = InputGlobSetWalkSpec::from_group(group, caller_root.as_std_path());
+            spec.patterns
+                .into_iter()
+                .map(move |pattern| InputGlobMTimeQuery {
+                    root: spec.root.clone(),
+                    pattern,
+                    exclude_hidden: spec.exclude_hidden,
+                })
+        })
+        .collect::<Vec<_>>();
+
+    let per_pattern = ctx
+        .try_compute_join(
+            queries,
+            async move |sub_ctx: &mut ComputeCtx,
+                        query: InputGlobMTimeQuery|
+                        -> Result<InputGlobLatestMTime, FsError> {
+                match sub_ctx.glob_mtime(&query.root, &query.pattern).await? {
+                    GlobMTime::NoMatches => Ok(InputGlobLatestMTime::NoMatches),
+                    GlobMTime::MatchesFound {
+                        designated_file, ..
+                    } if query.exclude_hidden
+                        && has_hidden_component(&query.root, &designated_file) =>
+                    {
+                        Ok(InputGlobLatestMTime::NoMatches)
+                    }
+                    GlobMTime::MatchesFound {
+                        modified_at,
+                        designated_file,
+                    } => Ok(InputGlobLatestMTime::MatchesFound {
+                        modified_at,
+                        designated_file: AbsPathBuf::new(designated_file).map_err(|err| {
+                            FsError::Indexed {
+                                message: format!("glob mtime returned invalid path: {err}"),
+                            }
+                        })?,
+                    }),
+                }
+            },
+        )
+        .await?;
+
+    Ok(newest_mtime(per_pattern))
+}
+
+#[derive(Clone)]
+struct InputGlobMTimeQuery {
+    root: std::path::PathBuf,
+    pattern: String,
+    exclude_hidden: bool,
+}
+
+fn can_use_glob_mtime(group: &InputGlobSet) -> bool {
+    group.markers.is_empty()
+        && group
+            .patterns
+            .iter()
+            .all(|pattern| !pattern.starts_with('!'))
+}
+
+fn has_hidden_component(root: &std::path::Path, path: &std::path::Path) -> bool {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .any(|component| {
+            let std::path::Component::Normal(name) = component else {
+                return false;
+            };
+            name.to_string_lossy().starts_with('.')
+        })
+}
+
+fn newest_mtime(values: impl IntoIterator<Item = InputGlobLatestMTime>) -> InputGlobLatestMTime {
+    values
+        .into_iter()
+        .filter_map(|value| match value {
+            InputGlobLatestMTime::NoMatches => None,
+            InputGlobLatestMTime::MatchesFound {
+                modified_at,
+                designated_file,
+            } => Some((modified_at, designated_file)),
+        })
+        .max_by(|(left_time, left_file), (right_time, right_file)| {
+            left_time
+                .cmp(right_time)
+                .then_with(|| right_file.cmp(left_file))
+        })
+        .map_or(
+            InputGlobLatestMTime::NoMatches,
+            |(modified_at, designated_file)| InputGlobLatestMTime::MatchesFound {
+                modified_at,
+                designated_file,
+            },
+        )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::Arc,
+        time::{Duration, SystemTime},
+    };
+
     use pixi_compute_engine::ComputeEngine;
     use pixi_path::AbsPath;
+    use pixi_vfs::IndexedVfs;
     use tempfile::TempDir;
 
     use super::*;
@@ -94,11 +224,32 @@ mod tests {
     /// Drive `collect_input_files` (needs a `ComputeCtx`) through a throwaway
     /// engine and return the matched paths.
     async fn collect(groups: &[InputGlobSet], root: &AbsPath) -> Vec<AbsPathBuf> {
-        ComputeEngine::new()
+        ComputeEngine::builder()
+            .with_data(Arc::new(IndexedVfs::default()))
+            .build()
             .with_ctx(async |ctx| collect_input_files(ctx, groups, root).await)
             .await
             .expect("no cycle")
             .expect("walk succeeds")
+    }
+
+    fn set_mtime(path: impl AsRef<std::path::Path>, time: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    async fn latest(groups: &[InputGlobSet], root: &AbsPath) -> InputGlobLatestMTime {
+        ComputeEngine::builder()
+            .with_data(Arc::new(IndexedVfs::default()))
+            .build()
+            .with_ctx(async |ctx| latest_input_mtime(ctx, groups, root).await)
+            .await
+            .expect("no cycle")
+            .expect("glob mtime succeeds")
     }
 
     #[test]
@@ -127,6 +278,65 @@ mod tests {
         assert_eq!(folded.len(), 2);
         assert_eq!(folded[0].patterns, vec!["x".to_string()]);
         assert_eq!(folded[1].patterns, vec!["flat".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn latest_mtime_returns_newest_matching_input_file() {
+        let tmp = TempDir::new().unwrap();
+        let old = tmp.path().join("old.txt");
+        let newest = tmp.path().join("src").join("newest.txt");
+        fs_err::create_dir(tmp.path().join("src")).unwrap();
+        fs_err::write(&old, b"old").unwrap();
+        fs_err::write(&newest, b"newest").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        set_mtime(&old, base + Duration::from_secs(1));
+        set_mtime(&newest, base + Duration::from_secs(2));
+        let root = AbsPath::new(tmp.path()).unwrap();
+
+        assert_eq!(
+            latest(&[group(&["**/*.txt"], true)], root).await,
+            InputGlobLatestMTime::MatchesFound {
+                modified_at: base + Duration::from_secs(2),
+                designated_file: AbsPathBuf::new(newest).unwrap(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_mtime_skips_hidden_designated_file_when_hidden_files_are_excluded() {
+        let tmp = TempDir::new().unwrap();
+        let visible = tmp.path().join("visible.txt");
+        let hidden = tmp.path().join(".pixi").join("hidden.txt");
+        fs_err::create_dir(tmp.path().join(".pixi")).unwrap();
+        fs_err::write(&visible, b"visible").unwrap();
+        fs_err::write(&hidden, b"hidden").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        set_mtime(&visible, base + Duration::from_secs(1));
+        set_mtime(&hidden, base + Duration::from_secs(2));
+        let root = AbsPath::new(tmp.path()).unwrap();
+
+        assert_eq!(
+            latest(&[group(&["**/*.txt"], true)], root).await,
+            InputGlobLatestMTime::NoMatches
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_mtime_skips_groups_with_exclude_patterns() {
+        let tmp = TempDir::new().unwrap();
+        let included = tmp.path().join("included.txt");
+        let excluded = tmp.path().join("excluded.txt");
+        fs_err::write(&included, b"included").unwrap();
+        fs_err::write(&excluded, b"excluded").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        set_mtime(&included, base + Duration::from_secs(1));
+        set_mtime(&excluded, base + Duration::from_secs(2));
+        let root = AbsPath::new(tmp.path()).unwrap();
+
+        assert_eq!(
+            latest(&[group(&["**/*.txt", "!excluded.txt"], true)], root).await,
+            InputGlobLatestMTime::NoMatches
+        );
     }
 
     #[tokio::test]

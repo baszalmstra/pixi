@@ -53,6 +53,7 @@ pixi_build_types = { workspace = true }
 pixi_compute_cache_dirs = { workspace = true }
 pixi_compute_engine = { workspace = true }
 pixi_compute_env_vars = { workspace = true }
+pixi_compute_fs = { workspace = true }
 pixi_compute_network = { workspace = true }
 pixi_compute_reporters = { workspace = true }
 pixi_compute_sources = { workspace = true }
@@ -67,6 +68,7 @@ pixi_stable_hash = { workspace = true, features = ["serde_json"] }
 pixi_url = { workspace = true }
 pixi_utils = { workspace = true }
 pixi_variant = { workspace = true }
+pixi_vfs = { workspace = true }
 
 [dev-dependencies]
 indexmap = { workspace = true }
