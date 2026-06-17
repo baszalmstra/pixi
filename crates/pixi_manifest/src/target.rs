@@ -10,7 +10,7 @@ use rattler_conda_types::{PackageName, ParsePlatformError, Platform};
 use super::error::DependencyError;
 use crate::{
     CondaDependencies, DependencyOverwriteBehavior, InternalDependencyBehavior, PixiPlatform,
-    PixiPlatformName, PlatformGlob, PyPiDependencies, SpecType,
+    PixiPlatformName, PyPiDependencies, SpecType,
     activation::Activation,
     dependencies::{CondaConstraints, CondaDevDependencies},
     task::{Task, TaskName},
@@ -456,7 +456,6 @@ impl PackageTarget {
 pub enum TargetSelector {
     // Platform specific configuration
     Platform(PixiPlatformName),
-    PlatformGlob(PlatformGlob),
     Subdir(Platform),
     Unix,
     Linux,
@@ -469,7 +468,6 @@ impl TargetSelector {
     pub fn matches(&self, platform: &PixiPlatform) -> bool {
         match self {
             TargetSelector::Platform(p) => p == platform.name(),
-            TargetSelector::PlatformGlob(glob) => glob.matches(platform.name().as_str()),
             TargetSelector::Subdir(subdir) => *subdir == platform.subdir(),
             TargetSelector::Linux => platform.subdir().is_linux(),
             TargetSelector::Unix => platform.subdir().is_unix(),
@@ -478,15 +476,9 @@ impl TargetSelector {
         }
     }
 
-    /// Returns true if this selector is a wildcard platform glob.
-    pub fn is_glob(&self) -> bool {
-        matches!(self, TargetSelector::PlatformGlob(_))
-    }
-
     pub fn as_str(&self) -> &str {
         match self {
             TargetSelector::Platform(p) => p.as_str(),
-            TargetSelector::PlatformGlob(glob) => glob.as_str(),
             TargetSelector::Subdir(subdir) => subdir.as_str(),
             TargetSelector::Linux => "linux",
             TargetSelector::Unix => "unix",
@@ -548,12 +540,6 @@ impl FromStr for TargetSelector {
         }
         if let Ok(platform) = Platform::from_str(s) {
             return Ok(TargetSelector::Subdir(platform));
-        }
-        if PlatformGlob::looks_like_glob(s) {
-            let glob = PlatformGlob::try_from(s).map_err(|_| ParsePlatformError {
-                string: s.to_string(),
-            })?;
-            return Ok(TargetSelector::PlatformGlob(glob));
         }
         let Ok(platform) = PixiPlatformName::try_from(s) else {
             return Err(ParsePlatformError {
@@ -781,8 +767,7 @@ mod tests {
     use std::{path::Path, str::FromStr};
 
     use crate::{
-        DependencyOverwriteBehavior, FeatureName, PixiPlatform, PixiPlatformName, SpecType,
-        TargetSelector, WorkspaceManifest,
+        DependencyOverwriteBehavior, FeatureName, PixiPlatform, SpecType, WorkspaceManifest,
     };
 
     #[test]
@@ -1086,98 +1071,6 @@ mod tests {
             osx_specs[0].as_version_spec().unwrap().to_string(),
             "==1.0",
             "Expected foo=1.0 on osx-arm64"
-        );
-    }
-
-    #[test]
-    fn glob_selector_parses_and_round_trips() {
-        let selector = TargetSelector::from_str("cuda-*").expect("valid glob selector");
-        assert!(selector.is_glob());
-        assert_eq!(selector.as_str(), "cuda-*");
-        assert_eq!(selector.to_string(), "cuda-*");
-
-        // A name without a wildcard stays an exact platform selector.
-        assert!(matches!(
-            TargetSelector::from_str("cuda-win-64"),
-            Ok(TargetSelector::Platform(_))
-        ));
-    }
-
-    #[test]
-    fn glob_selector_matches_platform_names() {
-        let selector = TargetSelector::from_str("cuda-*").unwrap();
-        let cuda_win = PixiPlatform::new(
-            PixiPlatformName::try_from("cuda-win-64").unwrap(),
-            Platform::Win64,
-            vec![],
-        )
-        .unwrap();
-        assert!(selector.matches(&cuda_win));
-        // A bare subdir platform is not matched by `cuda-*`.
-        assert!(!selector.matches(&PixiPlatform::from_subdir(Platform::Win64)));
-    }
-
-    /// A glob target applies to every matching rich platform, and a more
-    /// specific exact selector defined *after* it wins by insertion order.
-    #[test]
-    fn glob_target_applies_with_insertion_order_precedence() {
-        let manifest = WorkspaceManifest::from_toml_str_with_base_dir(
-            r#"
-        [project]
-        name = "test"
-        channels = []
-        platforms = [
-            { name = "cuda-win-64", platform = "win-64", cuda = "12" },
-            { name = "cuda-linux-64", platform = "linux-64", cuda = "12" },
-            "linux-64",
-        ]
-
-        [dependencies]
-        foo = "1.0"
-
-        [target."cuda-*".dependencies]
-        foo = "2.0"
-
-        [target.cuda-win-64.dependencies]
-        foo = "3.0"
-        "#,
-            Path::new(""),
-        )
-        .unwrap();
-
-        let feature = manifest.default_feature();
-        let foo = PackageName::from_str("foo").unwrap();
-        let resolved = |name: &str, subdir: Platform| {
-            let platform = if name == subdir.as_str() {
-                PixiPlatform::from_subdir(subdir)
-            } else {
-                PixiPlatform::new(PixiPlatformName::try_from(name).unwrap(), subdir, vec![])
-                    .unwrap()
-            };
-            let deps = feature.run_dependencies(Some(&platform))?;
-            let spec = deps
-                .get(&foo)?
-                .iter()
-                .next()?
-                .as_version_spec()?
-                .to_string();
-            Some(spec)
-        };
-
-        // `cuda-linux-64` only matches the glob → foo=2.0.
-        assert_eq!(
-            resolved("cuda-linux-64", Platform::Linux64).as_deref(),
-            Some("==2.0")
-        );
-        // `cuda-win-64` matches both; the later exact selector wins → foo=3.0.
-        assert_eq!(
-            resolved("cuda-win-64", Platform::Win64).as_deref(),
-            Some("==3.0")
-        );
-        // The bare `linux-64` matches neither glob nor exact → default foo=1.0.
-        assert_eq!(
-            resolved("linux-64", Platform::Linux64).as_deref(),
-            Some("==1.0")
         );
     }
 }
