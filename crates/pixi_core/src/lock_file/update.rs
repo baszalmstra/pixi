@@ -61,8 +61,7 @@ use uv_normalize::ExtraName;
 
 use super::{
     CondaPrefixUpdater, InstallSubset, PixiRecordsByName, PypiRecordsByName,
-    UnresolvedPixiRecordsByName, outdated::OutdatedEnvironments, resolve_lock_platform,
-    utils::IoConcurrencyLimit,
+    UnresolvedPixiRecordsByName, outdated::OutdatedEnvironments, utils::IoConcurrencyLimit,
 };
 use crate::{
     Workspace,
@@ -948,13 +947,7 @@ impl<'p> LockFileDerivedData<'p> {
                     &filter.skip_direct,
                     &filter.target_packages,
                 );
-                // Fall back to the base subdir so a pre-rich, base-keyed lock still
-                // resolves when the install platform is rich (e.g. `osx-arm64-macos-12-0`).
-                let lock_platform = resolve_lock_platform(
-                    &self.lock_file,
-                    platform.name(),
-                    environment.workspace_manifest(),
-                );
+                let lock_platform = self.lock_file.platform(platform.name().as_str());
                 let result = subset.filter(lock_platform.and_then(|p| locked_env.packages(p)))?;
                 let packages = result.install;
                 let ignored = result.ignore;
@@ -1201,13 +1194,7 @@ impl<'p> LockFileDerivedData<'p> {
 
                 // Get the locked environment from the lock file.
                 let locked_env = self.locked_env(environment)?;
-                // Same base-subdir fallback as the pypi prefix update above, for a
-                // rich `pixi_platform` against a pre-rich, base-keyed lock.
-                let lock_platform = resolve_lock_platform(
-                    &self.lock_file,
-                    pixi_platform.name(),
-                    environment.workspace_manifest(),
-                );
+                let lock_platform = self.lock_file.platform(pixi_platform.name().as_str());
                 let packages = lock_platform.and_then(|p| locked_env.packages(p));
                 let packages = if let Some(iter) = packages {
                     iter.collect_vec()
@@ -1833,8 +1820,9 @@ impl<'p> UpdateContextBuilder<'p> {
         };
         let lock_file = input.lock_file;
 
-        // Key locked conda records by the env's declared (possibly rich) platform
-        // names so pre-rich, base-subdir-keyed lock files still feed rich lookups.
+        // Extract the current conda records from the lock file.
+
+        // Collect unresolved records per environment and platform.
         #[allow(clippy::type_complexity)]
         let unresolved_by_env: Vec<(
             crate::workspace::Environment<'_>,
@@ -1844,16 +1832,14 @@ impl<'p> UpdateContextBuilder<'p> {
             .into_iter()
             .filter_map(|env| {
                 let locked_env = lock_file.environment(env.name().as_str())?;
-                let platforms: Vec<_> = env
-                    .platforms()
-                    .into_iter()
-                    .filter_map(|platform| {
-                        let lock_platform =
-                            resolve_lock_platform(&lock_file, &platform, env.workspace_manifest())?;
-                        let unresolved = locked_env
-                            .packages(lock_platform)
-                            .into_iter()
-                            .flatten()
+                let platforms: Vec<_> = locked_env
+                    .packages_by_platform()
+                    .filter_map(|(lock_platform, packages)| {
+                        // A name that isn't a valid pixi platform name has no
+                        // carryable records; dropping it re-solves that platform.
+                        let platform =
+                            PixiPlatformName::try_from(lock_platform.name().as_str()).ok()?;
+                        let unresolved = packages
                             .filter_map(|pkg| resolver.get_for_package(pkg))
                             .collect::<Vec<_>>();
                         Some((platform, unresolved))
@@ -1882,25 +1868,34 @@ impl<'p> UpdateContextBuilder<'p> {
             locked_repodata_records.insert(env, env_map);
         }
 
-        // Key pypi records by the declared platform names, mirroring conda above.
         let locked_pypi_records = project
             .environments()
             .into_iter()
-            .filter_map(|env| {
-                let locked_env = lock_file.environment(env.name().as_str())?;
-                let by_platform = env
-                    .platforms()
+            .flat_map(|env| {
+                lock_file
+                    .environment(env.name().as_str())
                     .into_iter()
-                    .filter_map(|platform| {
-                        let lock_platform =
-                            resolve_lock_platform(&lock_file, &platform, env.workspace_manifest())?;
-                        let records = locked_env
-                            .pypi_packages(lock_platform)?
-                            .map(|r| r.clone().into());
-                        Some((platform, Arc::new(PypiRecordsByName::from_iter(records))))
+                    .map(move |locked_env| {
+                        (
+                            env.clone(),
+                            locked_env
+                                .pypi_packages_by_platform()
+                                .filter_map(|(lock_platform, records)| {
+                                    // Skip names that aren't valid pixi platform
+                                    // names; the platform is re-solved instead.
+                                    let platform =
+                                        PixiPlatformName::try_from(lock_platform.name().as_str())
+                                            .ok()?;
+                                    Some((
+                                        platform,
+                                        Arc::new(PypiRecordsByName::from_iter(
+                                            records.map(|r| r.clone().into()),
+                                        )),
+                                    ))
+                                })
+                                .collect(),
+                        )
                     })
-                    .collect();
-                Some((env, by_platform))
             })
             .collect::<HashMap<_, HashMap<_, _>>>();
 
