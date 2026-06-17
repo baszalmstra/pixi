@@ -82,6 +82,7 @@ miette = { version = "7.6.0" }
 minijinja = "2.15.1"
 nanoid = "0.5.0"
 nix = { version = "0.29.0", default-features = false }
+notify = "8.1.0"
 once_cell = "1.20.3"
 ordermap = "1.0.0"
 parking_lot = "0.12.4"
@@ -103,9 +104,11 @@ pixi_cli = { path = "crates/pixi_cli" }
 pixi_command_dispatcher = { path = "crates/pixi_command_dispatcher" }
 pixi_compute_cache_dirs = { path = "crates/pixi_compute_cache_dirs" }
 pixi_compute_engine = { path = "crates/pixi_compute_engine" }
+pixi_compute_fs = { path = "crates/pixi_compute_fs" }
 pixi_compute_env_vars = { path = "crates/pixi_compute_env_vars" }
 pixi_compute_network = { path = "crates/pixi_compute_network" }
 pixi_compute_reporters = { path = "crates/pixi_compute_reporters" }
+pixi_daemon = { path = "crates/pixi_daemon" }
 pixi_compute_sources = { path = "crates/pixi_compute_sources" }
 pixi_config = { path = "crates/pixi_config" }
 pixi_consts = { path = "crates/pixi_consts" }
@@ -130,6 +133,7 @@ pixi_task = { path = "crates/pixi_task" }
 pixi_test_utils = { path = "crates/pixi_test_utils" }
 pixi_toml = { path = "crates/pixi_toml" }
 pixi_url = { path = "crates/pixi_url" }
+pixi_vfs = { path = "crates/pixi_vfs" }
 pixi_utils = { path = "crates/pixi_utils", default-features = false }
 pixi_uv_context = { path = "crates/pixi_uv_context" }
 pixi_uv_conversions = { path = "crates/pixi_uv_conversions" }

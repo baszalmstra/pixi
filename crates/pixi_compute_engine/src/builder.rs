@@ -6,7 +6,7 @@ use crate::{
     ComputeEngine, DataStore,
     cycle::active_edges::ActiveEdges,
     engine::{EngineInner, SpawnHook},
-    key_graph::KeyGraph,
+    graph_owner::GraphOwner,
 };
 
 /// Builder for [`ComputeEngine`].
@@ -91,7 +91,7 @@ impl ComputeEngineBuilder {
     pub fn build(self) -> ComputeEngine {
         ComputeEngine {
             inner: Arc::new(EngineInner {
-                graph: KeyGraph::default(),
+                graph: GraphOwner::default(),
                 active_edges: Arc::new(ActiveEdges::new()),
                 sequential_branches: self.sequential_branches,
                 global_data: self.global_data,

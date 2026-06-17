@@ -12,8 +12,12 @@ use std::{
 };
 
 use cmp_any::PartialEqAny;
+use futures::future::BoxFuture;
 
-use crate::{Demand, Key};
+use crate::{
+    ComputeCtx, ComputeError, Demand, GraphVersion, Key, engine::EngineInner,
+    versions::VersionEpoch,
+};
 
 /// A type-erased, reference-counted handle to a [`Key`].
 ///
@@ -111,6 +115,15 @@ impl AnyKey {
         self.inner.dyn_provide(&mut demand);
         slot
     }
+
+    pub(crate) fn compute_for_check_deps(
+        &self,
+        engine: Arc<EngineInner>,
+        version: GraphVersion,
+        epoch: VersionEpoch,
+    ) -> BoxFuture<'static, Result<(), ComputeError>> {
+        self.inner.compute_for_check_deps(engine, version, epoch)
+    }
 }
 
 impl fmt::Debug for AnyKey {
@@ -157,6 +170,12 @@ pub(crate) trait AnyKeyDyn: Send + Sync {
     fn dyn_display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn dyn_debug(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn dyn_provide<'a, 's>(&'a self, demand: &mut Demand<'a, 's>);
+    fn compute_for_check_deps(
+        &self,
+        engine: Arc<EngineInner>,
+        version: GraphVersion,
+        epoch: VersionEpoch,
+    ) -> BoxFuture<'static, Result<(), ComputeError>>;
 }
 
 impl<K: Key> AnyKeyDyn for K {
@@ -184,5 +203,18 @@ impl<K: Key> AnyKeyDyn for K {
 
     fn dyn_provide<'a, 's>(&'a self, demand: &mut Demand<'a, 's>) {
         Key::provide(self, demand);
+    }
+
+    fn compute_for_check_deps(
+        &self,
+        engine: Arc<EngineInner>,
+        version: GraphVersion,
+        epoch: VersionEpoch,
+    ) -> BoxFuture<'static, Result<(), ComputeError>> {
+        let key = self.clone();
+        Box::pin(async move {
+            let mut ctx = ComputeCtx::new(engine, version, epoch);
+            ctx.compute_root(&key).await.map(|_| ())
+        })
     }
 }

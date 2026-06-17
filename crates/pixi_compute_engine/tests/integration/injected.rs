@@ -3,7 +3,7 @@
 
 use derive_more::Display;
 use pixi_compute_engine::{
-    ComputeCtx, ComputeEngine, DependencyGraph, InjectedKey, Key, NodeState,
+    ComputeCtx, ComputeEngine, DependencyGraph, InjectedKey, Key, NodeState, UpdateError,
 };
 
 /// A minimal injected key for testing.
@@ -54,6 +54,24 @@ async fn re_inject_panics() {
     let engine = ComputeEngine::new();
     engine.inject(Param(1), 1);
     engine.inject(Param(1), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn try_inject_duplicate_returns_error_and_graph_remains_usable() {
+    let engine = ComputeEngine::new();
+    engine.try_inject(Param(1), 1).unwrap();
+
+    let err = engine.try_inject(Param(1), 2).unwrap_err();
+    assert_eq!(
+        err,
+        UpdateError::InjectedKeyAlreadySet {
+            key: "Param(1)".to_string()
+        }
+    );
+    assert_eq!(engine.read(&Param(1)), Some(1));
+
+    engine.try_inject(Param(2), 20).unwrap();
+    assert_eq!(engine.compute(&Param(2)).await.unwrap(), 20);
 }
 
 // -- dep recording -----------------------------------------------------------

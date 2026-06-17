@@ -8,14 +8,15 @@ use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
 use crate::{
-    AnyKey, ComputeError, Key,
+    AnyKey, ComputeError, GraphVersion, Key, StorageType,
     cycle::{
         CycleError,
         active_edges::{ActiveEdges, DetectedCycle},
         guard::{GuardHandle, GuardStack},
     },
     engine::EngineInner,
-    key_graph::{Lookup, SpawnGeneration, boxed_compute_future},
+    key_graph::{KeyFuture, Lookup, RecordedDeps, SpawnGeneration, boxed_compute_future},
+    versions::VersionEpoch,
 };
 
 /// How [`ComputeCtx::resolve`] classified a `ctx.compute(...)` call.
@@ -27,6 +28,11 @@ enum Resolved<V> {
         shared: crate::key_graph::ComputeFuture<V>,
         on_complete: Option<EdgeGuard>,
     },
+    /// A dirty value is being validated through its recorded deps.
+    CheckDeps {
+        future: BoxFuture<'static, Result<V, ComputeError>>,
+        on_complete: Option<EdgeGuard>,
+    },
     /// The request closed a dependency cycle. Guards on the cycle
     /// path have already been notified; the caller should yield
     /// pending forever so that whichever guard's `select!` wins can
@@ -35,12 +41,44 @@ enum Resolved<V> {
 }
 
 /// Shared dependency accumulator for a single compute frame.
-///
-/// All sub-ctxes minted by parallel combinators within one frame
-/// share the same `DepsList` so every branch contributes to the same
-/// parent's dep set. The list is moved into the `Completed` graph
-/// node when the parent's compute body returns.
-type DepsList = Arc<Mutex<Vec<AnyKey>>>;
+type DepsList = Arc<Mutex<DepAccumulator>>;
+
+type ParallelDepsGroup = Arc<Mutex<Vec<Option<RecordedDeps>>>>;
+
+#[derive(Default)]
+struct DepAccumulator {
+    entries: Vec<DepEntry>,
+}
+
+enum DepEntry {
+    Dep(RecordedDeps),
+    Parallel(ParallelDepsGroup),
+}
+
+impl DepAccumulator {
+    fn record_key(&mut self, key: AnyKey) {
+        self.entries.push(DepEntry::Dep(RecordedDeps::key(key)));
+    }
+
+    fn record_parallel_group(&mut self, group: ParallelDepsGroup) {
+        self.entries.push(DepEntry::Parallel(group));
+    }
+
+    fn finish(&mut self) -> RecordedDeps {
+        let entries = std::mem::take(&mut self.entries);
+        let deps = entries
+            .into_iter()
+            .map(|entry| match entry {
+                DepEntry::Dep(dep) => dep,
+                DepEntry::Parallel(group) => {
+                    let deps = group.lock().iter().filter_map(Clone::clone).collect();
+                    RecordedDeps::parallel(deps)
+                }
+            })
+            .collect();
+        RecordedDeps::serial(deps)
+    }
+}
 
 /// Context passed to [`Key::compute`] so it can request dependencies.
 ///
@@ -155,6 +193,8 @@ type DepsList = Arc<Mutex<Vec<AnyKey>>>;
 /// [`declare_join_closure`]: Self::declare_join_closure
 pub struct ComputeCtx {
     engine: Arc<EngineInner>,
+    version: GraphVersion,
+    epoch: VersionEpoch,
     /// The Key whose compute is currently running in this frame, or
     /// `None` for the root ctx inside
     /// [`ComputeEngine::compute`](crate::ComputeEngine::compute) before
@@ -180,11 +220,17 @@ pub struct ComputeCtx {
 }
 
 impl ComputeCtx {
-    pub(crate) fn new(engine: Arc<EngineInner>) -> Self {
+    pub(crate) fn new(
+        engine: Arc<EngineInner>,
+        version: GraphVersion,
+        epoch: VersionEpoch,
+    ) -> Self {
         Self {
             engine,
+            version,
+            epoch,
             current: None,
-            deps: Arc::new(Mutex::new(Vec::new())),
+            deps: Arc::new(Mutex::new(DepAccumulator::default())),
             guard_stack: Arc::new(GuardStack::new()),
         }
     }
@@ -196,14 +242,18 @@ impl ComputeCtx {
     /// an awaited dep fails with a cycle.
     pub(crate) fn new_root_with_fallback(
         engine: Arc<EngineInner>,
+        version: GraphVersion,
+        epoch: VersionEpoch,
     ) -> (Self, oneshot::Receiver<CycleError>) {
         let (tx, rx) = oneshot::channel();
         let guard_stack = Arc::new(GuardStack::new());
         guard_stack.set_fallback(Arc::new(GuardHandle::new(tx)));
         let ctx = Self {
             engine,
+            version,
+            epoch,
             current: None,
-            deps: Arc::new(Mutex::new(Vec::new())),
+            deps: Arc::new(Mutex::new(DepAccumulator::default())),
             guard_stack,
         };
         (ctx, rx)
@@ -224,6 +274,11 @@ impl ComputeCtx {
         &self.engine.global_data
     }
 
+    /// The graph version associated with this context.
+    pub fn graph_version(&self) -> GraphVersion {
+        self.version
+    }
+
     /// Build a [`ParallelBuilder`] that mints one future per parallel
     /// branch, each owning its own sub-ctx that shares this ctx's
     /// active-edge state and dep accumulator but carries a
@@ -237,23 +292,27 @@ impl ComputeCtx {
     /// [`compute_join`](Self::compute_join),
     /// [`try_compute_join`](Self::try_compute_join).
     pub fn parallel(&mut self) -> ParallelBuilder<'_> {
+        let group = Arc::new(Mutex::new(Vec::new()));
+        self.deps.lock().record_parallel_group(group.clone());
         let inner = if self.engine.sequential_branches {
             ParallelBuilderInner::Serial {
                 engine: &self.engine,
+                version: self.version,
+                epoch: self.epoch,
                 current: &self.current,
-                deps: &self.deps,
                 guard_stack: &self.guard_stack,
                 prev_done: None,
             }
         } else {
             ParallelBuilderInner::Concurrent {
                 engine: &self.engine,
+                version: self.version,
+                epoch: self.epoch,
                 current: &self.current,
-                deps: &self.deps,
                 guard_stack: &self.guard_stack,
             }
         };
-        ParallelBuilder { inner }
+        ParallelBuilder { inner, group }
     }
 
     /// Request the value of another Key as a dependency of the
@@ -429,26 +488,21 @@ impl ComputeCtx {
         // everyone behind one lock and adds tens of seconds of wall
         // time per call. For an already-completed value there is
         // nothing to await, so no edge is needed.
-        if let Some(Lookup::Completed(value)) = self.engine.graph.lookup(key) {
-            self.deps.lock().push(any_key);
+        if let Some(value) = self.engine.graph.lookup_value(key.clone(), self.version) {
+            self.deps.lock().record_key(any_key);
             return Resolved::Value(value);
         }
 
         // Miss or in-flight: we are going to wait. Install the active
-        // edge *before* spawning the child task so that any descendant
+        // edge before spawning the child task so that any descendant
         // task that races ahead and tries to close a back-edge sees
-        // our edge already in place. Spawning first (the previous
-        // ordering) opened a small window where the freshly-spawned
-        // child could start running on another worker, recursively
-        // spawn its own children, and close a cycle whose BFS misses
-        // our not-yet-installed edge, resulting in an undetected
-        // deadlock.
+        // our edge already in place.
         let edge_guard = match self.current.clone() {
             Some(caller) => match self.install_active_edge(caller, &any_key) {
                 Ok(edge) => Some(edge),
                 Err(detected) => {
                     Self::notify_cycle(detected);
-                    self.deps.lock().push(any_key);
+                    self.deps.lock().record_key(any_key);
                     return Resolved::Cycle;
                 }
             },
@@ -457,12 +511,60 @@ impl ComputeCtx {
             None => None,
         };
 
-        let child_current = Some(any_key.clone());
-        let lookup = self.engine.graph.get_or_insert_with(key, |generation| {
-            spawn_compute_future::<K>(self.engine.clone(), key.clone(), child_current, generation)
-        });
+        if K::storage_type() == StorageType::Injected {
+            let hit = self
+                .engine
+                .graph
+                .lookup(key.clone(), self.version, self.epoch);
+            self.deps.lock().record_key(any_key.clone());
+            return match hit {
+                Some(Lookup::Completed(value)) => {
+                    drop(edge_guard);
+                    Resolved::Value(value)
+                }
+                Some(Lookup::CheckDeps {
+                    value,
+                    deps,
+                    verified_from,
+                }) => Resolved::CheckDeps {
+                    future: check_deps_or_compute::<K>(
+                        self.engine.clone(),
+                        self.version,
+                        self.epoch,
+                        key.clone(),
+                        value,
+                        deps,
+                        verified_from,
+                    ),
+                    on_complete: edge_guard,
+                },
+                Some(Lookup::InFlight(shared)) => Resolved::Future {
+                    shared,
+                    on_complete: edge_guard,
+                },
+                None => panic!(
+                    "injected key not set: {}. All injected values must be provided via ComputeEngine::inject() before computing keys that depend on them.",
+                    any_key,
+                ),
+            };
+        }
 
-        self.deps.lock().push(any_key);
+        let child_current = Some(any_key.clone());
+        let prepared = prepare_compute_future::<K>(
+            self.engine.clone(),
+            self.version,
+            self.epoch,
+            key.clone(),
+            child_current,
+        );
+        let lookup = self.engine.graph.get_or_insert_with(
+            key.clone(),
+            self.version,
+            self.epoch,
+            move |generation| prepared.spawn(generation),
+        );
+
+        self.deps.lock().record_key(any_key);
 
         match lookup {
             // Lost a benign race between the peek and the insert:
@@ -473,6 +575,22 @@ impl ComputeCtx {
                 drop(edge_guard);
                 Resolved::Value(value)
             }
+            Lookup::CheckDeps {
+                value,
+                deps,
+                verified_from,
+            } => Resolved::CheckDeps {
+                future: check_deps_or_compute::<K>(
+                    self.engine.clone(),
+                    self.version,
+                    self.epoch,
+                    key.clone(),
+                    value,
+                    deps,
+                    verified_from,
+                ),
+                on_complete: edge_guard,
+            },
             Lookup::InFlight(shared) => Resolved::Future {
                 shared,
                 on_complete: edge_guard,
@@ -517,18 +635,15 @@ impl ComputeCtx {
             } => {
                 let result = shared.await;
                 drop(on_complete);
-                match result {
-                    Ok(value) => value,
-                    Err(ComputeError::Canceled) => {
-                        // An awaiting caller is itself a strong `Shared` holder,
-                        // so cancellation while observing should be unreachable
-                        // unless a future change adds an out-of-band abort path.
-                        panic!("compute was canceled while a caller was awaiting it")
-                    }
-                    Err(ComputeError::Cycle(err)) => {
-                        Self::park_after_transitive_cycle(guard_stack, err).await
-                    }
-                }
+                Self::unwrap_dependency_result(result, guard_stack).await
+            }
+            Resolved::CheckDeps {
+                future,
+                on_complete,
+            } => {
+                let result = future.await;
+                drop(on_complete);
+                Self::unwrap_dependency_result(result, guard_stack).await
             }
             Resolved::Cycle => Self::pending_after_direct_cycle().await,
         }
@@ -545,10 +660,33 @@ impl ComputeCtx {
                 drop(on_complete);
                 result
             }
-            // `resolve` only returns `Cycle` when the caller has a `current` key,
-            // which the root ctx does not. Reachable only if a future change starts
-            // assigning synthetic roots a `current`.
+            Resolved::CheckDeps {
+                future,
+                on_complete,
+            } => {
+                let result = future.await;
+                drop(on_complete);
+                result
+            }
             Resolved::Cycle => std::future::pending().await,
+        }
+    }
+
+    async fn unwrap_dependency_result<V: Clone>(
+        result: Result<V, ComputeError>,
+        guard_stack: Arc<GuardStack>,
+    ) -> V {
+        match result {
+            Ok(value) => value,
+            Err(ComputeError::Canceled) => {
+                panic!("compute was canceled while a caller was awaiting it")
+            }
+            Err(ComputeError::Rejected) => {
+                panic!("compute graph version was rejected while a caller was awaiting it")
+            }
+            Err(ComputeError::Cycle(err)) => {
+                Self::park_after_transitive_cycle(guard_stack, err).await
+            }
         }
     }
 
@@ -1028,19 +1166,22 @@ impl Drop for EdgeGuard {
 /// cases.
 pub struct ParallelBuilder<'p> {
     inner: ParallelBuilderInner<'p>,
+    group: ParallelDepsGroup,
 }
 
 enum ParallelBuilderInner<'p> {
     Concurrent {
         engine: &'p Arc<EngineInner>,
+        version: GraphVersion,
+        epoch: VersionEpoch,
         current: &'p Option<AnyKey>,
-        deps: &'p DepsList,
         guard_stack: &'p Arc<GuardStack>,
     },
     Serial {
         engine: &'p Arc<EngineInner>,
+        version: GraphVersion,
+        epoch: VersionEpoch,
         current: &'p Option<AnyKey>,
-        deps: &'p DepsList,
         guard_stack: &'p Arc<GuardStack>,
         prev_done: Option<oneshot::Receiver<()>>,
     },
@@ -1058,21 +1199,32 @@ impl ParallelBuilder<'_> {
     where
         F: for<'x> AsyncFnOnce(&'x mut ComputeCtx) -> T + Send,
     {
-        let (engine, current, deps, guard_stack) = match &self.inner {
+        let (engine, version, epoch, current, guard_stack) = match &self.inner {
             ParallelBuilderInner::Concurrent {
                 engine,
+                version,
+                epoch,
                 current,
-                deps,
                 guard_stack,
+                ..
             }
             | ParallelBuilderInner::Serial {
                 engine,
+                version,
+                epoch,
                 current,
-                deps,
                 guard_stack,
                 ..
-            } => (*engine, *current, *deps, *guard_stack),
+            } => (*engine, *version, *epoch, *current, *guard_stack),
         };
+        let branch_index = {
+            let mut group = self.group.lock();
+            let index = group.len();
+            group.push(None);
+            index
+        };
+        let branch_group = self.group.clone();
+        let branch_deps = Arc::new(Mutex::new(DepAccumulator::default()));
         // Branch-local guard stack: a fresh stack that chains to
         // the parent's stack. Pushes and removes inside this
         // branch's `with_cycle_guard` scopes stay local, so
@@ -1082,8 +1234,10 @@ impl ParallelBuilder<'_> {
         // synthetic fallback at the root.
         let mut ctx = ComputeCtx {
             engine: engine.clone(),
+            version,
+            epoch,
             current: current.clone(),
-            deps: deps.clone(),
+            deps: branch_deps.clone(),
             guard_stack: Arc::new(GuardStack::new_branch(guard_stack.clone())),
         };
         let (prev, done_tx) = match &mut self.inner {
@@ -1098,6 +1252,8 @@ impl ParallelBuilder<'_> {
                 let _ = prev.await;
             }
             let value = func(&mut ctx).await;
+            let deps = branch_deps.lock().finish();
+            branch_group.lock()[branch_index] = Some(deps);
             if let Some(done_tx) = done_tx {
                 let _ = done_tx.send(());
             }
@@ -1106,64 +1262,162 @@ impl ParallelBuilder<'_> {
     }
 }
 
-/// Build the future that will be driven by a freshly-spawned tokio task for
-/// Key `K`.
-///
-/// Runs under the per-type slot's mutex, so it must be quick. The bulk
-/// of the work happens inside the spawned task, not here.
-///
-/// Each task installs a fresh [`GuardStack`] rather than inheriting
-/// one because `with_cycle_guard` scopes belong to a specific
-/// compute body; sharing would leak one compute's guards into an
-/// unrelated sibling's cycle path. Cross-task notification does not
-/// depend on any engine-wide stack registry: each active edge in
-/// [`ActiveEdges`] captures, at edge-creation time, the notify
-/// target resolved from the caller's branch-local guard stack, so
-/// the detector just fires the targets carried by the edges in the
-/// cycle.
-///
-/// The task seeds its fresh stack with a synthetic fallback
-/// [`GuardHandle`] in a dedicated slot (not a frame). When a call
-/// to [`ComputeCtx::compute`] resolves its notify target, any user
-/// `with_cycle_guard` on the current branch-local stack wins; with
-/// no user scope open the fallback is captured instead. If the
-/// fallback fires, the task's output becomes
-/// `Err(ComputeError::Cycle(..))`, which propagates through every
-/// awaiting caller's `shared.await` back to
-/// [`ComputeEngine::compute`](crate::ComputeEngine::compute). The
-/// fallback is never surfaced on a user-held `ComputeCtx`.
-fn spawn_compute_future<K: Key>(
+fn check_deps_or_compute<K: Key>(
     engine: Arc<EngineInner>,
+    version: GraphVersion,
+    epoch: VersionEpoch,
+    key: K,
+    value: K::Value,
+    deps: RecordedDeps,
+    verified_from: GraphVersion,
+) -> BoxFuture<'static, Result<K::Value, ComputeError>> {
+    Box::pin(async move {
+        if !check_recorded_deps(engine.clone(), version, epoch, deps.clone(), verified_from).await?
+        {
+            return compute_uncached::<K>(engine, version, epoch, key).await;
+        }
+
+        engine.graph.mark_unchanged::<K>(
+            key.clone(),
+            value.clone(),
+            deps,
+            verified_from,
+            version,
+            epoch,
+        )?;
+        Ok(value)
+    })
+}
+
+fn check_recorded_deps(
+    engine: Arc<EngineInner>,
+    version: GraphVersion,
+    epoch: VersionEpoch,
+    deps: RecordedDeps,
+    verified_from: GraphVersion,
+) -> BoxFuture<'static, Result<bool, ComputeError>> {
+    Box::pin(async move {
+        match deps {
+            RecordedDeps::Empty => Ok(true),
+            RecordedDeps::Key(dep) => {
+                dep.compute_for_check_deps(engine.clone(), version, epoch)
+                    .await?;
+                Ok(engine
+                    .graph
+                    .deps_unchanged_since(vec![dep], verified_from, version))
+            }
+            RecordedDeps::Serial(deps) => {
+                for dep in deps {
+                    if !check_recorded_deps(engine.clone(), version, epoch, dep, verified_from)
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            RecordedDeps::Parallel(deps) => {
+                let checks = deps.into_iter().map(|dep| {
+                    check_recorded_deps(engine.clone(), version, epoch, dep, verified_from)
+                });
+                let results = futures::future::join_all(checks).await;
+                let mut unchanged = true;
+                for result in results {
+                    unchanged &= result?;
+                }
+                Ok(unchanged)
+            }
+        }
+    })
+}
+
+async fn compute_uncached<K: Key>(
+    engine: Arc<EngineInner>,
+    version: GraphVersion,
+    epoch: VersionEpoch,
+    key: K,
+) -> Result<K::Value, ComputeError> {
+    let guard_stack = Arc::new(GuardStack::new());
+    let (fallback_tx, fallback_rx) = oneshot::channel();
+    guard_stack.set_fallback(Arc::new(GuardHandle::new(fallback_tx)));
+
+    let current = Some(AnyKey::new(key.clone()));
+    let mut child_ctx = ComputeCtx {
+        engine: engine.clone(),
+        version,
+        epoch,
+        current,
+        deps: Arc::new(Mutex::new(DepAccumulator::default())),
+        guard_stack,
+    };
+
+    let key_for_body = key.clone();
+    let engine_for_body = engine.clone();
+    let compute_body = async move {
+        let value = key_for_body.compute(&mut child_ctx).await;
+        let final_deps = child_ctx.deps.lock().finish();
+        engine_for_body.graph.insert_computed_direct::<K>(
+            key_for_body.clone(),
+            value.clone(),
+            final_deps,
+            version,
+            epoch,
+        )?;
+        Ok(value)
+    };
+
+    tokio::select! {
+        biased;
+        cycle = fallback_rx => Err(ComputeError::Cycle(
+            cycle.expect("synthetic cycle fallback sender dropped"),
+        )),
+        value = compute_body => value,
+    }
+}
+
+struct PreparedCompute<K: Key> {
+    runtime: tokio::runtime::Handle,
+    start_tx: oneshot::Sender<SpawnGeneration>,
+    result_rx: oneshot::Receiver<Result<K::Value, ComputeError>>,
+    wrapped: BoxFuture<'static, ()>,
+}
+
+impl<K: Key> PreparedCompute<K> {
+    fn spawn(self, generation: SpawnGeneration) -> KeyFuture<K> {
+        let handle = self.runtime.spawn(self.wrapped);
+        let _ = self.start_tx.send(generation);
+        boxed_compute_future(handle, self.result_rx)
+    }
+}
+
+fn prepare_compute_future<K: Key>(
+    engine: Arc<EngineInner>,
+    version: GraphVersion,
+    epoch: VersionEpoch,
     key: K,
     current: Option<AnyKey>,
-    generation: SpawnGeneration,
-) -> BoxFuture<'static, Result<K::Value, ComputeError>> {
-    // The compute body runs inside a task spawned by `tokio::spawn`.
-    // An optional `SpawnHook` on the engine may wrap that body with
-    // caller-side task-local setup (e.g. scoping a reporter context)
-    // before spawn. The hook operates on a `BoxFuture<'static, ()>`;
-    // a oneshot channel carries the typed result out.
+) -> PreparedCompute<K> {
+    let runtime = tokio::runtime::Handle::current();
+    let (start_tx, start_rx) = oneshot::channel::<SpawnGeneration>();
     let (result_tx, result_rx) = oneshot::channel::<Result<K::Value, ComputeError>>();
 
     let engine_for_inner = engine.clone();
     let body: BoxFuture<'static, ()> = Box::pin(async move {
-        let guard_stack = Arc::new(GuardStack::new());
+        let Ok(generation) = start_rx.await else {
+            let _ = result_tx.send(Err(ComputeError::Canceled));
+            return;
+        };
 
-        // Synthetic fallback: stored in its own slot, outside the
-        // user-frame stack. The detector's `innermost()` prefers
-        // user frames and falls back to this one, so a user
-        // `with_cycle_guard` on a cycle-path key catches first.
-        // When no user scope is open, this fallback fires and ends
-        // the task with `Err(Cycle)`. The transitive propagation
-        // path in `ComputeCtx::compute` routes directly here,
-        // bypassing user frames on the caller.
+        let guard_stack = Arc::new(GuardStack::new());
         let (fallback_tx, fallback_rx) = oneshot::channel();
         guard_stack.set_fallback(Arc::new(GuardHandle::new(fallback_tx)));
 
         let mut child_ctx = ComputeCtx {
             engine: engine_for_inner.clone(),
+            version,
+            epoch,
             current,
-            deps: Arc::new(Mutex::new(Vec::new())),
+            deps: Arc::new(Mutex::new(DepAccumulator::default())),
             guard_stack,
         };
 
@@ -1171,36 +1425,26 @@ fn spawn_compute_future<K: Key>(
         let key_for_body = key.clone();
         let compute_body = async move {
             let value = key_for_body.compute(&mut child_ctx).await;
-            let final_deps = std::mem::take(&mut *child_ctx.deps.lock());
+            let final_deps = child_ctx.deps.lock().finish();
             engine_for_body.graph.insert_completed::<K>(
-                &key_for_body,
+                key_for_body.clone(),
                 value.clone(),
                 final_deps,
+                version,
+                epoch,
                 generation,
-            );
-            value
+            )?;
+            Ok(value)
         };
 
-        // `biased;` so that if the cycle fallback has been fired,
-        // we always return `Err(Cycle)` even in the race where the
-        // compute body also completes in the same poll. Without it
-        // the race's random pick would occasionally let a cycled
-        // task return `Ok` of a value derived from a dependency
-        // that had already been reported as cyclic.
         let result: Result<K::Value, ComputeError> = tokio::select! {
             biased;
             cycle = fallback_rx => Err(ComputeError::Cycle(
-                // The sender lives in the fallback frame on our
-                // own stack for the whole task, so `Err` (sender
-                // dropped) is structurally impossible.
                 cycle.expect("synthetic cycle fallback sender dropped"),
             )),
-            value = compute_body => Ok(value),
+            value = compute_body => value,
         };
 
-        // The only way the receiver is gone is if the outer future
-        // wrapping this task was dropped, in which case the task is
-        // already being torn down and the send is irrelevant.
         let _ = result_tx.send(result);
     });
 
@@ -1209,6 +1453,10 @@ fn spawn_compute_future<K: Key>(
         None => body,
     };
 
-    let handle = tokio::spawn(wrapped);
-    boxed_compute_future(handle, result_rx)
+    PreparedCompute {
+        runtime,
+        start_tx,
+        result_rx,
+        wrapped,
+    }
 }

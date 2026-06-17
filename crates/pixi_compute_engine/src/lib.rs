@@ -221,12 +221,11 @@
 //! values through the normal [`ComputeCtx::compute`] call, and the
 //! dependency is tracked for introspection.
 //!
-//! All injected values must be provided before computing any key that
+//! Injected values must be provided before computing any key that
 //! depends on them. Requesting an injected key that has not been set
-//! *panics*. Each key may be injected at most once per engine. Both
-//! restrictions exist because the engine has no invalidation mechanism:
-//! computed keys that already cached a result cannot be retroactively
-//! updated. If you need different injected values, create a new engine.
+//! *panics*. Initial injection is single-write; use
+//! [`ComputeEngine::re_inject`] or an update transaction to replace an
+//! injected value and dirty its dependents.
 //!
 //! ```
 //! use std::fmt;
@@ -267,11 +266,13 @@ mod data;
 mod demand;
 mod engine;
 mod error;
+mod graph_owner;
 mod injected;
 pub mod introspection;
 mod key;
 mod key_graph;
 mod short_type_name;
+mod versions;
 
 pub use any_key::AnyKey;
 pub use builder::ComputeEngineBuilder;
@@ -279,9 +280,12 @@ pub use ctx::{ComputeCtx, ParallelBuilder};
 pub use cycle::CycleError;
 pub use data::DataStore;
 pub use demand::Demand;
-pub use engine::{ComputeEngine, SpawnHook};
-pub use error::ComputeError;
+pub use engine::{
+    ComputeEngine, ComputeEngineStats, ComputeSnapshot, ComputeUpdater, SpawnHook, UpdateResult,
+};
+pub use error::{ComputeError, UpdateError};
 pub use injected::InjectedKey;
 pub use introspection::{DependencyGraph, GraphNode, NodeState};
 pub use key::{Key, StorageType};
 pub use short_type_name::short_type_name;
+pub use versions::GraphVersion;

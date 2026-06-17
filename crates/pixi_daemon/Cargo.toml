@@ -1,0 +1,22 @@
+[package]
+authors.workspace = true
+description = "Experimental daemon services for pixi"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "pixi_daemon"
+readme.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+notify = { workspace = true }
+pixi_compute_engine = { workspace = true }
+pixi_compute_fs = { workspace = true }
+pixi_vfs = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+filetime = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

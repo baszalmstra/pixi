@@ -1,8 +1,8 @@
 //! [`DependencyGraph`]: a point-in-time snapshot of the engine's graph.
 //!
-//! Built by walking the live [`KeyGraph`](crate::key_graph::KeyGraph) and
-//! cloning out per-node state. The snapshot is the main consumer-facing
-//! introspection surface; it does not retain a borrow of the engine.
+//! Built by asking the graph owner to clone out per-node state. The
+//! snapshot is the main consumer-facing introspection surface; it does
+//! not retain a borrow of the engine.
 
 use crate::{
     AnyKey, ComputeEngine,
@@ -58,12 +58,7 @@ impl DependencyGraph {
     /// reads), but each individual node's state is internally
     /// consistent.
     pub fn from_engine(engine: &ComputeEngine) -> Self {
-        let mut records: Vec<NodeRecord> = Vec::new();
-        engine
-            .inner
-            .graph
-            .for_each_slot(|slot| slot.snapshot(&mut records));
-        Self::from_records(records)
+        Self::from_records(engine.inner.graph.snapshot_records())
     }
 
     fn from_records(records: Vec<NodeRecord>) -> Self {

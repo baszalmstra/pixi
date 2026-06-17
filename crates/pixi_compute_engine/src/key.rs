@@ -12,8 +12,6 @@ use crate::{ComputeCtx, Demand, short_type_name};
 ///
 /// Returned by [`Key::storage_type`]. The engine uses this to decide
 /// whether to spawn a compute task or look up a pre-populated value.
-///
-/// Modeled after DICE's `StorageType` enum in buck2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageType {
     /// The value is produced by [`Key::compute`]. The engine spawns a

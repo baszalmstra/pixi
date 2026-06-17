@@ -35,6 +35,10 @@ pub enum ComputeError {
     #[error("compute was canceled")]
     Canceled,
 
+    /// The snapshot's graph version is no longer accepted by the engine.
+    #[error("compute graph version was rejected")]
+    Rejected,
+
     /// A dependency cycle was detected that no
     /// [`ComputeCtx::with_cycle_guard`](crate::ComputeCtx::with_cycle_guard)
     /// scope caught.
@@ -44,4 +48,24 @@ pub enum ComputeError {
     /// closing edge is from the last entry back to the first.
     #[error("compute cycle detected: {0}")]
     Cycle(CycleError),
+}
+
+/// An error returned while preparing or committing graph updates.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UpdateError {
+    /// The same key appeared more than once in a single update transaction.
+    #[error("duplicate graph update for key {key}")]
+    DuplicateKey { key: String },
+
+    /// Injected keys must be replaced with a value, not invalidated.
+    #[error("injected key cannot be invalidated without a replacement value: {key}")]
+    InjectedKeyInvalidated { key: String },
+
+    /// The initial injected value was already provided for this key.
+    #[error("injected key already set: {key}")]
+    InjectedKeyAlreadySet { key: String },
+
+    /// An external update source failed while preparing graph updates.
+    #[error("external update failed: {message}")]
+    External { message: String },
 }

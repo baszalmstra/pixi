@@ -1,0 +1,22 @@
+[package]
+authors.workspace = true
+description = "Filesystem computation graph helpers for pixi"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "pixi_compute_fs"
+readme.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+futures = { workspace = true }
+pixi_compute_engine = { workspace = true }
+pixi_vfs = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+notify = { workspace = true }
+pixi_glob = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

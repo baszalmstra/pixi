@@ -82,6 +82,11 @@ pub trait InjectedKey: Hash + Eq + Clone + Display + Debug + Send + Sync + 'stat
     /// Must be cheap to clone (see the trait-level note).
     type Value: Clone + Send + Sync + 'static;
 
+    /// Equality check between two injected values for this key.
+    fn equality(_a: &Self::Value, _b: &Self::Value) -> bool {
+        false
+    }
+
     /// Short, log-friendly type name. Strips the module path by default.
     fn key_type_name() -> &'static str {
         short_type_name::<Self>()
@@ -111,6 +116,10 @@ impl<K: InjectedKey> Key for K {
              use ComputeEngine::inject() to provide its value",
             Self::key_type_name(),
         )
+    }
+
+    fn equality(a: &Self::Value, b: &Self::Value) -> bool {
+        <K as InjectedKey>::equality(a, b)
     }
 
     fn key_type_name() -> &'static str {
