@@ -196,12 +196,13 @@ impl Index {
     }
 
     pub(crate) fn query_keys_for_path(&self, path: &Path) -> Vec<GlobQueryKey> {
-        // A file event can only affect queries rooted at an ancestor of the
-        // changed path. Pattern matching is checked later for each candidate.
+        // A file event can only affect queries whose effective walk root is an
+        // ancestor of the changed path. Pattern matching is checked later for
+        // each candidate.
         self.queries
-            .keys()
-            .filter(|key| path.starts_with(&key.root))
-            .cloned()
+            .iter()
+            .filter(|(_, query)| query.affects_path(path))
+            .map(|(key, _)| key.clone())
             .collect()
     }
 

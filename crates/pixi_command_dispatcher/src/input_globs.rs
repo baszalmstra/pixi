@@ -14,7 +14,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use pixi_build_types::InputGlobSet;
 use pixi_compute_engine::ComputeCtx;
-use pixi_compute_fs::{ComputeCtxFsExt, FsError, GlobMTime};
+use pixi_compute_fs::{ComputeCtxFsExt, FsError, GlobMTime, InputGlobSpec};
 use pixi_glob::GlobSetError;
 use pixi_path::{AbsPath, AbsPathBuf};
 
@@ -89,8 +89,8 @@ pub enum InputGlobLatestMTime {
 /// backend input glob groups.
 ///
 /// This is used as a fast stale-cache detector, not as a replacement for exact
-/// input discovery. Groups using marker dispatch or exclude patterns are
-/// skipped because `glob_mtime` cannot represent those semantics yet; callers
+/// input discovery. It supports the same ordered include/exclude patterns,
+/// marker pruning, and hidden-file setting as [`collect_input_files`]; callers
 /// still run [`collect_input_files`] afterward when this helper does not prove
 /// the cache stale.
 pub async fn latest_input_mtime(
@@ -100,34 +100,23 @@ pub async fn latest_input_mtime(
 ) -> Result<InputGlobLatestMTime, FsError> {
     let queries = groups
         .iter()
-        .filter(|group| can_use_glob_mtime(group))
-        .flat_map(|group| {
+        .map(|group| {
             let spec = InputGlobSetWalkSpec::from_group(group, caller_root.as_std_path());
-            spec.patterns
-                .into_iter()
-                .map(move |pattern| InputGlobMTimeQuery {
-                    root: spec.root.clone(),
-                    pattern,
-                    exclude_hidden: spec.exclude_hidden,
-                })
+            let input_spec = InputGlobSpec::new(spec.patterns)
+                .with_markers(spec.markers)
+                .with_exclude_hidden(spec.exclude_hidden);
+            (spec.root, input_spec)
         })
         .collect::<Vec<_>>();
 
-    let per_pattern = ctx
+    let per_group = ctx
         .try_compute_join(
             queries,
             async move |sub_ctx: &mut ComputeCtx,
-                        query: InputGlobMTimeQuery|
+                        (root, spec): (std::path::PathBuf, InputGlobSpec)|
                         -> Result<InputGlobLatestMTime, FsError> {
-                match sub_ctx.glob_mtime(&query.root, &query.pattern).await? {
+                match sub_ctx.input_glob_mtime(&root, spec).await? {
                     GlobMTime::NoMatches => Ok(InputGlobLatestMTime::NoMatches),
-                    GlobMTime::MatchesFound {
-                        designated_file, ..
-                    } if query.exclude_hidden
-                        && has_hidden_component(&query.root, &designated_file) =>
-                    {
-                        Ok(InputGlobLatestMTime::NoMatches)
-                    }
                     GlobMTime::MatchesFound {
                         modified_at,
                         designated_file,
@@ -144,34 +133,7 @@ pub async fn latest_input_mtime(
         )
         .await?;
 
-    Ok(newest_mtime(per_pattern))
-}
-
-#[derive(Clone)]
-struct InputGlobMTimeQuery {
-    root: std::path::PathBuf,
-    pattern: String,
-    exclude_hidden: bool,
-}
-
-fn can_use_glob_mtime(group: &InputGlobSet) -> bool {
-    group.markers.is_empty()
-        && group
-            .patterns
-            .iter()
-            .all(|pattern| !pattern.starts_with('!'))
-}
-
-fn has_hidden_component(root: &std::path::Path, path: &std::path::Path) -> bool {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .any(|component| {
-            let std::path::Component::Normal(name) = component else {
-                return false;
-            };
-            name.to_string_lossy().starts_with('.')
-        })
+    Ok(newest_mtime(per_group))
 }
 
 fn newest_mtime(values: impl IntoIterator<Item = InputGlobLatestMTime>) -> InputGlobLatestMTime {
@@ -303,7 +265,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_mtime_skips_hidden_designated_file_when_hidden_files_are_excluded() {
+    async fn latest_mtime_honors_hidden_filtering() {
         let tmp = TempDir::new().unwrap();
         let visible = tmp.path().join("visible.txt");
         let hidden = tmp.path().join(".pixi").join("hidden.txt");
@@ -317,12 +279,15 @@ mod tests {
 
         assert_eq!(
             latest(&[group(&["**/*.txt"], true)], root).await,
-            InputGlobLatestMTime::NoMatches
+            InputGlobLatestMTime::MatchesFound {
+                modified_at: base + Duration::from_secs(1),
+                designated_file: AbsPathBuf::new(visible).unwrap(),
+            }
         );
     }
 
     #[tokio::test]
-    async fn latest_mtime_skips_groups_with_exclude_patterns() {
+    async fn latest_mtime_honors_exclude_patterns() {
         let tmp = TempDir::new().unwrap();
         let included = tmp.path().join("included.txt");
         let excluded = tmp.path().join("excluded.txt");
@@ -335,7 +300,35 @@ mod tests {
 
         assert_eq!(
             latest(&[group(&["**/*.txt", "!excluded.txt"], true)], root).await,
-            InputGlobLatestMTime::NoMatches
+            InputGlobLatestMTime::MatchesFound {
+                modified_at: base + Duration::from_secs(1),
+                designated_file: AbsPathBuf::new(included).unwrap(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_mtime_honors_marker_leaf_semantics() {
+        let tmp = TempDir::new().unwrap();
+        let pkg = tmp.path().join("pkg");
+        fs_err::create_dir(&pkg).unwrap();
+        let marker = pkg.join("package.xml");
+        let hidden_by_marker = pkg.join("newest.rs");
+        fs_err::write(&marker, b"marker").unwrap();
+        fs_err::write(&hidden_by_marker, b"newest").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        set_mtime(&marker, base + Duration::from_secs(2));
+        set_mtime(&hidden_by_marker, base + Duration::from_secs(3));
+        let root = AbsPath::new(tmp.path()).unwrap();
+        let mut group = group(&["**/*.rs", "**/package.xml"], true);
+        group.markers = vec!["package.xml".to_string()];
+
+        assert_eq!(
+            latest(&[group], root).await,
+            InputGlobLatestMTime::MatchesFound {
+                modified_at: base + Duration::from_secs(2),
+                designated_file: AbsPathBuf::new(marker).unwrap(),
+            }
         );
     }
 

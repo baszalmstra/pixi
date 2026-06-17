@@ -13,6 +13,7 @@ version = "0.1.0"
 crossbeam-deque = "0.8.6"
 fs-err = { workspace = true }
 glob = { workspace = true }
+ignore = "0.4"
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 

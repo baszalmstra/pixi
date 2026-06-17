@@ -7475,6 +7475,7 @@ dependencies = [
  "filetime",
  "fs-err",
  "glob",
+ "ignore",
  "parking_lot 0.12.5",
  "pixi_glob",
  "tempfile",

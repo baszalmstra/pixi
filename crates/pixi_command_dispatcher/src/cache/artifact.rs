@@ -640,8 +640,8 @@ mod tests {
         assert!(
             graph
                 .nodes()
-                .any(|node| node.type_name.ends_with("GlobMTimeKey")),
-            "artifact lookup should request the compute filesystem glob mtime key"
+                .any(|node| node.type_name.ends_with("InputGlobMTimeKey")),
+            "artifact lookup should request the compute filesystem input-glob mtime key"
         );
     }
 

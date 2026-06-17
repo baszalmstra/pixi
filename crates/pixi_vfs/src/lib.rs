@@ -22,7 +22,8 @@ use std::{io, path::PathBuf};
 
 pub use backend::{EntryKind, RealVfsBackend, VfsBackend, VfsBackendEntry, VfsBackendMetadata};
 pub use glob::{
-    GlobMTime, GlobQueryChange, GlobQueryInvalidation, LatestMTimeDiagnostics, VfsPathRefresh,
+    GlobMTime, GlobQueryChange, GlobQueryInvalidation, GlobSetSpec, GlobSpec,
+    LatestMTimeDiagnostics, VfsPathRefresh,
 };
 pub use read::{VfsDirectoryEntry, VfsMetadata};
 pub use state::{IndexedVfs, VfsStats};
@@ -54,6 +55,12 @@ pub enum VfsError {
         /// Parser error from the glob crate.
         #[source]
         source: ::glob::PatternError,
+    },
+    /// Glob-set patterns could not be compiled or rebased.
+    #[error("invalid glob set: {message}")]
+    GlobSet {
+        /// Error message from the glob-set builder.
+        message: String,
     },
     /// `WalkMode::IndexOnly` could not answer from clean indexed state.
     #[error("index-only walk needed {needed} for {path}")]

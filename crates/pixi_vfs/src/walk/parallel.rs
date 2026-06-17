@@ -136,13 +136,13 @@ impl WalkOutcome {
 }
 
 #[derive(Default)]
-struct DiskDelta {
+pub(crate) struct DiskDelta {
     /// Directories that were actually visited by the backend walk. They are
     /// committed as unknown listings because the glob walk may intentionally
     /// skip non-matching files.
-    visited_dirs: Vec<PathBuf>,
+    pub(crate) visited_dirs: Vec<PathBuf>,
     /// Files that matched the query and should be stored in the query index.
-    matched_files: Vec<MatchedFileDelta>,
+    pub(crate) matched_files: Vec<MatchedFileDelta>,
 }
 
 impl DiskDelta {
@@ -152,11 +152,11 @@ impl DiskDelta {
     }
 }
 
-struct MatchedFileDelta {
-    path: PathBuf,
-    kind: VfsEntryKind,
-    size: Option<u64>,
-    modified: Option<SystemTime>,
+pub(crate) struct MatchedFileDelta {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: VfsEntryKind,
+    pub(crate) size: Option<u64>,
+    pub(crate) modified: Option<SystemTime>,
 }
 
 #[derive(Clone)]
@@ -345,7 +345,7 @@ fn walk_disk_populate(
     Ok((outcome, diagnostics))
 }
 
-fn commit_disk_delta(
+pub(crate) fn commit_disk_delta(
     inner: &Inner,
     mut delta: DiskDelta,
     collect_diagnostics: bool,

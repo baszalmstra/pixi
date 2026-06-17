@@ -16,7 +16,8 @@ use futures::{FutureExt, future::BoxFuture};
 use pixi_compute_engine::{
     ComputeCtx, ComputeEngine, ComputeUpdater, Key, UpdateError, UpdateResult,
 };
-use pixi_vfs::{EntryKind, IndexedVfs, WalkMode};
+pub use pixi_vfs::GlobSetSpec as InputGlobSpec;
+use pixi_vfs::{EntryKind, GlobSpec, IndexedVfs, WalkMode};
 
 /// Filesystem entry kind used by metadata and directory listings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -178,6 +179,35 @@ impl Key for GlobMTimeKey {
     }
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct InputGlobMTimeKey {
+    pub root: PathBuf,
+    pub spec: InputGlobSpec,
+}
+
+impl fmt::Display for InputGlobMTimeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{:?}", self.root.display(), self.spec)
+    }
+}
+
+impl Key for InputGlobMTimeKey {
+    type Value = Result<GlobMTime, FsError>;
+
+    async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
+        indexed_vfs(ctx)
+            .and_then(|vfs| {
+                vfs.latest_mtime_for_spec(&self.root, self.spec.clone(), WalkMode::Hybrid)
+                    .map_err(fs_error_from_vfs)
+            })
+            .map(glob_mtime_from_indexed)
+    }
+
+    fn equality(a: &Self::Value, b: &Self::Value) -> bool {
+        a == b
+    }
+}
+
 fn indexed_vfs(ctx: &ComputeCtx) -> Result<Arc<IndexedVfs>, FsError> {
     ctx.global_data()
         .try_get::<Arc<IndexedVfs>>()
@@ -260,6 +290,10 @@ fn fs_error_from_vfs(error: pixi_vfs::VfsError) -> FsError {
             pattern,
             message: source.to_string(),
         },
+        pixi_vfs::VfsError::GlobSet { message } => FsError::GlobPattern {
+            pattern: "<input glob set>".to_owned(),
+            message,
+        },
         pixi_vfs::VfsError::IndexMiss { .. } => FsError::Indexed {
             message: error.to_string(),
         },
@@ -278,6 +312,11 @@ pub trait ComputeCtxFsExt {
         &mut self,
         root: impl AsRef<Path>,
         pattern: impl AsRef<str>,
+    ) -> BoxFuture<'_, Result<GlobMTime, FsError>>;
+    fn input_glob_mtime(
+        &mut self,
+        root: impl AsRef<Path>,
+        spec: InputGlobSpec,
     ) -> BoxFuture<'_, Result<GlobMTime, FsError>>;
 }
 
@@ -308,6 +347,15 @@ impl ComputeCtxFsExt for ComputeCtx {
         let root = root.as_ref().to_path_buf();
         let pattern = pattern.as_ref().to_owned();
         async move { self.compute(&GlobMTimeKey { root, pattern }).await }.boxed()
+    }
+
+    fn input_glob_mtime(
+        &mut self,
+        root: impl AsRef<Path>,
+        spec: InputGlobSpec,
+    ) -> BoxFuture<'_, Result<GlobMTime, FsError>> {
+        let root = root.as_ref().to_path_buf();
+        async move { self.compute(&InputGlobMTimeKey { root, spec }).await }.boxed()
     }
 }
 
@@ -406,8 +454,8 @@ fn changed_file(updater: &mut ComputeUpdater, path: PathBuf) -> Result<(), Updat
     Ok(())
 }
 
-type GlobReplacementMap = BTreeMap<(PathBuf, String), GlobMTime>;
-type GlobInvalidationSet = BTreeSet<(PathBuf, String)>;
+type GlobReplacementMap = BTreeMap<(PathBuf, GlobSpec), GlobMTime>;
+type GlobInvalidationSet = BTreeSet<(PathBuf, GlobSpec)>;
 
 fn refresh_indexed_vfs_file(
     engine: &ComputeEngine,
@@ -422,7 +470,7 @@ fn refresh_indexed_vfs_file(
         })?;
     for change in changes {
         glob_replacements.insert(
-            (change.root, change.pattern),
+            (change.root, change.spec),
             glob_mtime_from_indexed(change.current),
         );
     }
@@ -443,12 +491,12 @@ fn refresh_indexed_vfs_path(
         })?;
     for change in refresh.glob_changes {
         glob_replacements.insert(
-            (change.root, change.pattern),
+            (change.root, change.spec),
             glob_mtime_from_indexed(change.current),
         );
     }
     for invalidation in refresh.invalidated_globs {
-        glob_invalidations.insert((invalidation.root, invalidation.pattern));
+        glob_invalidations.insert((invalidation.root, invalidation.spec));
     }
     Ok(())
 }
@@ -457,11 +505,8 @@ fn apply_glob_invalidations(
     updater: &mut ComputeUpdater,
     glob_invalidations: &GlobInvalidationSet,
 ) -> Result<(), UpdateError> {
-    for (root, pattern) in glob_invalidations {
-        updater.changed_if_new(GlobMTimeKey {
-            root: root.clone(),
-            pattern: pattern.clone(),
-        })?;
+    for (root, spec) in glob_invalidations {
+        changed_glob_if_new(updater, root.clone(), spec.clone())?;
     }
     Ok(())
 }
@@ -478,13 +523,43 @@ fn apply_glob_replacements_except(
     glob_replacements: GlobReplacementMap,
     glob_invalidations: &GlobInvalidationSet,
 ) -> Result<(), UpdateError> {
-    for ((root, pattern), current) in glob_replacements {
-        if glob_invalidations.contains(&(root.clone(), pattern.clone())) {
+    for ((root, spec), current) in glob_replacements {
+        if glob_invalidations.contains(&(root.clone(), spec.clone())) {
             continue;
         }
-        updater.changed_to(GlobMTimeKey { root, pattern }, Ok(current))?;
+        changed_glob_to(updater, root, spec, current)?;
     }
     Ok(())
+}
+
+fn changed_glob_if_new(
+    updater: &mut ComputeUpdater,
+    root: PathBuf,
+    spec: GlobSpec,
+) -> Result<(), UpdateError> {
+    match spec {
+        GlobSpec::Pattern(pattern) => {
+            updater.changed_if_new(GlobMTimeKey { root, pattern })?;
+        }
+        GlobSpec::Set(spec) => {
+            updater.changed_if_new(InputGlobMTimeKey { root, spec })?;
+        }
+    }
+    Ok(())
+}
+
+fn changed_glob_to(
+    updater: &mut ComputeUpdater,
+    root: PathBuf,
+    spec: GlobSpec,
+    current: GlobMTime,
+) -> Result<(), UpdateError> {
+    match spec {
+        GlobSpec::Pattern(pattern) => {
+            updater.changed_to(GlobMTimeKey { root, pattern }, Ok(current))
+        }
+        GlobSpec::Set(spec) => updater.changed_to(InputGlobMTimeKey { root, spec }, Ok(current)),
+    }
 }
 
 fn parent_path(path: &Path) -> Option<PathBuf> {
