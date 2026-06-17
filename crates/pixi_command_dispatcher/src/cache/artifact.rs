@@ -293,7 +293,10 @@ impl ArtifactCache {
         };
         drop(_guard);
 
-        if let Ok(crate::input_globs::InputGlobLatestMTime::MatchesFound { modified_at, .. }) =
+        if let Ok(crate::input_globs::InputGlobLatestMTime::MatchesFound {
+            modified_at,
+            designated_file,
+        }) =
             crate::input_globs::latest_input_mtime(ctx, &sidecar.input_glob_sets, source_dir).await
         {
             let newest_recorded = sidecar
@@ -304,6 +307,14 @@ impl ArtifactCache {
                 .map(std::time::SystemTime::from);
             if newest_recorded.is_none() || newest_recorded.is_some_and(|mtime| modified_at > mtime)
             {
+                tracing::debug!(
+                    package = %package.as_source(),
+                    source_dir = %source_dir.as_std_path().display(),
+                    designated_file = %designated_file.as_std_path().display(),
+                    ?modified_at,
+                    ?newest_recorded,
+                    "artifact cache miss: input-glob mtime is newer than recorded inputs",
+                );
                 return Ok(None);
             }
         }
@@ -328,6 +339,12 @@ impl ArtifactCache {
                 .map_err(ArtifactCacheError::Glob)?;
         for matched in current {
             if !sidecar.input_files.contains_key(&matched) {
+                tracing::debug!(
+                    package = %package.as_source(),
+                    source_dir = %source_dir.as_std_path().display(),
+                    matched = %matched.as_std_path().display(),
+                    "artifact cache miss: new matching input file detected",
+                );
                 return Ok(None);
             }
         }

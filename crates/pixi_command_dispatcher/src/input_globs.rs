@@ -109,25 +109,51 @@ pub async fn latest_input_mtime(
         })
         .collect::<Vec<_>>();
 
+    tracing::debug!(
+        caller_root = %caller_root.as_std_path().display(),
+        groups = queries.len(),
+        "checking latest input-glob mtime via compute filesystem",
+    );
+
     let per_group = ctx
         .try_compute_join(
             queries,
             async move |sub_ctx: &mut ComputeCtx,
                         (root, spec): (std::path::PathBuf, InputGlobSpec)|
                         -> Result<InputGlobLatestMTime, FsError> {
-                match sub_ctx.input_glob_mtime(&root, spec).await? {
-                    GlobMTime::NoMatches => Ok(InputGlobLatestMTime::NoMatches),
+                match sub_ctx.input_glob_mtime(&root, spec.clone()).await? {
+                    GlobMTime::NoMatches => {
+                        tracing::debug!(
+                            root = %root.display(),
+                            patterns = ?spec.patterns,
+                            markers = ?spec.markers,
+                            exclude_hidden = spec.exclude_hidden,
+                            "input-glob mtime found no matches",
+                        );
+                        Ok(InputGlobLatestMTime::NoMatches)
+                    }
                     GlobMTime::MatchesFound {
                         modified_at,
                         designated_file,
-                    } => Ok(InputGlobLatestMTime::MatchesFound {
-                        modified_at,
-                        designated_file: AbsPathBuf::new(designated_file).map_err(|err| {
-                            FsError::Indexed {
-                                message: format!("glob mtime returned invalid path: {err}"),
-                            }
-                        })?,
-                    }),
+                    } => {
+                        tracing::debug!(
+                            root = %root.display(),
+                            patterns = ?spec.patterns,
+                            markers = ?spec.markers,
+                            exclude_hidden = spec.exclude_hidden,
+                            designated_file = %designated_file.display(),
+                            ?modified_at,
+                            "input-glob mtime found latest match",
+                        );
+                        Ok(InputGlobLatestMTime::MatchesFound {
+                            modified_at,
+                            designated_file: AbsPathBuf::new(designated_file).map_err(|err| {
+                                FsError::Indexed {
+                                    message: format!("glob mtime returned invalid path: {err}"),
+                                }
+                            })?,
+                        })
+                    }
                 }
             },
         )
