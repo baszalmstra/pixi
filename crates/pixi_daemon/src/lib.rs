@@ -23,7 +23,7 @@ use notify::{
     event::{AccessKind, AccessMode, EventKind},
 };
 use pixi_compute_engine::{ComputeEngine, ComputeEngineStats, ComputeError, GraphVersion};
-use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, FsError, GlobMTime};
+use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, FsError, GlobMTime, InputGlobSpec};
 use pixi_vfs::{IndexedVfs, VfsStats};
 
 const DEFAULT_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(50);
@@ -119,28 +119,29 @@ impl WorkspaceFsDaemon {
         &self.vfs
     }
 
-    /// Compute the latest mtime for `pattern` under `root` on demand.
+    /// Compute the latest mtime for an ordered input-glob spec under `root` on demand.
     ///
     /// Watcher events never recompute this value eagerly. They only invalidate
     /// graph/VFS state so this request observes the newest graph version.
-    pub async fn glob_mtime(
+    pub async fn input_glob_mtime(
         &self,
         root: impl AsRef<Path>,
-        pattern: impl AsRef<str>,
+        spec: InputGlobSpec,
     ) -> Result<GlobMTimeResponse, DaemonError> {
         let root = self.resolve_request_root(root.as_ref())?;
-        let pattern = pattern.as_ref().to_owned();
-        validate_pattern_scope(&pattern)?;
+        validate_spec_scope(&spec)?;
+        let query_root = root.clone();
+        let query_spec = spec.clone();
         let started = Instant::now();
         let value = self
             .engine
-            .with_ctx(async |ctx| ctx.glob_mtime(&root, &pattern).await)
+            .with_ctx(async |ctx| ctx.input_glob_mtime(&query_root, query_spec).await)
             .await??;
         let elapsed = started.elapsed();
 
         Ok(GlobMTimeResponse {
             root,
-            pattern,
+            spec,
             value,
             compute_elapsed: elapsed,
             engine_stats: self.engine.stats(),
@@ -221,6 +222,13 @@ fn has_escape_component(path: &Path) -> bool {
     })
 }
 
+fn validate_spec_scope(spec: &InputGlobSpec) -> Result<(), DaemonError> {
+    for pattern in &spec.patterns {
+        validate_pattern_scope(pattern.strip_prefix('!').unwrap_or(pattern))?;
+    }
+    Ok(())
+}
+
 fn validate_pattern_scope(pattern: &str) -> Result<(), DaemonError> {
     let normalized = pattern.replace('\\', "/");
     if normalized.starts_with('/')
@@ -241,7 +249,7 @@ fn validate_pattern_scope(pattern: &str) -> Result<(), DaemonError> {
 #[derive(Clone, Debug)]
 pub struct GlobMTimeResponse {
     pub root: PathBuf,
-    pub pattern: String,
+    pub spec: InputGlobSpec,
     pub value: GlobMTime,
     pub compute_elapsed: Duration,
     pub engine_stats: ComputeEngineStats,
@@ -636,13 +644,22 @@ mod tests {
         )
         .unwrap();
 
-        assert!(daemon.glob_mtime(daemon.root(), "*.rs").await.is_ok());
+        assert!(
+            daemon
+                .input_glob_mtime(daemon.root(), InputGlobSpec::new(["*.rs"]))
+                .await
+                .is_ok()
+        );
         assert!(matches!(
-            daemon.glob_mtime("..", "*.rs").await,
+            daemon
+                .input_glob_mtime("..", InputGlobSpec::new(["*.rs"]))
+                .await,
             Err(DaemonError::OutsideWorkspace { .. })
         ));
         assert!(matches!(
-            daemon.glob_mtime(".", "../*.rs").await,
+            daemon
+                .input_glob_mtime(".", InputGlobSpec::new(["../*.rs"]))
+                .await,
             Err(DaemonError::GlobPatternEscapesWorkspace { .. })
         ));
     }
@@ -661,7 +678,10 @@ mod tests {
         )
         .unwrap();
 
-        let first = daemon.glob_mtime(".", "*.rs").await.unwrap();
+        let first = daemon
+            .input_glob_mtime(".", InputGlobSpec::new(["*.rs"]))
+            .await
+            .unwrap();
         assert_eq!(
             first.value,
             GlobMTime::MatchesFound {
@@ -669,7 +689,10 @@ mod tests {
                 designated_file: daemon.root().join("lib.rs"),
             }
         );
-        let second = daemon.glob_mtime(".", "*.rs").await.unwrap();
+        let second = daemon
+            .input_glob_mtime(".", InputGlobSpec::new(["*.rs"]))
+            .await
+            .unwrap();
         assert_eq!(second.value, first.value);
         assert_eq!(
             second.vfs_stats.disk_dir_reads,
@@ -697,7 +720,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            daemon.glob_mtime(".", "*.rs").await.unwrap().value,
+            daemon
+                .input_glob_mtime(".", InputGlobSpec::new(["*.rs"]))
+                .await
+                .unwrap()
+                .value,
             GlobMTime::MatchesFound {
                 modified_at: old_time,
                 designated_file: daemon.root().join("old.rs"),
@@ -729,7 +756,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if daemon.stats().invalidation_batches > 0 {
-                let value = daemon.glob_mtime(".", pattern).await.unwrap().value;
+                let value = daemon
+                    .input_glob_mtime(".", InputGlobSpec::new([pattern]))
+                    .await
+                    .unwrap()
+                    .value;
                 if value
                     == (GlobMTime::MatchesFound {
                         modified_at,

@@ -7471,10 +7471,8 @@ dependencies = [
 name = "pixi_vfs"
 version = "0.1.0"
 dependencies = [
- "crossbeam-deque",
  "filetime",
  "fs-err",
- "glob",
  "ignore",
  "parking_lot 0.12.5",
  "pixi_glob",

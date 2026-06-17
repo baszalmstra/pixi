@@ -5,7 +5,7 @@ use std::{
 };
 
 use pixi_compute_engine::ComputeEngine;
-use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, GlobMTime};
+use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, GlobMTime, InputGlobSpec};
 use pixi_glob::GlobModificationTime;
 use pixi_vfs::IndexedVfs;
 use tempfile::tempdir;
@@ -53,7 +53,10 @@ async fn compare_glob_mtime_with_multithreaded_walker() {
 
     let start = Instant::now();
     let cold = engine
-        .with_ctx(async |ctx| ctx.glob_mtime(root, pattern).await)
+        .with_ctx(async |ctx| {
+            ctx.input_glob_mtime(root, InputGlobSpec::new([pattern]))
+                .await
+        })
         .await
         .unwrap()
         .unwrap();
@@ -64,7 +67,10 @@ async fn compare_glob_mtime_with_multithreaded_walker() {
 
     let start = Instant::now();
     let warm = engine
-        .with_ctx(async |ctx| ctx.glob_mtime(root, pattern).await)
+        .with_ctx(async |ctx| {
+            ctx.input_glob_mtime(root, InputGlobSpec::new([pattern]))
+                .await
+        })
         .await
         .unwrap()
         .unwrap();
@@ -79,7 +85,10 @@ async fn compare_glob_mtime_with_multithreaded_walker() {
     let vfs_nonmatch_before = vfs.stats();
     let start = Instant::now();
     let incremental_nonmatch = engine
-        .with_ctx(async |ctx| ctx.glob_mtime(root, pattern).await)
+        .with_ctx(async |ctx| {
+            ctx.input_glob_mtime(root, InputGlobSpec::new([pattern]))
+                .await
+        })
         .await
         .unwrap()
         .unwrap();
@@ -97,7 +106,10 @@ async fn compare_glob_mtime_with_multithreaded_walker() {
     let vfs_match_before = vfs.stats();
     let start = Instant::now();
     let incremental_match = engine
-        .with_ctx(async |ctx| ctx.glob_mtime(root, pattern).await)
+        .with_ctx(async |ctx| {
+            ctx.input_glob_mtime(root, InputGlobSpec::new([pattern]))
+                .await
+        })
         .await
         .unwrap()
         .unwrap();

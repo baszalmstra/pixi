@@ -4,7 +4,7 @@ use std::{
 };
 
 use pixi_glob::GlobModificationTime;
-use pixi_vfs::{GlobMTime, IndexedVfs, WalkMode};
+use pixi_vfs::{GlobMTime, GlobSetSpec, IndexedVfs, WalkMode};
 use tempfile::tempdir;
 
 #[test]
@@ -31,14 +31,18 @@ fn compare_indexed_walker_modes() {
 
     let diagnostic_vfs = IndexedVfs::default();
     let (_, force_disk_diag) = diagnostic_vfs
-        .latest_mtime_with_diagnostics(root, pattern, WalkMode::ForceDisk)
+        .latest_mtime_for_spec_with_diagnostics(
+            root,
+            GlobSetSpec::new([pattern]),
+            WalkMode::ForceDisk,
+        )
         .unwrap();
 
     let vfs = IndexedVfs::default();
 
     let start = Instant::now();
     let force_disk = vfs
-        .latest_mtime(root, pattern, WalkMode::ForceDisk)
+        .latest_mtime_for_spec(root, GlobSetSpec::new([pattern]), WalkMode::ForceDisk)
         .unwrap();
     let force_disk_elapsed = start.elapsed();
     assert_graph_latest(&force_disk, &latest);
@@ -46,7 +50,11 @@ fn compare_indexed_walker_modes() {
 
     let start = Instant::now();
     let (index_only, index_only_diag) = vfs
-        .latest_mtime_with_diagnostics(root, pattern, WalkMode::IndexOnly)
+        .latest_mtime_for_spec_with_diagnostics(
+            root,
+            GlobSetSpec::new([pattern]),
+            WalkMode::IndexOnly,
+        )
         .unwrap();
     let index_only_elapsed = start.elapsed();
     assert_eq!(index_only, force_disk);
@@ -67,7 +75,7 @@ fn compare_indexed_walker_modes() {
     let before_hybrid = vfs.stats();
     let start = Instant::now();
     let (hybrid, hybrid_diag) = vfs
-        .latest_mtime_with_diagnostics(root, pattern, WalkMode::Hybrid)
+        .latest_mtime_for_spec_with_diagnostics(root, GlobSetSpec::new([pattern]), WalkMode::Hybrid)
         .unwrap();
     let hybrid_elapsed = start.elapsed();
     assert_eq!(
@@ -98,7 +106,11 @@ fn compare_indexed_walker_modes() {
 
     let start = Instant::now();
     let (after_refresh_index_only, after_refresh_index_only_diag) = vfs
-        .latest_mtime_with_diagnostics(root, pattern, WalkMode::IndexOnly)
+        .latest_mtime_for_spec_with_diagnostics(
+            root,
+            GlobSetSpec::new([pattern]),
+            WalkMode::IndexOnly,
+        )
         .unwrap();
     let after_refresh_index_only_elapsed = start.elapsed();
     assert_eq!(after_refresh_index_only, changed[0].current);

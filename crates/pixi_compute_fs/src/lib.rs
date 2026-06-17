@@ -151,34 +151,6 @@ impl Key for DirectoryListingKey {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct GlobMTimeKey {
-    pub root: PathBuf,
-    pub pattern: String,
-}
-
-impl fmt::Display for GlobMTimeKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.root.display(), self.pattern)
-    }
-}
-
-impl Key for GlobMTimeKey {
-    type Value = Result<GlobMTime, FsError>;
-
-    async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
-        ctx.compute(&InputGlobMTimeKey {
-            root: self.root.clone(),
-            spec: InputGlobSpec::new([self.pattern.clone()]),
-        })
-        .await
-    }
-
-    fn equality(a: &Self::Value, b: &Self::Value) -> bool {
-        a == b
-    }
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct InputGlobMTimeKey {
     pub root: PathBuf,
     pub spec: InputGlobSpec,
@@ -285,10 +257,6 @@ fn fs_error_from_vfs(error: pixi_vfs::VfsError) -> FsError {
             path,
             source,
         } => FsError::from_io(operation, path, source),
-        pixi_vfs::VfsError::GlobPattern { pattern, source } => FsError::GlobPattern {
-            pattern,
-            message: source.to_string(),
-        },
         pixi_vfs::VfsError::GlobSet { message } => FsError::GlobPattern {
             pattern: "<input glob set>".to_owned(),
             message,
@@ -307,11 +275,6 @@ pub trait ComputeCtxFsExt {
         &mut self,
         path: impl AsRef<Path>,
     ) -> BoxFuture<'_, Result<Arc<[DirectoryEntry]>, FsError>>;
-    fn glob_mtime(
-        &mut self,
-        root: impl AsRef<Path>,
-        pattern: impl AsRef<str>,
-    ) -> BoxFuture<'_, Result<GlobMTime, FsError>>;
     fn input_glob_mtime(
         &mut self,
         root: impl AsRef<Path>,
@@ -336,16 +299,6 @@ impl ComputeCtxFsExt for ComputeCtx {
     ) -> BoxFuture<'_, Result<Arc<[DirectoryEntry]>, FsError>> {
         let path = path.as_ref().to_path_buf();
         async move { self.compute(&DirectoryListingKey(path)).await }.boxed()
-    }
-
-    fn glob_mtime(
-        &mut self,
-        root: impl AsRef<Path>,
-        pattern: impl AsRef<str>,
-    ) -> BoxFuture<'_, Result<GlobMTime, FsError>> {
-        let root = root.as_ref().to_path_buf();
-        let spec = InputGlobSpec::new([pattern.as_ref()]);
-        async move { self.compute(&InputGlobMTimeKey { root, spec }).await }.boxed()
     }
 
     fn input_glob_mtime(

@@ -7,7 +7,8 @@ use std::{
 
 use pixi_glob::GlobModificationTime;
 use pixi_vfs::{
-    EntryKind, GlobMTime, IndexedVfs, VfsBackend, VfsBackendEntry, VfsBackendMetadata, WalkMode,
+    EntryKind, GlobMTime, GlobSetSpec, IndexedVfs, VfsBackend, VfsBackendEntry, VfsBackendMetadata,
+    WalkMode,
 };
 use tempfile::tempdir;
 
@@ -41,8 +42,12 @@ fn force_disk_uses_configured_backend_for_missing_real_paths() {
 
     let vfs = IndexedVfs::new(Arc::new(VirtualBackend));
     assert_eq!(
-        vfs.latest_mtime("virtual-root", "*.rs", WalkMode::ForceDisk)
-            .unwrap(),
+        vfs.latest_mtime_for_spec(
+            "virtual-root",
+            GlobSetSpec::new(["*.rs"]),
+            WalkMode::ForceDisk
+        )
+        .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             designated_file: PathBuf::from("virtual-root/lib.rs"),
@@ -69,7 +74,7 @@ fn force_disk_populates_query_index_without_nonmatching_files() {
 
     let vfs = IndexedVfs::default();
     let result = vfs
-        .latest_mtime(root, "**/*.rs", WalkMode::ForceDisk)
+        .latest_mtime_for_spec(root, GlobSetSpec::new(["**/*.rs"]), WalkMode::ForceDisk)
         .unwrap();
 
     assert_eq!(
@@ -102,7 +107,7 @@ fn index_only_uses_the_populated_index_without_disk_reads() {
 
     let vfs = IndexedVfs::default();
     assert_eq!(
-        vfs.latest_mtime(root, "src/**/*.rs", WalkMode::ForceDisk)
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["src/**/*.rs"]), WalkMode::ForceDisk)
             .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: mtime,
@@ -112,7 +117,7 @@ fn index_only_uses_the_populated_index_without_disk_reads() {
     let after_disk = vfs.stats();
 
     assert_eq!(
-        vfs.latest_mtime(root, "src/**/*.rs", WalkMode::IndexOnly)
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["src/**/*.rs"]), WalkMode::IndexOnly)
             .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: mtime,
@@ -138,7 +143,8 @@ fn clear_index_drops_warm_glob_state_and_allows_repopulate() {
 
     let vfs = IndexedVfs::default();
     assert_eq!(
-        vfs.latest_mtime(root, "*.rs", WalkMode::ForceDisk).unwrap(),
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["*.rs"]), WalkMode::ForceDisk)
+            .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: mtime,
             designated_file: file.clone(),
@@ -154,7 +160,8 @@ fn clear_index_drops_warm_glob_state_and_allows_repopulate() {
     assert_eq!(after_clear.active_globs, 0);
 
     assert_eq!(
-        vfs.latest_mtime(root, "*.rs", WalkMode::Hybrid).unwrap(),
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["*.rs"]), WalkMode::Hybrid)
+            .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: mtime,
             designated_file: file,
@@ -178,7 +185,7 @@ fn literal_non_recursive_glob_does_not_scan_subdirectories() {
 
     let vfs = IndexedVfs::default();
     assert_eq!(
-        vfs.latest_mtime(root, "pixi.toml", WalkMode::ForceDisk)
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["pixi.toml"]), WalkMode::ForceDisk)
             .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: root_time,
@@ -204,7 +211,8 @@ fn basename_meta_glob_uses_rich_recursive_matching() {
 
     let vfs = IndexedVfs::default();
     assert_eq!(
-        vfs.latest_mtime(root, "*.rs", WalkMode::ForceDisk).unwrap(),
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["*.rs"]), WalkMode::ForceDisk)
+            .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: nested_time,
             designated_file: nested_file,
@@ -228,7 +236,7 @@ fn refresh_file_respects_literal_glob_boundaries() {
 
     let vfs = IndexedVfs::default();
     assert_eq!(
-        vfs.latest_mtime(root, "root.rs", WalkMode::ForceDisk)
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["root.rs"]), WalkMode::ForceDisk)
             .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: root_time,
@@ -239,7 +247,7 @@ fn refresh_file_respects_literal_glob_boundaries() {
     let changed = vfs.refresh_file(&nested_file).unwrap();
     assert!(changed.is_empty());
     assert_eq!(
-        vfs.latest_mtime(root, "root.rs", WalkMode::IndexOnly)
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["root.rs"]), WalkMode::IndexOnly)
             .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: root_time,
@@ -261,7 +269,7 @@ fn hybrid_repairs_dirty_matching_file_without_directory_rescan() {
 
     let vfs = IndexedVfs::default();
     assert_eq!(
-        vfs.latest_mtime(root, "**/*.rs", WalkMode::ForceDisk)
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["**/*.rs"]), WalkMode::ForceDisk)
             .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: first,
@@ -273,7 +281,8 @@ fn hybrid_repairs_dirty_matching_file_without_directory_rescan() {
     set_mtime(&file, second);
     vfs.mark_file_dirty(&file).unwrap();
     assert_eq!(
-        vfs.latest_mtime(root, "**/*.rs", WalkMode::Hybrid).unwrap(),
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["**/*.rs"]), WalkMode::Hybrid)
+            .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: second,
             designated_file: file,
@@ -301,7 +310,8 @@ fn refresh_file_updates_active_query_state_incrementally() {
 
     let vfs = IndexedVfs::default();
     assert_eq!(
-        vfs.latest_mtime(root, "*.rs", WalkMode::ForceDisk).unwrap(),
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["*.rs"]), WalkMode::ForceDisk)
+            .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: base + Duration::from_secs(2),
             designated_file: newest.clone(),
@@ -315,7 +325,8 @@ fn refresh_file_updates_active_query_state_incrementally() {
 
     assert_eq!(changed.len(), 1);
     assert_eq!(
-        vfs.latest_mtime(root, "*.rs", WalkMode::IndexOnly).unwrap(),
+        vfs.latest_mtime_for_spec(root, GlobSetSpec::new(["*.rs"]), WalkMode::IndexOnly)
+            .unwrap(),
         GlobMTime::MatchesFound {
             modified_at: new_old_time,
             designated_file: old,
@@ -337,7 +348,7 @@ fn results_match_pixi_glob_mtime() {
 
     let vfs = IndexedVfs::default();
     let indexed = vfs
-        .latest_mtime(root, "**/*.rs", WalkMode::ForceDisk)
+        .latest_mtime_for_spec(root, GlobSetSpec::new(["**/*.rs"]), WalkMode::ForceDisk)
         .unwrap();
     let baseline = GlobModificationTime::from_patterns(root, ["**/*.rs"]).unwrap();
 

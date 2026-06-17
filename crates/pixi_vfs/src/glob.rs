@@ -135,40 +135,12 @@ pub struct LatestMTimeDiagnostics {
 }
 
 impl IndexedVfs {
-    /// Compute the latest mtime for `pattern` under `root` using the requested
-    /// walk mode.
-    ///
-    /// The first successful query stores an active aggregate. Later calls in
-    /// [`WalkMode::Hybrid`] or [`WalkMode::IndexOnly`] can reuse that aggregate
-    /// when all matched files are clean.
-    pub fn latest_mtime(
-        &self,
-        root: impl AsRef<Path>,
-        pattern: impl AsRef<str>,
-        mode: WalkMode,
-    ) -> Result<GlobMTime, VfsError> {
-        self.latest_mtime_for_spec(root, GlobSetSpec::new([pattern.as_ref()]), mode)
-    }
-
-    /// Compute the latest mtime and return diagnostic phase timings/counters.
-    ///
-    /// This is intended for tests and performance investigations; production
-    /// callers should usually use [`IndexedVfs::latest_mtime`].
-    pub fn latest_mtime_with_diagnostics(
-        &self,
-        root: impl AsRef<Path>,
-        pattern: impl AsRef<str>,
-        mode: WalkMode,
-    ) -> Result<(GlobMTime, LatestMTimeDiagnostics), VfsError> {
-        self.latest_mtime_for_spec_inner(root, GlobSetSpec::new([pattern.as_ref()]), mode, true)
-    }
-
     /// Compute latest mtime for an ordered Pixi-style glob set.
     ///
     /// This supports ordered include/exclude patterns, marker leaf/prune
-    /// semantics, hidden filtering, and relative-pattern rebasing. Like
-    /// [`Self::latest_mtime`], successful requests are stored as active
-    /// aggregates for later warm reads and watcher-driven invalidation.
+    /// semantics, hidden filtering, and relative-pattern rebasing. Successful
+    /// requests are stored as active aggregates for later warm reads and
+    /// watcher-driven invalidation.
     pub fn latest_mtime_for_spec(
         &self,
         root: impl AsRef<Path>,
@@ -177,6 +149,20 @@ impl IndexedVfs {
     ) -> Result<GlobMTime, VfsError> {
         self.latest_mtime_for_spec_inner(root, spec, mode, false)
             .map(|(value, _)| value)
+    }
+
+    /// Compute latest mtime for an ordered Pixi-style glob set and return
+    /// diagnostic phase timings/counters.
+    ///
+    /// This is intended for tests and performance investigations; production
+    /// callers should usually use [`IndexedVfs::latest_mtime_for_spec`].
+    pub fn latest_mtime_for_spec_with_diagnostics(
+        &self,
+        root: impl AsRef<Path>,
+        spec: GlobSetSpec,
+        mode: WalkMode,
+    ) -> Result<(GlobMTime, LatestMTimeDiagnostics), VfsError> {
+        self.latest_mtime_for_spec_inner(root, spec, mode, true)
     }
 
     fn latest_mtime_for_spec_inner(

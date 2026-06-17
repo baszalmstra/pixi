@@ -17,7 +17,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use pixi_compute_fs::GlobMTime;
+use pixi_compute_fs::{GlobMTime, InputGlobSpec};
 use pixi_daemon::{GlobMTimeResponse, WorkspaceFsDaemon, WorkspaceFsDaemonOptions};
 
 const DEFAULT_QUERY_INTERVAL: Duration = Duration::from_millis(500);
@@ -46,7 +46,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     );
 
     loop {
-        let response = daemon.glob_mtime(".", &args.pattern).await?;
+        let response = daemon
+            .input_glob_mtime(".", InputGlobSpec::new([args.pattern.as_str()]))
+            .await?;
         print_response(&response, &daemon.stats());
         tokio::time::sleep(args.query_interval).await;
     }

@@ -46,15 +46,6 @@ pub enum VfsError {
         #[source]
         source: io::Error,
     },
-    /// Glob pattern could not be parsed.
-    #[error("invalid glob pattern {pattern:?}: {source}")]
-    GlobPattern {
-        /// User-provided pattern text.
-        pattern: String,
-        /// Parser error from the glob crate.
-        #[source]
-        source: ::glob::PatternError,
-    },
     /// Glob-set patterns could not be compiled or rebased.
     #[error("invalid glob set: {message}")]
     GlobSet {

@@ -24,7 +24,7 @@ use std::{
 
 use notify::{Event, RecursiveMode, Watcher};
 use pixi_compute_engine::{ComputeEngine, UpdateResult};
-use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, GlobMTime};
+use pixi_compute_fs::{ComputeCtxFsExt, ComputeEngineFsExt, GlobMTime, InputGlobSpec};
 use pixi_vfs::IndexedVfs;
 
 const DEFAULT_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(50);
@@ -101,7 +101,10 @@ async fn compute_glob_mtime(
     pattern: &str,
 ) -> Result<GlobMTime, Box<dyn Error>> {
     let value = engine
-        .with_ctx(async |ctx| ctx.glob_mtime(root, pattern).await)
+        .with_ctx(async |ctx| {
+            ctx.input_glob_mtime(root, InputGlobSpec::new([pattern]))
+                .await
+        })
         .await??;
     Ok(value)
 }
