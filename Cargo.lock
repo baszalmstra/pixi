@@ -11740,7 +11740,7 @@ dependencies = [
 [[package]]
 name = "uv-auth"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -11780,7 +11780,7 @@ dependencies = [
 [[package]]
 name = "uv-build-backend"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "astral-tokio-tar",
  "astral-version-ranges",
@@ -11824,7 +11824,7 @@ dependencies = [
 [[package]]
 name = "uv-build-frontend"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anstream",
  "fs-err",
@@ -11861,7 +11861,7 @@ dependencies = [
 [[package]]
 name = "uv-cache"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "fs-err",
  "rmp-serde",
@@ -11887,7 +11887,7 @@ dependencies = [
 [[package]]
 name = "uv-cache-info"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "fs-err",
  "globwalk",
@@ -11903,7 +11903,7 @@ dependencies = [
 [[package]]
 name = "uv-cache-key"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "hex",
  "memchr",
@@ -11916,7 +11916,7 @@ dependencies = [
 [[package]]
 name = "uv-client"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "astral-reqwest-middleware",
@@ -11976,7 +11976,7 @@ dependencies = [
 [[package]]
 name = "uv-configuration"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "clap",
  "either",
@@ -12008,7 +12008,7 @@ dependencies = [
 [[package]]
 name = "uv-console"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "console",
 ]
@@ -12016,7 +12016,7 @@ dependencies = [
 [[package]]
 name = "uv-dirs"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "etcetera",
  "fs-err",
@@ -12027,7 +12027,7 @@ dependencies = [
 [[package]]
 name = "uv-dispatch"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "futures",
@@ -12061,7 +12061,7 @@ dependencies = [
 [[package]]
 name = "uv-distribution"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "astral-reqwest-middleware",
@@ -12111,7 +12111,7 @@ dependencies = [
 [[package]]
 name = "uv-distribution-filename"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "memchr",
  "rkyv",
@@ -12128,7 +12128,7 @@ dependencies = [
 [[package]]
 name = "uv-distribution-types"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "arcstr",
  "astral-version-ranges",
@@ -12168,7 +12168,7 @@ dependencies = [
 [[package]]
 name = "uv-extract"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "astral-tokio-tar",
  "astral_async_zip 0.0.18-rc4",
@@ -12198,7 +12198,7 @@ dependencies = [
 [[package]]
 name = "uv-fastid"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "fastrand",
  "rand 0.9.4",
@@ -12208,7 +12208,7 @@ dependencies = [
 [[package]]
 name = "uv-flags"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "bitflags 2.11.1",
 ]
@@ -12216,7 +12216,7 @@ dependencies = [
 [[package]]
 name = "uv-fs"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "backon",
  "clap",
@@ -12248,7 +12248,7 @@ dependencies = [
 [[package]]
 name = "uv-git"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "astral-reqwest-middleware",
@@ -12275,7 +12275,7 @@ dependencies = [
 [[package]]
 name = "uv-git-types"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "percent-encoding",
  "serde",
@@ -12290,7 +12290,7 @@ dependencies = [
 [[package]]
 name = "uv-globfilter"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "globset",
  "owo-colors",
@@ -12304,7 +12304,7 @@ dependencies = [
 [[package]]
 name = "uv-install-wheel"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "configparser",
  "csv",
@@ -12339,7 +12339,7 @@ dependencies = [
 [[package]]
 name = "uv-installer"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -12381,7 +12381,7 @@ dependencies = [
 [[package]]
 name = "uv-keyring"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -12396,7 +12396,7 @@ dependencies = [
 [[package]]
 name = "uv-macros"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -12407,7 +12407,7 @@ dependencies = [
 [[package]]
 name = "uv-metadata"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "astral_async_zip 0.0.18-rc4",
  "fs-err",
@@ -12424,7 +12424,7 @@ dependencies = [
 [[package]]
 name = "uv-netrc"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "shellexpand",
  "thiserror 2.0.18",
@@ -12433,7 +12433,7 @@ dependencies = [
 [[package]]
 name = "uv-normalize"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "rkyv",
  "schemars 1.2.1",
@@ -12444,7 +12444,7 @@ dependencies = [
 [[package]]
 name = "uv-once-map"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "dashmap",
  "futures",
@@ -12454,7 +12454,7 @@ dependencies = [
 [[package]]
 name = "uv-options-metadata"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "serde",
 ]
@@ -12462,7 +12462,7 @@ dependencies = [
 [[package]]
 name = "uv-pep440"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "astral-version-ranges",
  "rkyv",
@@ -12476,7 +12476,7 @@ dependencies = [
 [[package]]
 name = "uv-pep508"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "arcstr",
  "astral-version-ranges",
@@ -12503,7 +12503,7 @@ dependencies = [
 [[package]]
 name = "uv-platform"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "fs-err",
  "goblin",
@@ -12522,7 +12522,7 @@ dependencies = [
 [[package]]
 name = "uv-platform-tags"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "bitflags 2.11.1",
  "memchr",
@@ -12536,7 +12536,7 @@ dependencies = [
 [[package]]
 name = "uv-preview"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "enumflags2",
  "itertools 0.14.0",
@@ -12547,7 +12547,7 @@ dependencies = [
 [[package]]
 name = "uv-pypi-types"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap 2.14.0",
@@ -12578,7 +12578,7 @@ dependencies = [
 [[package]]
 name = "uv-python"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "astral-reqwest-middleware",
@@ -12636,7 +12636,7 @@ dependencies = [
 [[package]]
 name = "uv-redacted"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "ref-cast",
  "schemars 1.2.1",
@@ -12648,7 +12648,7 @@ dependencies = [
 [[package]]
 name = "uv-requirements"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "configparser",
@@ -12683,7 +12683,7 @@ dependencies = [
 [[package]]
 name = "uv-requirements-txt"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "astral-reqwest-middleware",
  "fs-err",
@@ -12708,7 +12708,7 @@ dependencies = [
 [[package]]
 name = "uv-resolver"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "arcstr",
  "astral-pubgrub",
@@ -12774,7 +12774,7 @@ dependencies = [
 [[package]]
 name = "uv-scripts"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "fs-err",
  "indoc",
@@ -12800,7 +12800,7 @@ dependencies = [
 [[package]]
 name = "uv-settings"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "clap",
  "fs-err",
@@ -12837,7 +12837,7 @@ dependencies = [
 [[package]]
 name = "uv-shell"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "fs-err",
@@ -12853,7 +12853,7 @@ dependencies = [
 [[package]]
 name = "uv-small-str"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "arcstr",
  "rkyv",
@@ -12864,7 +12864,7 @@ dependencies = [
 [[package]]
 name = "uv-state"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "fs-err",
  "tempfile",
@@ -12874,7 +12874,7 @@ dependencies = [
 [[package]]
 name = "uv-static"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "thiserror 2.0.18",
  "uv-macros",
@@ -12883,7 +12883,7 @@ dependencies = [
 [[package]]
 name = "uv-toml"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
@@ -12892,7 +12892,7 @@ dependencies = [
 [[package]]
 name = "uv-torch"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "clap",
  "either",
@@ -12913,7 +12913,7 @@ dependencies = [
 [[package]]
 name = "uv-trampoline-builder"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "astral_async_zip 0.0.18-rc4",
@@ -12929,7 +12929,7 @@ dependencies = [
 [[package]]
 name = "uv-types"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -12952,12 +12952,12 @@ dependencies = [
 [[package]]
 name = "uv-version"
 version = "0.11.15"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 
 [[package]]
 name = "uv-virtualenv"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "console",
  "fs-err",
@@ -12978,7 +12978,7 @@ dependencies = [
 [[package]]
 name = "uv-warnings"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "anstream",
  "owo-colors",
@@ -12988,7 +12988,7 @@ dependencies = [
 [[package]]
 name = "uv-windows"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "arrayvec",
  "windows 0.61.3",
@@ -12997,7 +12997,7 @@ dependencies = [
 [[package]]
 name = "uv-workspace"
 version = "0.0.48"
-source = "git+https://github.com/astral-sh/uv?tag=0.11.15#3cffe97c2e48c9e49422c738da3af95919dd0bf5"
+source = "git+https://github.com/baszalmstra/uv?branch=claude%2Fexclude-newer-preference-fallback#891619ae2d34020b7c8b366168570d92719d574f"
 dependencies = [
  "clap",
  "fs-err",
