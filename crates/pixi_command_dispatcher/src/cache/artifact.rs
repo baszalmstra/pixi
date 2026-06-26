@@ -252,6 +252,11 @@ impl ArtifactCache {
     /// stale (parse failure, mtime mismatch, missing file, or a newly-added
     /// file matches the recorded globs).
     ///
+    /// When `immutable` is `true` (git/url sources, whose key already pins
+    /// the content) the mtime and new-file checks are skipped: a git
+    /// checkout stamps files with the checkout time, so they would force
+    /// spurious rebuilds. The artifact file is still verified to exist.
+    ///
     /// Holds a shared read lock on the entry's `.lock` file while
     /// reading the sidecar, so a concurrent [`store`](Self::store) (which
     /// takes an exclusive write lock) blocks until we're done. The lock
@@ -263,6 +268,7 @@ impl ArtifactCache {
         package: &PackageName,
         key: &ArtifactCacheKey,
         source_dir: &AbsPath,
+        immutable: bool,
     ) -> Result<Option<CachedArtifact>, ArtifactCacheError> {
         let sidecar_path = self.sidecar_path(package, key);
         // Fast-path the common "no entry yet" case: skip creating the
@@ -289,31 +295,41 @@ impl ArtifactCache {
         let Ok(sidecar) = serde_json::from_slice::<ArtifactSidecar>(&bytes) else {
             // Treat unparsable sidecars as misses; the caller will rebuild
             // and overwrite.
+            tracing::debug!(package = %package.as_normalized(), "artifact cache miss: unparsable sidecar");
             return Ok(None);
         };
         drop(_guard);
 
-        // Check every recorded file still matches its mtime.
-        for (path, expected_mtime) in &sidecar.input_files {
-            let modified = match fs_err::metadata(path).and_then(|m| m.modified()) {
-                Ok(m) => DateTime::<Utc>::from(m),
-                Err(_) => return Ok(None),
-            };
-            if modified != *expected_mtime {
-                return Ok(None);
+        // Mtime/new-file freshness only matters for mutable (`path`) sources;
+        // for immutable sources the key already pins the content.
+        if !immutable {
+            // Check every recorded file still matches its mtime.
+            for (path, expected_mtime) in &sidecar.input_files {
+                let modified = match fs_err::metadata(path).and_then(|m| m.modified()) {
+                    Ok(m) => DateTime::<Utc>::from(m),
+                    Err(_) => {
+                        tracing::debug!(package = %package.as_normalized(), file = %path, "artifact cache miss: input file missing");
+                        return Ok(None);
+                    }
+                };
+                if modified != *expected_mtime {
+                    tracing::debug!(package = %package.as_normalized(), file = %path, %expected_mtime, found = %modified, "artifact cache miss: input file mtime changed");
+                    return Ok(None);
+                }
             }
-        }
 
-        // Detect newly-added files that match the stored globs. This catches
-        // sources added after the cache entry was written. Uses the same
-        // engine-deduped walk as `build_backend_metadata`.
-        let current =
-            crate::input_globs::collect_input_files(ctx, &sidecar.input_glob_sets, source_dir)
-                .await
-                .map_err(ArtifactCacheError::Glob)?;
-        for matched in current {
-            if !sidecar.input_files.contains_key(&matched) {
-                return Ok(None);
+            // Detect newly-added files that match the stored globs. This catches
+            // sources added after the cache entry was written. Uses the same
+            // engine-deduped walk as `build_backend_metadata`.
+            let current =
+                crate::input_globs::collect_input_files(ctx, &sidecar.input_glob_sets, source_dir)
+                    .await
+                    .map_err(ArtifactCacheError::Glob)?;
+            for matched in current {
+                if !sidecar.input_files.contains_key(&matched) {
+                    tracing::debug!(package = %package.as_normalized(), file = %matched, "artifact cache miss: new input file added");
+                    return Ok(None);
+                }
             }
         }
 
@@ -321,6 +337,7 @@ impl ArtifactCache {
             .entry_dir(package, key)
             .join(&sidecar.artifact_filename);
         if fs_err::metadata(&artifact_path).is_err() {
+            tracing::debug!(package = %package.as_normalized(), artifact = %artifact_path.display(), "artifact cache miss: cached artifact missing");
             return Ok(None);
         }
 
@@ -492,10 +509,11 @@ mod tests {
         package: &PackageName,
         key: &ArtifactCacheKey,
         source: &Path,
+        immutable: bool,
     ) -> Result<Option<CachedArtifact>, ArtifactCacheError> {
         let source = AbsPath::new(source).unwrap();
         engine
-            .with_ctx(async |ctx| cache.lookup(ctx, package, key, source).await)
+            .with_ctx(async |ctx| cache.lookup(ctx, package, key, source, immutable).await)
             .await
             .expect("compute engine cycle")
     }
@@ -527,7 +545,7 @@ mod tests {
         let engine = ComputeEngine::new();
         let source = tmp.path().join("src");
         fs_err::create_dir_all(&source).unwrap();
-        let got = lookup(&engine, &cache, &pkg("foo"), &key("linux-64-abc"), &source)
+        let got = lookup(&engine, &cache, &pkg("foo"), &key("linux-64-abc"), &source, false)
             .await
             .unwrap();
         assert!(got.is_none());
@@ -565,7 +583,7 @@ mod tests {
             .await
             .unwrap();
 
-        let hit = lookup(&engine, &cache, &pkg("foo"), &key, &source)
+        let hit = lookup(&engine, &cache, &pkg("foo"), &key, &source, false)
             .await
             .unwrap();
         let hit = hit.expect("cache hit after store");
@@ -610,7 +628,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs_err::write(&input, b"new").unwrap();
 
-        let got = lookup(&engine, &cache, &pkg("foo"), &key, &source)
+        let got = lookup(&engine, &cache, &pkg("foo"), &key, &source, false)
             .await
             .unwrap();
         assert!(got.is_none(), "mtime change should invalidate the entry");
@@ -648,12 +666,104 @@ mod tests {
         // Introduce a new file that matches the stored glob.
         fs_err::write(source.join("extra.py"), b"new module").unwrap();
 
-        let got = lookup(&engine, &cache, &pkg("foo"), &key, &source)
+        let got = lookup(&engine, &cache, &pkg("foo"), &key, &source, false)
             .await
             .unwrap();
         assert!(
             got.is_none(),
             "a newly-added matching file should invalidate the entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_source_skips_freshness_checks() {
+        // For an immutable source the key already pins the content, so an
+        // mtime change or a newly-added matching file must not invalidate
+        // the entry (a re-materialized git checkout has fresh mtimes).
+        let tmp = TempDir::new().unwrap();
+        let cache = ArtifactCache::new(tmp.path().join("artifacts"));
+        let engine = ComputeEngine::new();
+
+        let source = tmp.path().join("src");
+        fs_err::create_dir_all(&source).unwrap();
+        let input = source.join("main.py");
+        fs_err::write(&input, b"old").unwrap();
+
+        let scratch = tmp.path().join("scratch");
+        fs_err::create_dir_all(&scratch).unwrap();
+        let artifact = scratch.join("foo-1.0.0-h0.conda");
+        fs_err::write(&artifact, b"artifact").unwrap();
+
+        let key = key("linux-64-abc");
+        cache
+            .store(
+                &pkg("foo"),
+                &key,
+                &artifact,
+                vec![glob_group(&["**/*.py"])],
+                vec![abs(input.clone())],
+                dummy_record("foo"),
+            )
+            .await
+            .unwrap();
+
+        // Both of these invalidate a mutable lookup.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs_err::write(&input, b"new").unwrap();
+        fs_err::write(source.join("extra.py"), b"new module").unwrap();
+
+        assert!(
+            lookup(&engine, &cache, &pkg("foo"), &key, &source, false)
+                .await
+                .unwrap()
+                .is_none(),
+            "mutable lookup should treat the changes as stale"
+        );
+        assert!(
+            lookup(&engine, &cache, &pkg("foo"), &key, &source, true)
+                .await
+                .unwrap()
+                .is_some(),
+            "immutable lookup should ignore mtime / new-file changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_lookup_still_requires_artifact_on_disk() {
+        // Freshness checks are skipped for immutable sources, but a missing
+        // artifact must still be a miss so the caller rebuilds.
+        let tmp = TempDir::new().unwrap();
+        let cache = ArtifactCache::new(tmp.path().join("artifacts"));
+        let engine = ComputeEngine::new();
+
+        let source = tmp.path().join("src");
+        fs_err::create_dir_all(&source).unwrap();
+        let scratch = tmp.path().join("scratch");
+        fs_err::create_dir_all(&scratch).unwrap();
+        let artifact = scratch.join("foo-1.0.0-h0.conda");
+        fs_err::write(&artifact, b"artifact").unwrap();
+
+        let key = key("linux-64-abc");
+        let stored = cache
+            .store(
+                &pkg("foo"),
+                &key,
+                &artifact,
+                Vec::new(),
+                Vec::new(),
+                dummy_record("foo"),
+            )
+            .await
+            .unwrap();
+
+        fs_err::remove_file(&stored.artifact).unwrap();
+
+        assert!(
+            lookup(&engine, &cache, &pkg("foo"), &key, &source, true)
+                .await
+                .unwrap()
+                .is_none(),
+            "a missing artifact should be a miss even for immutable sources"
         );
     }
 
@@ -692,7 +802,7 @@ mod tests {
             .await
             .unwrap();
 
-        let hit = lookup(&engine, &cache, &pkg("foo"), &key, &source)
+        let hit = lookup(&engine, &cache, &pkg("foo"), &key, &source, false)
             .await
             .unwrap()
             .expect("cache should hit");
@@ -773,7 +883,9 @@ mod tests {
                 // Ignore whether it's a hit or miss; racing with stores
                 // the lookup may see either. The contract under test is
                 // that it never errors out.
-                let _ = lookup(&engine, &cache, &pkg, &key, &source).await.unwrap();
+                let _ = lookup(&engine, &cache, &pkg, &key, &source, false)
+                    .await
+                    .unwrap();
             }));
         }
         for h in handles {
@@ -794,7 +906,7 @@ mod tests {
         fs_err::create_dir_all(&entry).unwrap();
         fs_err::write(entry.join("sidecar.json"), b"{ this is not valid").unwrap();
 
-        let got = lookup(&engine, &cache, &pkg("foo"), &key("linux-64-abc"), &source)
+        let got = lookup(&engine, &cache, &pkg("foo"), &key("linux-64-abc"), &source, false)
             .await
             .unwrap();
         assert!(got.is_none());
@@ -860,7 +972,7 @@ mod tests {
             .unwrap();
 
         // Second run with nothing changed: must hit, not rebuild.
-        let hit = lookup(&engine, &cache, &pkg("foo"), &key, &source)
+        let hit = lookup(&engine, &cache, &pkg("foo"), &key, &source, false)
             .await
             .unwrap();
         assert!(

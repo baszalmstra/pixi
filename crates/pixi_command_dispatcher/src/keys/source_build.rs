@@ -207,7 +207,13 @@ async fn compute_inner(
         .as_dir_or_file_parent()
         .to_path_buf();
     if let Some(hit) = artifact_cache
-        .lookup(ctx, spec.record.name(), &cache_key, &source_dir)
+        .lookup(
+            ctx,
+            spec.record.name(),
+            &cache_key,
+            &source_dir,
+            build_source_checkout.is_immutable(),
+        )
         .await
         .map_err(map_cache_err)?
     {
