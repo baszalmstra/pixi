@@ -44,15 +44,21 @@ use xxhash_rust::xxh3::Xxh3;
 
 /// Opaque content-addressed handle for an artifact cache entry.
 ///
-/// Format: url-safe-base64 of the `xxh3_64` over all hashed inputs
+/// `hash` is url-safe-base64 of the `xxh3_64` over all hashed inputs
 /// (see [`compute_artifact_cache_key`]). Package name is not included
 /// because the entry lives under a `<package_name>/` parent directory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ArtifactCacheKey(String);
+pub struct ArtifactCacheKey {
+    hash: String,
+    /// `true` iff every source pin hashed into `hash` is content-addressed
+    /// (git/url for both manifest and build source), making a hit fresh by
+    /// construction. Derived alongside the hash, not folded into it.
+    immutable: bool,
+}
 
 impl std::fmt::Display for ArtifactCacheKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.hash)
     }
 }
 
@@ -127,7 +133,10 @@ pub fn compute_artifact_cache_key(
     // `host_platform` is already folded into `hasher`, so the hash
     // alone uniquely identifies the artifact. Dropping the display-only
     // prefix keeps the on-disk path short on Windows.
-    ArtifactCacheKey(URL_SAFE_NO_PAD.encode(hasher.finish().to_ne_bytes()))
+    ArtifactCacheKey {
+        hash: URL_SAFE_NO_PAD.encode(hasher.finish().to_ne_bytes()),
+        immutable: !record.has_mutable_source(),
+    }
 }
 
 /// On-disk record that lives next to a cached `.conda`.
@@ -189,7 +198,7 @@ impl ArtifactCache {
 
     /// Directory that holds the entry for `(package, key)`.
     pub fn entry_dir(&self, package: &PackageName, key: &ArtifactCacheKey) -> PathBuf {
-        self.package_dir(package).join(&key.0)
+        self.package_dir(package).join(&key.hash)
     }
 
     fn sidecar_path(&self, package: &PackageName, key: &ArtifactCacheKey) -> PathBuf {
@@ -250,7 +259,8 @@ impl ArtifactCache {
 
     /// Look up an entry. Returns `Ok(None)` if the entry is missing or
     /// stale (parse failure, mtime mismatch, missing file, or a newly-added
-    /// file matches the recorded globs).
+    /// file matches the recorded globs). The freshness checks are skipped
+    /// for an immutable key (see [`ArtifactCacheKey`]).
     ///
     /// Holds a shared read lock on the entry's `.lock` file while
     /// reading the sidecar, so a concurrent [`store`](Self::store) (which
@@ -289,17 +299,30 @@ impl ArtifactCache {
         let Ok(sidecar) = serde_json::from_slice::<ArtifactSidecar>(&bytes) else {
             // Treat unparsable sidecars as misses; the caller will rebuild
             // and overwrite.
+            tracing::debug!("artifact cache miss: unparsable sidecar");
             return Ok(None);
         };
         drop(_guard);
+
+        // A hit on an immutable key is fresh by construction: every source
+        // pin in the key is content-addressed, while git checkout mtimes
+        // are not stable across re-materializations, so the checks below
+        // would only cause spurious rebuilds.
+        if key.immutable {
+            return Ok(self.cached_artifact(package, key, sidecar));
+        }
 
         // Check every recorded file still matches its mtime.
         for (path, expected_mtime) in &sidecar.input_files {
             let modified = match fs_err::metadata(path).and_then(|m| m.modified()) {
                 Ok(m) => DateTime::<Utc>::from(m),
-                Err(_) => return Ok(None),
+                Err(_) => {
+                    tracing::debug!(file = %path, "artifact cache miss: input file missing");
+                    return Ok(None);
+                }
             };
             if modified != *expected_mtime {
+                tracing::debug!(file = %path, %expected_mtime, found = %modified, "artifact cache miss: mtime changed");
                 return Ok(None);
             }
         }
@@ -313,22 +336,35 @@ impl ArtifactCache {
                 .map_err(ArtifactCacheError::Glob)?;
         for matched in current {
             if !sidecar.input_files.contains_key(&matched) {
+                tracing::debug!(file = %matched, "artifact cache miss: new input file added");
                 return Ok(None);
             }
         }
 
+        Ok(self.cached_artifact(package, key, sidecar))
+    }
+
+    /// Final step of a lookup: return the cached artifact, or `None` (a
+    /// miss) if its file no longer exists on disk.
+    fn cached_artifact(
+        &self,
+        package: &PackageName,
+        key: &ArtifactCacheKey,
+        sidecar: ArtifactSidecar,
+    ) -> Option<CachedArtifact> {
         let artifact_path = self
             .entry_dir(package, key)
             .join(&sidecar.artifact_filename);
         if fs_err::metadata(&artifact_path).is_err() {
-            return Ok(None);
+            tracing::debug!(artifact = %artifact_path.display(), "artifact cache miss: artifact file missing");
+            return None;
         }
 
-        Ok(Some(CachedArtifact {
+        Some(CachedArtifact {
             artifact: artifact_path,
             sha256: sidecar.artifact_sha256,
             record: sidecar.record,
-        }))
+        })
     }
 
     /// Place `artifact_source` into the cache and write its sidecar.
@@ -463,7 +499,18 @@ mod tests {
     use super::*;
 
     fn key(s: &str) -> ArtifactCacheKey {
-        ArtifactCacheKey(s.to_string())
+        ArtifactCacheKey {
+            hash: s.to_string(),
+            immutable: false,
+        }
+    }
+
+    /// A key whose source pins are all content-addressed (git/url).
+    fn immutable_key(s: &str) -> ArtifactCacheKey {
+        ArtifactCacheKey {
+            hash: s.to_string(),
+            immutable: true,
+        }
     }
 
     fn pkg(name: &str) -> PackageName {
@@ -658,6 +705,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn immutable_key_skips_freshness_checks() {
+        // For an immutable key the pins already address the content, so an
+        // mtime change or a newly-added matching file must not invalidate
+        // the entry (a re-materialized git checkout has fresh mtimes). A
+        // missing artifact file must still be a miss.
+        let tmp = TempDir::new().unwrap();
+        let cache = ArtifactCache::new(tmp.path().join("artifacts"));
+        let engine = ComputeEngine::new();
+
+        let source = tmp.path().join("src");
+        fs_err::create_dir_all(&source).unwrap();
+        let input = source.join("main.py");
+        fs_err::write(&input, b"old").unwrap();
+
+        let scratch = tmp.path().join("scratch");
+        fs_err::create_dir_all(&scratch).unwrap();
+        let artifact = scratch.join("foo-1.0.0-h0.conda");
+        fs_err::write(&artifact, b"artifact").unwrap();
+
+        let key = key("linux-64-abc");
+        let stored = cache
+            .store(
+                &pkg("foo"),
+                &key,
+                &artifact,
+                vec![glob_group(&["**/*.py"])],
+                vec![abs(input.clone())],
+                dummy_record("foo"),
+            )
+            .await
+            .unwrap();
+
+        // Both of these invalidate a mutable lookup.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs_err::write(&input, b"new").unwrap();
+        fs_err::write(source.join("extra.py"), b"new module").unwrap();
+
+        // Same hash → same on-disk entry; only the immutability bit differs.
+        let immutable = immutable_key("linux-64-abc");
+        assert!(
+            lookup(&engine, &cache, &pkg("foo"), &key, &source)
+                .await
+                .unwrap()
+                .is_none(),
+            "mutable lookup should treat the changes as stale"
+        );
+        assert!(
+            lookup(&engine, &cache, &pkg("foo"), &immutable, &source)
+                .await
+                .unwrap()
+                .is_some(),
+            "immutable lookup should ignore mtime / new-file changes"
+        );
+
+        fs_err::remove_file(&stored.artifact).unwrap();
+        assert!(
+            lookup(&engine, &cache, &pkg("foo"), &immutable, &source)
+                .await
+                .unwrap()
+                .is_none(),
+            "a missing artifact should be a miss even for immutable keys"
+        );
+    }
+
+    #[tokio::test]
     async fn sidecar_preserves_record_fields_across_lookup() {
         // Verify that every RepoDataRecord field we care about
         // (identifier, url, package_record.version, .build, .subdir,
@@ -773,7 +885,9 @@ mod tests {
                 // Ignore whether it's a hit or miss; racing with stores
                 // the lookup may see either. The contract under test is
                 // that it never errors out.
-                let _ = lookup(&engine, &cache, &pkg, &key, &source).await.unwrap();
+                let _ = lookup(&engine, &cache, &pkg, &key, &source)
+                    .await
+                    .unwrap();
             }));
         }
         for h in handles {
@@ -879,14 +993,29 @@ mod cache_key_tests {
     use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
     use pixi_record::{
-        FullSourceRecordData, PinnedPathSpec, PinnedSourceSpec, SourceRecordData,
-        UnresolvedPixiRecord, UnresolvedSourceRecord,
+        FullSourceRecordData, PinnedBuildSourceSpec, PinnedGitCheckout, PinnedGitSpec,
+        PinnedPathSpec, PinnedSourceSpec, SourceRecordData, UnresolvedPixiRecord,
+        UnresolvedSourceRecord,
     };
     use rattler_conda_types::{PackageName, PackageRecord, Platform, RepoDataRecord};
     use rattler_digest::{Sha256Hash, parse_digest_from_hex};
     use typed_path::Utf8TypedPathBuf;
 
     use super::compute_artifact_cache_key;
+
+    fn git_source() -> PinnedSourceSpec {
+        PinnedSourceSpec::Git(PinnedGitSpec {
+            git: url::Url::parse("https://github.com/example/repo.git").unwrap(),
+            source: PinnedGitCheckout {
+                commit: pixi_git::sha::GitSha::from_str(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+                subdirectory: Default::default(),
+                reference: pixi_spec::GitReference::DefaultBranch,
+            },
+        })
+    }
 
     fn record(name: &str) -> UnresolvedSourceRecord {
         let mut pr = PackageRecord::new(
@@ -967,6 +1096,45 @@ mod cache_key_tests {
             key_for(&a, "backend-v1", &[]),
             key_for(&b, "backend-v1", &[])
         );
+    }
+
+    #[test]
+    fn immutability_is_derived_from_the_source_pins() {
+        let key = |r: &UnresolvedSourceRecord| {
+            compute_artifact_cache_key(
+                r,
+                Platform::Linux64,
+                Platform::Linux64,
+                "b",
+                &[],
+                &[],
+                &Default::default(),
+                None,
+            )
+            .immutable
+        };
+        let path_build_source = || {
+            PinnedBuildSourceSpec::Absolute(PinnedSourceSpec::Path(PinnedPathSpec {
+                path: Utf8TypedPathBuf::from("./build-src"),
+            }))
+        };
+
+        // Path manifest: mutable.
+        assert!(!key(&record("foo")));
+
+        // Git manifest, no explicit build source: immutable.
+        let mut r = record("foo");
+        r.manifest_source = git_source();
+        assert!(key(&r));
+
+        // Git manifest + git build source: immutable.
+        r.build_source = Some(PinnedBuildSourceSpec::Absolute(git_source()));
+        assert!(key(&r));
+
+        // Git manifest + mutable path build source must stay mutable:
+        // glob groups may be rooted at either side.
+        r.build_source = Some(path_build_source());
+        assert!(!key(&r));
     }
 
     #[test]
