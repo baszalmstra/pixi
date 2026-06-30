@@ -59,6 +59,16 @@ cupy = ">=13"
 numpy = ">=2"
 # --8<-- [end:run-constraints]
 
+# --8<-- [start:run-exports]
+[package.run-exports.weak]
+# Self-pin: dependents that link against `package` at host time get the exact
+# same version of `package` at run time.
+package = { pin-subpackage = true }
+
+[package.run-exports.strong]
+libzma = "*"
+# --8<-- [end:run-exports]
+
 
 [workspace]
 channels = ["https://prefix.dev/conda-forge"]

@@ -1376,6 +1376,7 @@ The package section is defined using the following fields:
 - `host-dependencies`: The host dependencies of the package.
 - `run-dependencies`: The run dependencies of the package.
 - `run-constraints`: Version constraints applied to the package's run environment.
+- `run-exports`: Dependencies that dependents of this package should automatically receive. See [`run-exports`](#run-exports).
 - `target`: The target table to configure target specific dependencies. (Similar to the [target](#the-target-table) table)
 
 And to extend the basics, it can also contain the following fields:
@@ -1472,6 +1473,7 @@ Each of these tables has a different purpose and is used to define the dependenc
 - [`run-dependencies`](#run-dependencies): Dependencies that are required to run the package on the target platform.
 - [`extra-dependencies`](#extra-dependencies): Optional run dependency groups that consumers can request through `extras`.
 - [`run-constraints`](#run-constraints): Version constraints applied to the package's run environment, applied only when the constrained package is already pulled in by another dependency.
+- [`run-exports`](#run-exports): Dependencies that dependents of this package should automatically receive when they depend on it.
 
 
 ### `build-dependencies`
@@ -1549,3 +1551,34 @@ This mirrors the conda concept that surfaces as `run_constrained` in the package
 ```toml
 --8<-- "docs/source_files/pixi_tomls/pixi-package-manifest.toml:run-constraints"
 ```
+
+### `run-exports`
+
+The `run-exports` table declares that dependents of this package should automatically receive certain
+dependencies. It mirrors the conda run-exports mechanism (see [Run-Exports](../build/dependency_types.md#run-exports)
+for the consumer side) but lets you *declare* run-exports for the package being built, without writing a
+`recipe.yaml`. It has five sub-tables: `noarch`, `strong`, `weak`, `strong-constrains`, and `weak-constrains`.
+
+```toml
+--8<-- "docs/source_files/pixi_tomls/pixi-package-manifest.toml:run-exports"
+```
+
+#### `pin-subpackage`
+
+`pin-subpackage` is a spec value, usable in `[package.run-exports.*]` and in every package-level
+dependency table (`[package.run-dependencies]`, `[package.host-dependencies]`,
+`[package.build-dependencies]`, `[package.run-constraints]`), that pins to the package's *own* resolved
+version and build string — mirroring rattler-build's `pin_subpackage()` Jinja helper. It is not available
+in workspace- or feature-level dependency tables.
+
+```toml
+# Shorthand exact self-pin (sugar for `{ pin-subpackage = { exact = true } }`)
+my-package = { pin-subpackage = true }
+
+# Detailed self-pin, mirrors pin_subpackage(name, lower_bound=, upper_bound=, build=)
+my-package = { pin-subpackage = { lower-bound = "x.x", upper-bound = "x.x.x", build = "py*" } }
+```
+
+`pin-subpackage` must reference the package's own name and cannot be combined with any other matchspec
+field (`version`, `channel`, `build`, ...) on the same entry — `exact` and `build` are themselves mutually
+exclusive within the detailed form.

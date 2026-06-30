@@ -1,0 +1,18 @@
+#:schema ./../../schema.json
+[project]
+channels = ["conda-forge"]
+name = "project"
+platforms = ["linux-64"]
+preview = ["pixi-build"]
+
+[package]
+name = "project"
+version = "0.1.0"
+
+[package.build.backend]
+name = "pixi-build-python"
+version = "*"
+
+# `pin-subpackage` cannot be combined with another matchspec field on the same entry.
+[package.run-dependencies]
+project = { pin-subpackage = true, channel = "conda-forge" }

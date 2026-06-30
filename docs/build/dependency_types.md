@@ -99,6 +99,59 @@ This is useful to avoid having to specify the same dependencies in both sections
 As most packages on conda-forge will have these `run-exports` defined.
 When using something like `zlib`, you would only need to specify it in the `host-dependencies` section, and it will be used as a run-dependency automatically.
 
+##### Declaring run-exports
+
+A package can also *declare* its own run-exports, so that packages depending on it automatically receive
+certain dependencies, without writing a full `recipe.yaml`. Use the `[package.run-exports.*]` tables:
+
+```toml
+[package.run-exports.strong]
+libzma = "*"
+
+[package.run-exports.weak]
+libcurl = ">=8"
+
+[package.run-exports.noarch]
+python = "*"
+
+[package.run-exports.strong-constrains]
+some-pkg = ">=1.0"
+
+[package.run-exports.weak-constrains]
+other-pkg = "<2.0"
+```
+
+* `strong` run-exports apply from both the build and host environment to the run environment of dependents.
+* `weak` run-exports apply from the host environment to the run environment of dependents.
+* `noarch` run-exports apply only when the dependent is a `noarch` package.
+* `strong-constrains`/`weak-constrains` add a constraint (rather than a hard dependency) to dependents.
+
+##### Self-referential pins with `pin-subpackage`
+
+A package frequently wants one of its own run-exports to pin back to *itself*, e.g. "anything that
+depends on my host-time presence should require the exact same version of me at run time." Use the
+`pin-subpackage` spec value, available in `[package.run-exports.*]` and in every package-level
+dependency table (`[package.run-dependencies]`, `[package.host-dependencies]`,
+`[package.build-dependencies]`, `[package.run-constraints]`):
+
+```toml
+[package.run-exports.weak]
+# Shorthand exact self-pin (sugar for `{ pin-subpackage = { exact = true } }`)
+my-package = { pin-subpackage = true }
+```
+
+Or with explicit bounds, mirroring rattler-build's `pin_subpackage()` Jinja helper:
+
+```toml
+[package.run-exports.weak]
+my-package = { pin-subpackage = { lower-bound = "x.x", upper-bound = "x.x.x", build = "py*" } }
+```
+
+`pin-subpackage` must reference the package's own name (since a native manifest describes exactly one
+output, "subpackage" can only mean "myself"), cannot be combined with any other matchspec field on the
+same entry, and is **not** available in workspace- or feature-level dependency tables
+(`[dependencies]`, `[feature.x.dependencies]`) — only inside `[package.*]` tables. Conditional
+`[package.run-exports.*."if(...)"]` sub-tables are not yet supported.
 
 ### [Dependencies (Run Dependencies)](../reference/pixi_manifest.md#dependencies)
 

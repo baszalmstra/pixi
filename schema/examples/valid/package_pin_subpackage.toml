@@ -1,0 +1,40 @@
+#:schema ./../../schema.json
+[project]
+channels = ["conda-forge"]
+name = "project"
+platforms = ["linux-64"]
+preview = ["pixi-build"]
+
+[package]
+name = "project"
+version = "0.1.0"
+
+[package.build.backend]
+name = "pixi-build-python"
+version = "*"
+
+# `pin-subpackage` is usable in every package-level dependency table.
+[package.run-dependencies]
+project = { pin-subpackage = { lower-bound = "x.x", upper-bound = "x.x.x" } }
+
+[package.host-dependencies]
+project = { pin-subpackage = { build = "py*" } }
+
+[package.build-dependencies]
+project = { pin-subpackage = true }
+
+# ... and in every `[package.run-exports.*]` bucket.
+[package.run-exports.weak]
+project = { pin-subpackage = true }
+
+[package.run-exports.strong]
+libzma = "*"
+
+[package.run-exports.noarch]
+python = "*"
+
+[package.run-exports.strong-constrains]
+some-pkg = ">=1.0"
+
+[package.run-exports.weak-constrains]
+other-pkg = "<2.0"

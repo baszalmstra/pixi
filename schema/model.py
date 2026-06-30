@@ -652,6 +652,84 @@ ConditionalExtraDependencies = (
 )
 
 
+class PinSubpackageTable(StrictBaseModel):
+    """Detailed `pin-subpackage` self-pin, mirroring rattler-build's
+    `pin_subpackage(name, lower_bound=, upper_bound=, build=)` Jinja helper.
+
+    `exact` and `build` are mutually exclusive.
+    """
+
+    lower_bound: NonEmptyStr | None = Field(
+        None,
+        description='A minimum pin, using "x.x.x..." pin-expression syntax (e.g. "x.x") or a literal version',
+    )
+    upper_bound: NonEmptyStr | None = Field(
+        None,
+        description='A maximum pin, using "x.x.x..." pin-expression syntax (e.g. "x.x.x") or a literal version',
+    )
+    exact: bool | None = Field(
+        None,
+        description="If true, pin to the exact resolved version and build string. Mutually exclusive with `build`.",
+    )
+    build: NonEmptyStr | None = Field(None, description="An optional build string matcher")
+
+
+class PinSubpackage(StrictBaseModel):
+    """`{ pin-subpackage = true }` or `{ pin-subpackage = { ... } }`: a
+    self-referential pin, resolved against the package's own version and
+    build string once built. The entry's key must equal the package's own
+    name — a native pixi-build manifest describes exactly one output, so
+    "subpackage" can only mean "myself." Usable in `[package.run-exports.*]`
+    and in every package-level dependency table; not available in
+    workspace- or feature-level dependency tables.
+    """
+
+    pin_subpackage: Literal[True] | PinSubpackageTable = Field(
+        description="Shorthand `true` for an exact self-pin, or a table for a bounded/partial self-pin"
+    )
+
+
+InheritablePackageMatchSpec = InheritableMatchSpec | PinSubpackage
+
+# Package-level dependency tables additionally accept `pin-subpackage`
+# (gated to package-level tables only — workspace/feature dependency tables
+# use `ConditionalInheritableDependencies`/`InheritableDependencies`, which do
+# not include `PinSubpackage`).
+ConditionalInheritablePackageDependencies = (
+    dict[
+        CondaPackageName,
+        InheritablePackageMatchSpec | dict[CondaPackageName, InheritablePackageMatchSpec],
+    ]
+    | None
+)
+
+RunExportsBucket = dict[CondaPackageName, InheritablePackageMatchSpec] | None
+
+
+class RunExports(StrictBaseModel):
+    """Declares that dependents of this package should automatically receive
+    certain dependencies (the conda run-exports mechanism). See
+    https://pixi.sh/latest/build/dependency_types/#run-exports for details.
+    """
+
+    noarch: RunExportsBucket = Field(
+        None, description="Run exports applied only when the dependent is a noarch package"
+    )
+    strong: RunExportsBucket = Field(
+        None,
+        description="Run exports applied from both the build and host environment to the run environment",
+    )
+    weak: RunExportsBucket = Field(
+        None, description="Run exports applied from the host environment to the run environment"
+    )
+    strong_constrains: RunExportsBucket = Field(
+        None, description="Strong run-constrains applied to dependents"
+    )
+    weak_constrains: RunExportsBucket = Field(
+        None, description="Weak run-constrains applied to dependents"
+    )
+
+
 ################
 # Task section #
 ################
@@ -1084,15 +1162,19 @@ class Package(StrictBaseModel):
 
     build: Build = Field(..., description="The build configuration of the package")
 
-    host_dependencies: ConditionalInheritableDependencies = HostDependenciesField
-    build_dependencies: ConditionalInheritableDependencies = BuildDependenciesField
-    run_dependencies: ConditionalInheritableDependencies = RunDependenciesField
+    host_dependencies: ConditionalInheritablePackageDependencies = HostDependenciesField
+    build_dependencies: ConditionalInheritablePackageDependencies = BuildDependenciesField
+    run_dependencies: ConditionalInheritablePackageDependencies = RunDependenciesField
     extra_dependencies: ConditionalExtraDependencies = Field(
         None,
         description="Extra groups that can be requested through MatchSpec extras. Each group uses the same conda package specification syntax as run-dependencies.",
         examples=[{"test": {"pytest": ">=8", "hypothesis": "*"}}],
     )
-    run_constraints: ConditionalInheritableDependencies = RunConstraintsField
+    run_constraints: ConditionalInheritablePackageDependencies = RunConstraintsField
+    run_exports: RunExports | None = Field(
+        None,
+        description="Run-exports declared by this package: dependencies that dependents should automatically receive. See https://pixi.sh/latest/build/dependency_types/#run-exports for more information.",
+    )
 
 
 class BuildTarget(StrictBaseModel):
