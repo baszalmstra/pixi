@@ -286,6 +286,10 @@ pub struct Target {
     )]
     pub extra_dependencies:
         Option<OrderMap<ExtraGroupName, OrderMap<SourcePackageName, PackageSpec>>>,
+
+    /// Run-exports declared by the source package for this target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_exports: Option<RunExportsTarget>,
 }
 
 impl Target {
@@ -303,16 +307,85 @@ impl Target {
             .extra_dependencies
             .as_ref()
             .is_none_or(|e| e.is_empty() || e.values().all(|deps| deps.is_empty()));
+        let has_no_run_exports = self
+            .run_exports
+            .as_ref()
+            .is_none_or(RunExportsTarget::is_empty);
 
         has_no_build_deps
             && has_no_host_deps
             && has_no_run_deps
             && has_no_run_constraints
             && has_no_extra_dependencies
+            && has_no_run_exports
     }
 }
 
 impl IsDefault for Target {
+    type Item = Self;
+
+    fn is_non_default(&self) -> Option<&Self::Item> {
+        if !self.is_empty() { Some(self) } else { None }
+    }
+}
+
+/// Run-exports declared by a source package for a target. Mirrors
+/// [`Target`]'s dependency fields; each bucket maps a package name to the
+/// [`PackageSpec`] it exports (which may be a [`PackageSpec::PinCompatible`]
+/// self-referential pin).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RunExportsTarget {
+    /// `noarch` run exports: applied only to noarch packages.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub noarch: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// `strong` run exports: applied from build and host env to run env.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub strong: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// `weak` run exports: applied from host env to run env.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub weak: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// `strong` run constrains.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub strong_constrains: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// `weak` run constrains.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
+    )]
+    pub weak_constrains: Option<OrderMap<SourcePackageName, PackageSpec>>,
+}
+
+impl RunExportsTarget {
+    /// Check if this run-exports target is effectively empty (contains no
+    /// meaningful data that should affect the hash).
+    pub fn is_empty(&self) -> bool {
+        self.noarch.as_ref().is_none_or(|d| d.is_empty())
+            && self.strong.as_ref().is_none_or(|d| d.is_empty())
+            && self.weak.as_ref().is_none_or(|d| d.is_empty())
+            && self.strong_constrains.as_ref().is_none_or(|d| d.is_empty())
+            && self.weak_constrains.as_ref().is_none_or(|d| d.is_empty())
+    }
+}
+
+impl IsDefault for RunExportsTarget {
     type Item = Self;
 
     fn is_non_default(&self) -> Option<&Self::Item> {
@@ -745,6 +818,7 @@ impl Hash for Target {
             run_dependencies,
             run_constraints,
             extra_dependencies,
+            run_exports,
         } = self;
 
         StableHashBuilder::<H>::new()
@@ -753,6 +827,30 @@ impl Hash for Target {
             .field("host_dependencies", host_dependencies)
             .field("run_dependencies", run_dependencies)
             .field("run_constraints", run_constraints)
+            .field("run_exports", run_exports)
+            .finish(state);
+    }
+}
+
+impl Hash for RunExportsTarget {
+    /// Custom hash implementation using StableHashBuilder to ensure different
+    /// field configurations produce different hashes while maintaining
+    /// forward/backward compatibility.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let RunExportsTarget {
+            noarch,
+            strong,
+            weak,
+            strong_constrains,
+            weak_constrains,
+        } = self;
+
+        StableHashBuilder::<H>::new()
+            .field("noarch", noarch)
+            .field("strong", strong)
+            .field("weak", weak)
+            .field("strong_constrains", strong_constrains)
+            .field("weak_constrains", weak_constrains)
             .finish(state);
     }
 }
@@ -1038,12 +1136,25 @@ mod tests {
             run_dependencies: Some(OrderMap::new()),
             run_constraints: Some(OrderMap::new()),
             extra_dependencies: None,
+            run_exports: None,
         };
         project_model.targets = Some(Targets {
             default_target: Some(empty_target),
             conditional: Some(OrderMap::new()),
         });
         let hash3 = calculate_hash(&project_model);
+
+        // Add a target with an empty (but `Some`) run_exports - should also NOT
+        // change the hash.
+        let empty_run_exports_target = Target {
+            run_exports: Some(RunExportsTarget::default()),
+            ..Target::default()
+        };
+        project_model.targets = Some(Targets {
+            default_target: Some(empty_run_exports_target),
+            conditional: Some(OrderMap::new()),
+        });
+        let hash4 = calculate_hash(&project_model);
 
         // With corrected implementation, hashes should remain stable when adding
         // empty/default values This preserves forward/backward compatibility
@@ -1058,6 +1169,10 @@ mod tests {
         assert_eq!(
             hash2, hash3,
             "Hash should remain stable across different empty configurations"
+        );
+        assert_eq!(
+            hash1, hash4,
+            "Hash should not change when adding an empty run_exports target"
         );
     }
 
@@ -1101,6 +1216,7 @@ mod tests {
             run_dependencies: Some(OrderMap::new()),
             run_constraints: Some(OrderMap::new()),
             extra_dependencies: None,
+            run_exports: None,
         };
         project_model.targets = Some(Targets {
             default_target: Some(target_with_deps),
@@ -1214,6 +1330,7 @@ mod tests {
                 PackageSpec::Binary(Box::default()),
             )])),
             extra_dependencies: None,
+            run_exports: None,
         }
     }
 
@@ -1316,6 +1433,7 @@ mod tests {
             run_dependencies: None,
             run_constraints: Some(deps),
             extra_dependencies: None,
+            run_exports: None,
         };
         assert!(!target.is_empty());
 
@@ -1325,6 +1443,7 @@ mod tests {
             run_dependencies: None,
             run_constraints: None,
             extra_dependencies: None,
+            run_exports: None,
         };
         assert!(empty.is_empty());
     }
@@ -1347,6 +1466,7 @@ mod tests {
             run_dependencies: None,
             run_constraints: None,
             extra_dependencies: None,
+            run_exports: None,
         };
 
         // Same dependency in run_dependencies
@@ -1356,6 +1476,7 @@ mod tests {
             run_dependencies: Some(deps.clone()),
             run_constraints: None,
             extra_dependencies: None,
+            run_exports: None,
         };
 
         // Same dependency in build_dependencies
@@ -1365,6 +1486,7 @@ mod tests {
             run_dependencies: None,
             run_constraints: None,
             extra_dependencies: None,
+            run_exports: None,
         };
         // Same dependency in run_constraints
         let target4 = Target {
@@ -1373,6 +1495,7 @@ mod tests {
             run_dependencies: None,
             run_constraints: Some(deps.clone()),
             extra_dependencies: None,
+            run_exports: None,
         };
 
         let hash1 = calculate_hash(&target1);
