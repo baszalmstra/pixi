@@ -11,7 +11,9 @@ use ordermap::OrderMap;
 // different types
 use pixi_build_types::{self as pbt};
 
-use pixi_manifest::{PackageManifest, PackageTarget, TargetSelector};
+use pixi_manifest::{
+    ManifestRunExports, PackageDependencySpec, PackageManifest, PackageTarget, TargetSelector,
+};
 use pixi_spec::{GitReference, MatchspecFields, PixiSpec, SourceLocationSpec, SpecConversionError};
 use rattler_conda_types::{ChannelConfig, NamelessMatchSpec, PackageName};
 
@@ -130,17 +132,66 @@ fn to_pixi_spec_v1(
     Ok(pbt_spec)
 }
 
-/// Converts an iterator of `PackageName` and `PixiSpec` to a `IndexMap<String,
-/// pbt::PixiSpecV1>`.
-fn to_pbt_dependencies<'a>(
-    iter: impl Iterator<Item = (&'a PackageName, &'a PixiSpec)>,
+/// Converts a single [`PackageDependencySpec`] to its wire form.
+///
+/// `PackageDependencySpec::Spec(_)` goes through the existing `PixiSpec`
+/// conversion (`Binary`/`Source`); `PackageDependencySpec::PinSubpackage(_)`
+/// becomes a `pbt::PackageSpec::PinCompatible`, using the infallible `Pin ->
+/// PinCompatibleSpec` conversion (`pixi_spec::pin`, behind the
+/// `pixi_build_types` feature).
+fn to_package_dependency_spec_v1(
+    spec: &PackageDependencySpec,
+    channel_config: &ChannelConfig,
+) -> Result<pbt::PackageSpec, SpecConversionError> {
+    match spec {
+        PackageDependencySpec::Spec(spec) => to_pixi_spec_v1(spec, channel_config),
+        PackageDependencySpec::PinSubpackage(pin) => {
+            Ok(pbt::PackageSpec::PinCompatible(pin.into()))
+        }
+    }
+}
+
+/// Converts an iterator of `PackageName` and `PackageDependencySpec` (the
+/// package-level dependency value type, which may carry a `pin-subpackage`
+/// entry) to a `IndexMap<String, pbt::PackageSpec>`.
+fn to_pbt_package_dependencies<'a>(
+    iter: impl Iterator<Item = (&'a PackageName, &'a PackageDependencySpec)>,
     channel_config: &ChannelConfig,
 ) -> Result<OrderMap<pbt::SourcePackageName, pbt::PackageSpec>, SpecConversionError> {
     iter.map(|(name, spec)| {
-        let converted = to_pixi_spec_v1(spec, channel_config)?;
+        let converted = to_package_dependency_spec_v1(spec, channel_config)?;
         Ok((pbt::SourcePackageName::from(name.clone()), converted))
     })
     .collect()
+}
+
+/// Converts a [`ManifestRunExports`] to a [`pbt::RunExportsTarget`].
+fn to_run_exports_v1(
+    run_exports: &ManifestRunExports,
+    channel_config: &ChannelConfig,
+) -> Result<pbt::RunExportsTarget, SpecConversionError> {
+    Ok(pbt::RunExportsTarget {
+        noarch: Some(to_pbt_package_dependencies(
+            run_exports.noarch.iter_specs(),
+            channel_config,
+        )?),
+        strong: Some(to_pbt_package_dependencies(
+            run_exports.strong.iter_specs(),
+            channel_config,
+        )?),
+        weak: Some(to_pbt_package_dependencies(
+            run_exports.weak.iter_specs(),
+            channel_config,
+        )?),
+        strong_constrains: Some(to_pbt_package_dependencies(
+            run_exports.strong_constrains.iter_specs(),
+            channel_config,
+        )?),
+        weak_constrains: Some(to_pbt_package_dependencies(
+            run_exports.weak_constrains.iter_specs(),
+            channel_config,
+        )?),
+    })
 }
 
 /// Converts a [`PackageTarget`] to a [`pbt::Target`].
@@ -158,42 +209,48 @@ fn to_target_v1(
                 .extra_dependencies
                 .iter()
                 .map(|(name, deps)| {
-                    to_pbt_dependencies(deps.iter_specs(), channel_config)
+                    to_pbt_package_dependencies(deps.iter_specs(), channel_config)
                         .map(|dependencies| (name.clone(), dependencies))
                 })
                 .collect::<Result<_, _>>()?,
         )
     };
+    let run_exports = target
+        .run_exports
+        .as_ref()
+        .map(|run_exports| to_run_exports_v1(run_exports, channel_config))
+        .transpose()?;
     Ok(pbt::Target {
         host_dependencies: Some(
             target
                 .host_dependencies()
-                .map(|deps| to_pbt_dependencies(deps.iter_specs(), channel_config))
+                .map(|deps| to_pbt_package_dependencies(deps.iter_specs(), channel_config))
                 .transpose()?
                 .unwrap_or_default(),
         ),
         build_dependencies: Some(
             target
                 .build_dependencies()
-                .map(|deps| to_pbt_dependencies(deps.iter_specs(), channel_config))
+                .map(|deps| to_pbt_package_dependencies(deps.iter_specs(), channel_config))
                 .transpose()?
                 .unwrap_or_default(),
         ),
         run_dependencies: Some(
             target
                 .run_dependencies()
-                .map(|deps| to_pbt_dependencies(deps.iter_specs(), channel_config))
+                .map(|deps| to_pbt_package_dependencies(deps.iter_specs(), channel_config))
                 .transpose()?
                 .unwrap_or_default(),
         ),
         run_constraints: Some(
             target
                 .run_constraints()
-                .map(|deps| to_pbt_dependencies(deps.iter_specs(), channel_config))
+                .map(|deps| to_pbt_package_dependencies(deps.iter_specs(), channel_config))
                 .transpose()?
                 .unwrap_or_default(),
         ),
         extra_dependencies,
+        run_exports,
     })
 }
 
@@ -278,6 +335,8 @@ mod tests {
     };
     use rattler_conda_types::ChannelConfig;
     use rstest::rstest;
+
+    use super::pbt;
 
     fn some_channel_config() -> ChannelConfig {
         ChannelConfig {
@@ -417,8 +476,6 @@ mod tests {
         use pixi_spec::PixiSpec;
         use rattler_conda_types::{PackageName, ParseStrictness, VersionSpec};
 
-        use super::pbt;
-
         let mut package_target = PackageTarget::default();
         let constrained = PackageName::from_str("constrained").unwrap();
         let spec = PixiSpec::from(VersionSpec::from_str(">=1.0", ParseStrictness::Strict).unwrap());
@@ -452,5 +509,112 @@ mod tests {
         assert!(target.run_dependencies.unwrap().is_empty());
         assert!(target.host_dependencies.unwrap().is_empty());
         assert!(target.build_dependencies.unwrap().is_empty());
+    }
+
+    /// `to_target_v1` must convert a `pin-subpackage` entry in a regular
+    /// dependency table into a `pbt::PackageSpec::PinCompatible`, and an
+    /// ordinary spec alongside it must still come through as `Binary`
+    /// (regression guard: the shared conversion function must not affect the
+    /// non-pin path).
+    #[test]
+    fn test_to_target_v1_pin_subpackage_and_ordinary_spec() {
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        mypkg = { pin-subpackage = { lower-bound = "x.x", build = "py*" } }
+        numpy = ">=1.0"
+        "#;
+
+        let manifest = TomlPackage::from_toml_str(input)
+            .unwrap()
+            .into_manifest(
+                WorkspacePackageProperties::default(),
+                PackageDefaults::default(),
+                &Preview::default(),
+                std::path::Path::new(""),
+            )
+            .unwrap()
+            .value;
+
+        let target = super::to_target_v1(&manifest.dependencies, &some_channel_config()).unwrap();
+        let run_deps = target.run_dependencies.expect("run_dependencies present");
+
+        let mypkg = run_deps
+            .iter()
+            .find(|(name, _)| name.as_str() == "mypkg")
+            .map(|(_, spec)| spec)
+            .expect("mypkg dependency present");
+        match mypkg {
+            pbt::PackageSpec::PinCompatible(pin) => {
+                assert!(!pin.exact);
+                assert_eq!(pin.build.as_deref(), Some("py*"));
+                assert!(pin.lower_bound.is_some());
+            }
+            other => panic!("expected PinCompatible spec, got {other:?}"),
+        }
+
+        let numpy = run_deps
+            .iter()
+            .find(|(name, _)| name.as_str() == "numpy")
+            .map(|(_, spec)| spec)
+            .expect("numpy dependency present");
+        match numpy {
+            pbt::PackageSpec::Binary(binary) => {
+                assert_eq!(binary.version.as_ref().unwrap().to_string(), ">=1.0");
+            }
+            other => panic!("expected Binary spec, got {other:?}"),
+        }
+    }
+
+    /// `to_run_exports_v1` must propagate every bucket of
+    /// `[package.run-exports.*]` into the matching `pbt::RunExportsTarget`
+    /// field, including a self-referential `pin-subpackage` shorthand.
+    #[test]
+    fn test_to_run_exports_v1_all_buckets() {
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-exports.weak]
+        mypkg = { pin-subpackage = true }
+
+        [run-exports.strong]
+        libzma = "*"
+        "#;
+
+        let manifest = TomlPackage::from_toml_str(input)
+            .unwrap()
+            .into_manifest(
+                WorkspacePackageProperties::default(),
+                PackageDefaults::default(),
+                &Preview::default(),
+                std::path::Path::new(""),
+            )
+            .unwrap()
+            .value;
+
+        let target = super::to_target_v1(&manifest.dependencies, &some_channel_config()).unwrap();
+        let run_exports = target.run_exports.expect("run_exports present");
+
+        let weak = run_exports.weak.expect("weak bucket present");
+        let (_, mypkg_spec) = weak
+            .iter()
+            .find(|(name, _)| name.as_str() == "mypkg")
+            .expect("mypkg present in weak run-exports");
+        match mypkg_spec {
+            pbt::PackageSpec::PinCompatible(pin) => assert!(pin.exact),
+            other => panic!("expected PinCompatible spec, got {other:?}"),
+        }
+
+        let strong = run_exports.strong.expect("strong bucket present");
+        assert!(strong.iter().any(|(name, _)| name.as_str() == "libzma"));
     }
 }
