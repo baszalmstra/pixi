@@ -207,6 +207,72 @@
               "$ref": "#/$defs/PackageSpec"
             }
           }
+        },
+        "runExports": {
+          "description": "Run-exports declared by the source package for this target.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunExportsTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RunExportsTarget": {
+      "type": "object",
+      "properties": {
+        "noarch": {
+          "description": "`noarch` run exports: applied only to noarch packages.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/PackageSpec"
+          }
+        },
+        "strong": {
+          "description": "`strong` run exports: applied from build and host env to run env.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/PackageSpec"
+          }
+        },
+        "weak": {
+          "description": "`weak` run exports: applied from host env to run env.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/PackageSpec"
+          }
+        },
+        "strongConstrains": {
+          "description": "`strong` run constrains.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/PackageSpec"
+          }
+        },
+        "weakConstrains": {
+          "description": "`weak` run constrains.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/PackageSpec"
+          }
         }
       }
     },
