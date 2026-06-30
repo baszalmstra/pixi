@@ -10,7 +10,10 @@ use serde::{
 };
 use toml_span::{DeserError, Span, Value, de_helpers::expected, value::ValueInner};
 
-use crate::{TomlError, error::GenericError, utils::PixiSpanned};
+use crate::{
+    TomlError,
+    utils::{PixiSpanned, inheritable_package_map::reject_source_without_preview},
+};
 
 #[derive(Clone, Default, Debug, Serialize)]
 pub struct UniquePackageMap {
@@ -29,20 +32,12 @@ impl UniquePackageMap {
         self,
         is_pixi_build_enabled: bool,
     ) -> Result<IndexMap<rattler_conda_types::PackageName, PixiSpec>, TomlError> {
-        if !is_pixi_build_enabled
-            && let Some((package_name, _)) = self.specs.iter().find(|(_, spec)| spec.is_source())
-        {
-            return Err(TomlError::Generic(
-                    GenericError::new(
-                        "conda source dependencies are not allowed without enabling the 'pixi-build' preview feature",
-                    )
-                    .with_opt_span(self.value_spans.get(package_name).cloned())
-                    .with_span_label("source dependency specified here")
-                    .with_help(
-                        "Add `preview = [\"pixi-build\"]` to the `workspace` or `project` table of your manifest",
-                    ),
-                ));
-        }
+        reject_source_without_preview(
+            self.specs.iter(),
+            &self.value_spans,
+            is_pixi_build_enabled,
+            PixiSpec::is_source,
+        )?;
         Ok(self.specs)
     }
 }

@@ -12,17 +12,16 @@ use toml_span::{
 };
 
 use crate::{
-    TomlError,
+    PackageDependencySpec, TomlError,
     error::GenericError,
     target::{key_looks_conditional, parse_if_expression},
-    utils::package_map::UniquePackageMap,
 };
 
 /// Entry in a `[package.*-dependencies]` table that may inherit from
 /// `[workspace.dependencies]`.
 #[derive(Debug)]
 pub enum InheritableSpec {
-    Direct(PixiSpec),
+    Direct(PackageDependencySpec),
     /// Inherited from the workspace pool. `overrides.version` is always `None`.
     Inherited {
         marker_span: Range<usize>,
@@ -35,12 +34,97 @@ pub enum InheritableSpec {
 }
 
 /// Dependency map that may declare workspace inheritance. Resolve against the
-/// pool to obtain a regular [`UniquePackageMap`].
+/// pool to obtain a [`ResolvedPackageMap`].
 #[derive(Default, Debug)]
 pub struct InheritablePackageMap {
     pub specs: IndexMap<PackageName, InheritableSpec>,
     pub name_spans: IndexMap<PackageName, Range<usize>>,
     pub value_spans: IndexMap<PackageName, Range<usize>>,
+}
+
+/// A package-level dependency map once workspace inheritance has been
+/// resolved: every entry is a concrete [`PackageDependencySpec`] (either a
+/// regular spec or a `pin-subpackage` pin — workspace inheritance only ever
+/// resolves to a regular spec, since `[workspace.dependencies]` is
+/// `PixiSpec`-typed and structurally cannot carry `pin-subpackage`).
+#[derive(Default, Debug)]
+pub struct ResolvedPackageMap {
+    pub specs: IndexMap<PackageName, PackageDependencySpec>,
+    pub name_spans: IndexMap<PackageName, Range<usize>>,
+    pub value_spans: IndexMap<PackageName, Range<usize>>,
+}
+
+/// Shared by [`ResolvedPackageMap`], [`InheritablePackageMap::resolve`], and
+/// [`crate::utils::package_map::UniquePackageMap::into_inner`]: source
+/// dependencies require the `pixi-build` preview feature. Generic over the
+/// spec value type so it works for both `PixiSpec`-typed (`UniquePackageMap`)
+/// and `PackageDependencySpec`-typed (`ResolvedPackageMap`) maps.
+pub(crate) fn reject_source_without_preview<'a, D>(
+    specs: impl Iterator<Item = (&'a PackageName, &'a D)>,
+    value_spans: &IndexMap<PackageName, Range<usize>>,
+    is_pixi_build_enabled: bool,
+    is_source: impl Fn(&D) -> bool,
+) -> Result<(), TomlError>
+where
+    D: 'a,
+{
+    if !is_pixi_build_enabled
+        && let Some((package_name, _)) = specs.into_iter().find(|(_, spec)| is_source(spec))
+    {
+        return Err(TomlError::Generic(
+            GenericError::new(
+                "conda source dependencies are not allowed without enabling the 'pixi-build' preview feature",
+            )
+            .with_opt_span(value_spans.get(package_name).cloned())
+            .with_span_label("source dependency specified here")
+            .with_help(
+                "Add `preview = [\"pixi-build\"]` to the `workspace` or `project` table of your manifest",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+impl ResolvedPackageMap {
+    /// Returns the underlying specs, after checking that source dependencies
+    /// are only present when the `pixi-build` preview is enabled.
+    pub fn into_inner(
+        self,
+        is_pixi_build_enabled: bool,
+    ) -> Result<IndexMap<PackageName, PackageDependencySpec>, TomlError> {
+        reject_source_without_preview(
+            self.specs.iter(),
+            &self.value_spans,
+            is_pixi_build_enabled,
+            PackageDependencySpec::is_source,
+        )?;
+        Ok(self.specs)
+    }
+
+    /// Validates that every `pin-subpackage` entry's key equals the package's
+    /// own name. A native pixi-build manifest describes exactly one output,
+    /// so "subpackage" can only mean "myself."
+    pub fn validate_pin_subpackage_self_reference(
+        &self,
+        package_name: &str,
+    ) -> Result<(), TomlError> {
+        for (name, spec) in &self.specs {
+            if spec.as_pin_subpackage().is_some() && name.as_source() != package_name {
+                return Err(TomlError::Generic(
+                    GenericError::new(format!(
+                        "`pin-subpackage` can only reference the package's own name (`{package_name}`), not `{}`",
+                        name.as_source()
+                    ))
+                    .with_opt_span(self.value_spans.get(name).cloned())
+                    .with_span_label("pin-subpackage used here")
+                    .with_help(format!(
+                        "Use `{package_name} = {{ pin-subpackage = ... }}` to pin to this package's own resolved version."
+                    )),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl InheritablePackageMap {
@@ -54,8 +138,8 @@ impl InheritablePackageMap {
         self,
         workspace_deps: &IndexMap<PackageName, TomlSpec>,
         is_pixi_build_enabled: bool,
-    ) -> Result<UniquePackageMap, TomlError> {
-        let mut out = UniquePackageMap::default();
+    ) -> Result<ResolvedPackageMap, TomlError> {
+        let mut out = ResolvedPackageMap::default();
         for (name, spec) in self.specs {
             let name_span = self.name_spans.get(&name).cloned();
             let value_span = self.value_spans.get(&name).cloned();
@@ -72,7 +156,7 @@ impl InheritablePackageMap {
                     overrides,
                 } => {
                     let base = lookup_workspace_base(workspace_deps, &name, &marker_span)?;
-                    finalize_inherited(base, *overrides, &marker_span)?
+                    PackageDependencySpec::Spec(finalize_inherited(base, *overrides, &marker_span)?)
                 }
             };
             if let Some(span) = name_span.clone() {
@@ -83,20 +167,12 @@ impl InheritablePackageMap {
             }
             out.specs.insert(name, resolved);
         }
-        if !is_pixi_build_enabled
-            && let Some((package_name, _)) = out.specs.iter().find(|(_, spec)| spec.is_source())
-        {
-            return Err(TomlError::Generic(
-                GenericError::new(
-                    "conda source dependencies are not allowed without enabling the 'pixi-build' preview feature",
-                )
-                .with_opt_span(out.value_spans.get(package_name).cloned())
-                .with_span_label("source dependency specified here")
-                .with_help(
-                    "Add `preview = [\"pixi-build\"]` to the `workspace` or `project` table of your manifest",
-                ),
-            ));
-        }
+        reject_source_without_preview(
+            out.specs.iter(),
+            &out.value_spans,
+            is_pixi_build_enabled,
+            PackageDependencySpec::is_source,
+        )?;
         Ok(out)
     }
 }
@@ -322,15 +398,31 @@ fn parse_inheritable_entry(value: &mut Value<'_>) -> Result<InheritableSpec, Des
     match value.take() {
         ValueInner::String(s) => {
             let mut tmp = Value::with_span(ValueInner::String(s), outer_span);
-            let spec = <PixiSpec as toml_span::Deserialize>::deserialize(&mut tmp)?;
+            let spec = <PackageDependencySpec as toml_span::Deserialize>::deserialize(&mut tmp)?;
             Ok(InheritableSpec::Direct(spec))
         }
         ValueInner::Table(mut table) => {
             if let Some(ws_val) = table.remove("workspace") {
+                // `{ workspace = true, pin-subpackage = ... }` is rejected: workspace
+                // inheritance is `PixiSpec`-typed only (the pool is populated from
+                // `[workspace.dependencies]`, which can never contain a
+                // `pin-subpackage` entry), so combining the two markers is always a
+                // mistake.
+                if table.contains_key("pin-subpackage") {
+                    return Err(toml_span::Error {
+                        kind: toml_span::ErrorKind::Custom(
+                            "`pin-subpackage` cannot be combined with `workspace`".into(),
+                        ),
+                        span: outer_span,
+                        line_info: None,
+                    }
+                    .into());
+                }
                 parse_workspace_marker(ws_val, table, outer_span)
             } else {
                 let mut tmp = Value::with_span(ValueInner::Table(table), outer_span);
-                let spec = <PixiSpec as toml_span::Deserialize>::deserialize(&mut tmp)?;
+                let spec =
+                    <PackageDependencySpec as toml_span::Deserialize>::deserialize(&mut tmp)?;
                 Ok(InheritableSpec::Direct(spec))
             }
         }
@@ -506,7 +598,14 @@ mod test {
             .specs
             .get(&PackageName::from_str("numpy").unwrap())
             .unwrap();
-        assert_eq!(spec.as_version_spec().unwrap().to_string(), "1.*",);
+        assert_eq!(
+            spec.as_spec()
+                .unwrap()
+                .as_version_spec()
+                .unwrap()
+                .to_string(),
+            "1.*",
+        );
     }
 
     #[test]
@@ -539,7 +638,7 @@ mod test {
             .specs
             .get(&PackageName::from_str("numpy").unwrap())
             .unwrap();
-        match spec {
+        match spec.as_spec().unwrap() {
             PixiSpec::DetailedVersion(detailed) => {
                 assert_eq!(detailed.version.as_ref().unwrap().to_string(), "1.*");
                 assert!(detailed.channel.is_some());
@@ -562,7 +661,7 @@ mod test {
             .specs
             .get(&PackageName::from_str("boltons").unwrap())
             .unwrap();
-        match spec {
+        match spec.as_spec().unwrap() {
             PixiSpec::DetailedVersion(detailed) => {
                 assert_eq!(detailed.version.as_ref().unwrap().to_string(), ">=24");
                 assert!(
@@ -586,6 +685,54 @@ mod test {
             .specs
             .get(&PackageName::from_str("numpy").unwrap())
             .unwrap();
-        assert_eq!(spec.as_version_spec().unwrap().to_string(), "==2.0");
+        assert_eq!(
+            spec.as_spec()
+                .unwrap()
+                .as_version_spec()
+                .unwrap()
+                .to_string(),
+            "==2.0"
+        );
+    }
+
+    #[test]
+    fn parses_pin_subpackage_shorthand() {
+        let input = "own-package = { pin-subpackage = true }";
+        let parsed = InheritablePackageMap::from_toml_str(input).unwrap();
+        let entry = parsed
+            .specs
+            .get(&PackageName::from_str("own-package").unwrap())
+            .unwrap();
+        match entry {
+            InheritableSpec::Direct(spec) => {
+                let pin = spec.as_pin_subpackage().expect("expected a pin");
+                assert!(pin.exact);
+            }
+            other => panic!("expected Direct(PinSubpackage), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_pin_subpackage_combined_with_workspace() {
+        let input = "own-package = { workspace = true, pin-subpackage = true }";
+        let err = InheritablePackageMap::from_toml_str(input).expect_err("must reject");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("pin-subpackage") && msg.contains("workspace"),
+            "unexpected error: {msg}",
+        );
+    }
+
+    #[test]
+    fn resolve_preserves_pin_subpackage_entries() {
+        let input = "own-package = { pin-subpackage = true }";
+        let map = InheritablePackageMap::from_toml_str(input).unwrap();
+        let pool = pool(&[]);
+        let resolved = map.resolve(&pool, true).unwrap();
+        let spec = resolved
+            .specs
+            .get(&PackageName::from_str("own-package").unwrap())
+            .unwrap();
+        assert!(spec.as_pin_subpackage().is_some());
     }
 }

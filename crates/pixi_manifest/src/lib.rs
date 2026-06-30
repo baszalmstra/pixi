@@ -12,10 +12,12 @@ mod has_features_iter;
 mod has_manifest_ref;
 mod manifests;
 mod package;
+mod package_dependency_spec;
 pub mod platform;
 mod preview;
 pub mod pypi;
 pub mod pyproject;
+mod run_exports;
 mod s3;
 mod solve_group;
 mod spec_type;
@@ -49,11 +51,13 @@ pub use manifests::{
 };
 use miette::Diagnostic;
 pub use package::Package;
+pub use package_dependency_spec::PackageDependencySpec;
 pub use platform::{
     PixiPlatform, PixiPlatformError, PixiPlatformName, PixiPlatformNameError, PlatformEdit,
     PlatformGlob, PlatformGlobError, PlatformMove,
 };
 pub use preview::{KnownPreviewFeature, Preview};
+pub use run_exports::ManifestRunExports;
 pub use s3::S3Options;
 pub use spec_type::SpecType;
 pub use system_requirements::{

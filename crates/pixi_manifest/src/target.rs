@@ -13,6 +13,8 @@ use crate::{
     PixiPlatformName, PlatformGlob, PyPiDependencies, SpecType,
     activation::Activation,
     dependencies::{CondaConstraints, CondaDevDependencies},
+    package_dependency_spec::PackageDependencySpec,
+    run_exports::ManifestRunExports,
     task::{Task, TaskName},
     utils::PixiSpanned,
 };
@@ -55,10 +57,15 @@ pub struct WorkspaceTarget {
 #[derive(Default, Debug, Clone)]
 pub struct PackageTarget {
     /// Dependencies for this target.
-    pub dependencies: HashMap<SpecType, DependencyMap<PackageName, PixiSpec>>,
+    pub dependencies: HashMap<SpecType, DependencyMap<PackageName, PackageDependencySpec>>,
 
     /// Extra groups declared by the package for this target.
-    pub extra_dependencies: IndexMap<ExtraGroupName, DependencyMap<PackageName, PixiSpec>>,
+    pub extra_dependencies:
+        IndexMap<ExtraGroupName, DependencyMap<PackageName, PackageDependencySpec>>,
+
+    /// Run-exports declared by the package for this target. `None` when the
+    /// package declares no `[package.run-exports.*]` tables at all.
+    pub run_exports: Option<ManifestRunExports>,
 }
 
 impl WorkspaceTarget {
@@ -344,27 +351,27 @@ impl PackageTarget {
     pub fn dependencies(
         &self,
         spec_type: SpecType,
-    ) -> Option<&DependencyMap<PackageName, PixiSpec>> {
+    ) -> Option<&DependencyMap<PackageName, PackageDependencySpec>> {
         self.dependencies.get(&spec_type)
     }
 
     /// Returns the run dependencies of the target
-    pub fn run_dependencies(&self) -> Option<&DependencyMap<PackageName, PixiSpec>> {
+    pub fn run_dependencies(&self) -> Option<&DependencyMap<PackageName, PackageDependencySpec>> {
         self.dependencies.get(&SpecType::Run)
     }
 
     /// Returns the run constraints of the target
-    pub fn run_constraints(&self) -> Option<&DependencyMap<PackageName, PixiSpec>> {
+    pub fn run_constraints(&self) -> Option<&DependencyMap<PackageName, PackageDependencySpec>> {
         self.dependencies.get(&SpecType::RunConstraints)
     }
 
     /// Returns the host dependencies of the target
-    pub fn host_dependencies(&self) -> Option<&DependencyMap<PackageName, PixiSpec>> {
+    pub fn host_dependencies(&self) -> Option<&DependencyMap<PackageName, PackageDependencySpec>> {
         self.dependencies.get(&SpecType::Host)
     }
 
     /// Returns the build dependencies of the target
-    pub fn build_dependencies(&self) -> Option<&DependencyMap<PackageName, PixiSpec>> {
+    pub fn build_dependencies(&self) -> Option<&DependencyMap<PackageName, PackageDependencySpec>> {
         self.dependencies.get(&SpecType::Build)
     }
 
@@ -380,7 +387,7 @@ impl PackageTarget {
             .and_then(|deps| deps.get(dep_name));
 
         match (current_dependencies, exact) {
-            (Some(specs), Some(spec)) => specs.contains(spec),
+            (Some(specs), Some(spec)) => specs.contains(&PackageDependencySpec::Spec(spec.clone())),
             (Some(_), None) => true,
             (None, _) => false,
         }
@@ -398,14 +405,15 @@ impl PackageTarget {
         behavior: InternalDependencyBehavior,
     ) {
         let deps = self.dependencies.entry(spec_type).or_default();
+        let spec = PackageDependencySpec::Spec(spec.clone());
         match behavior {
             InternalDependencyBehavior::Append => {
                 // Append to existing specs
-                deps.insert(dep_name.clone(), spec.clone());
+                deps.insert(dep_name.clone(), spec);
             }
             InternalDependencyBehavior::Overwrite => {
                 // Overwrite any existing spec with the new one
-                deps.insert_overwrite(dep_name.clone(), spec.clone());
+                deps.insert_overwrite(dep_name.clone(), spec);
             }
         }
     }

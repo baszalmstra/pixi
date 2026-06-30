@@ -16,8 +16,8 @@ use crate::{
     package::Package,
     target::PackageTarget,
     toml::{
-        TomlPackageBuild, manifest::ExternalWorkspaceProperties, package_target::TomlPackageTarget,
-        reject_glob_in_package_target,
+        TomlPackageBuild, TomlRunExports, manifest::ExternalWorkspaceProperties,
+        package_target::TomlPackageTarget, reject_glob_in_package_target,
     },
     utils::{
         PixiSpanned,
@@ -148,6 +148,7 @@ pub struct TomlPackage {
     pub extra_dependencies:
         IndexMap<PixiSpanned<String>, PixiSpanned<ConditionalInheritablePackageMap>>,
     pub run_constraints: Option<PixiSpanned<ConditionalInheritablePackageMap>>,
+    pub run_exports: Option<TomlRunExports>,
     pub target: IndexMap<PixiSpanned<TargetSelector>, TomlPackageTarget>,
 
     pub span: Span,
@@ -191,6 +192,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlPackage {
             .map(TomlWith::into_inner)
             .unwrap_or_default();
         let run_constraints = th.optional("run-constraints");
+        let run_exports = th.optional("run-exports");
         let build = th.required("build")?;
         let target = th
             .optional::<TomlWith<_, TomlIndexMap<_, Same>>>("target")
@@ -214,6 +216,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlPackage {
             run_dependencies,
             extra_dependencies,
             run_constraints,
+            run_exports,
             build,
             target,
             span: value.span,
@@ -399,14 +402,28 @@ impl TomlPackage {
         }
 
         // Unconditional entries form the default target.
-        let default_package_target = TomlPackageTarget {
+        let mut default_package_target = TomlPackageTarget {
             run_dependencies: run_unconditional,
             run_constraints: constraints_unconditional,
             host_dependencies: host_unconditional,
             build_dependencies: build_unconditional,
             extra_dependencies: extra_unconditional,
         }
-        .into_package_target(preview, &workspace_dependencies)?;
+        .into_package_target_named(preview, &workspace_dependencies, name.as_deref())?;
+
+        // `[package.run-exports.*]` is only supported on the default (unconditional)
+        // target; conditional run-exports are rejected earlier, while parsing
+        // `TomlRunExports`.
+        if let Some(toml_run_exports) = self.run_exports {
+            let run_exports = toml_run_exports.into_manifest_run_exports(
+                preview,
+                &workspace_dependencies,
+                name.as_deref(),
+            )?;
+            if !run_exports.is_empty() {
+                default_package_target.run_exports = Some(run_exports);
+            }
+        }
 
         // Fold the conditional sub-tables into one `TomlPackageTarget` per
         // distinct expression, merging across the dependency sections.
@@ -477,11 +494,19 @@ impl TomlPackage {
 
         // `if(...)` conditionals are not platform selectors; they are kept
         // separate and passed through to rattler-build, which evaluates the
-        // expression.
+        // expression. Every `pin-subpackage` entry's key must equal the
+        // package's own name: a native pixi-build manifest describes exactly
+        // one output, so "subpackage" can only mean "myself." That validation
+        // happens inside `into_package_target_named`, using the now-resolved
+        // name (which may come from workspace inheritance).
         let mut conditional_dependencies: IndexMap<ConditionalExpression, PackageTarget> =
             IndexMap::new();
         for (expression, toml_target) in conditional_targets {
-            let target = toml_target.into_package_target(preview, &workspace_dependencies)?;
+            let target = toml_target.into_package_target_named(
+                preview,
+                &workspace_dependencies,
+                name.as_deref(),
+            )?;
             conditional_dependencies.insert(expression, target);
         }
 
@@ -760,7 +785,7 @@ mod test {
     fn assert_single_version(
         deps: &std::collections::HashMap<
             SpecType,
-            pixi_spec_containers::DependencyMap<PackageName, PixiSpec>,
+            pixi_spec_containers::DependencyMap<PackageName, crate::PackageDependencySpec>,
         >,
         spec_type: SpecType,
         name: &str,
@@ -777,6 +802,8 @@ mod test {
             specs
                 .iter()
                 .next()
+                .unwrap()
+                .as_spec()
                 .unwrap()
                 .as_version_spec()
                 .unwrap()
@@ -1938,5 +1965,234 @@ mod test {
             sha256: None,
         });
         spec
+    }
+
+    #[test]
+    fn test_pin_subpackage_self_reference_accepted() {
+        // `pin-subpackage` referencing the package's own name is valid in
+        // every package-level dependency table.
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        mypkg = { pin-subpackage = true }
+
+        [host-dependencies]
+        mypkg = { pin-subpackage = { lower-bound = "x.x" } }
+
+        [build-dependencies]
+        mypkg = { pin-subpackage = true }
+        "#;
+
+        let manifest = parse_package(input);
+        let deps = &manifest.dependencies.dependencies;
+        for spec_type in [SpecType::Run, SpecType::Host, SpecType::Build] {
+            let entry = deps
+                .get(&spec_type)
+                .unwrap_or_else(|| panic!("missing {spec_type:?} bucket"));
+            let spec = entry
+                .get(&PackageName::from_str("mypkg").unwrap())
+                .and_then(|s| s.iter().next())
+                .unwrap_or_else(|| panic!("missing mypkg in {spec_type:?}"));
+            assert!(spec.as_pin_subpackage().is_some());
+        }
+    }
+
+    #[test]
+    fn test_pin_subpackage_wrong_name_rejected_in_dependencies() {
+        // Using `pin-subpackage` under any name other than the package's own
+        // is a hard parse-time error, with a span on the offending entry.
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        other = { pin-subpackage = true }
+        "#;
+
+        let parse_error = TomlPackage::from_toml_str(input)
+            .and_then(|w| {
+                w.into_manifest(
+                    WorkspacePackageProperties::default(),
+                    PackageDefaults::default(),
+                    &Preview::default(),
+                    Path::new(""),
+                )
+            })
+            .unwrap_err();
+        assert_snapshot!(format_parse_error(input, parse_error));
+    }
+
+    #[test]
+    fn test_pin_subpackage_wrong_name_rejected_in_run_exports() {
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-exports.strong]
+        other = { pin-subpackage = true }
+        "#;
+
+        let parse_error = TomlPackage::from_toml_str(input)
+            .and_then(|w| {
+                w.into_manifest(
+                    WorkspacePackageProperties::default(),
+                    PackageDefaults::default(),
+                    &Preview::default(),
+                    Path::new(""),
+                )
+            })
+            .unwrap_err();
+        assert_snapshot!(format_parse_error(input, parse_error));
+    }
+
+    #[test]
+    fn test_pin_subpackage_combined_with_other_fields_rejected() {
+        assert_snapshot!(expect_parse_failure(
+            r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        mypkg = { pin-subpackage = true, channel = "conda-forge" }
+        "#,
+        ));
+    }
+
+    #[test]
+    fn test_pin_subpackage_exact_and_build_combination_rejected() {
+        assert_snapshot!(expect_parse_failure(
+            r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        mypkg = { pin-subpackage = { exact = true, build = "py*" } }
+        "#,
+        ));
+    }
+
+    #[test]
+    fn test_run_exports_all_buckets_parse_on_package() {
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-exports.strong]
+        libzma = "*"
+
+        [run-exports.weak]
+        libcurl = ">=8"
+
+        [run-exports.noarch]
+        python = "*"
+
+        [run-exports.strong-constrains]
+        some-pkg = ">=1.0"
+
+        [run-exports.weak-constrains]
+        other-pkg = "<2.0"
+        "#;
+
+        let manifest = parse_package(input);
+        let run_exports = manifest
+            .dependencies
+            .run_exports
+            .expect("run_exports should be populated");
+
+        assert!(
+            run_exports
+                .strong
+                .get(&PackageName::from_str("libzma").unwrap())
+                .is_some()
+        );
+        assert!(
+            run_exports
+                .weak
+                .get(&PackageName::from_str("libcurl").unwrap())
+                .is_some()
+        );
+        assert!(
+            run_exports
+                .noarch
+                .get(&PackageName::from_str("python").unwrap())
+                .is_some()
+        );
+        assert!(
+            run_exports
+                .strong_constrains
+                .get(&PackageName::from_str("some-pkg").unwrap())
+                .is_some()
+        );
+        assert!(
+            run_exports
+                .weak_constrains
+                .get(&PackageName::from_str("other-pkg").unwrap())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_run_exports_conditional_not_supported() {
+        assert_snapshot!(expect_parse_failure(
+            r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-exports.strong."if(unix)"]
+        foo = "*"
+        "#,
+        ));
+    }
+
+    #[test]
+    fn test_run_exports_self_pin_round_trip() {
+        // The common shorthand: a package declares a weak run-export pinning
+        // itself exactly.
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-exports.weak]
+        mypkg = { pin-subpackage = true }
+        "#;
+
+        let manifest = parse_package(input);
+        let run_exports = manifest
+            .dependencies
+            .run_exports
+            .expect("run_exports should be populated");
+        let spec = run_exports
+            .weak
+            .get(&PackageName::from_str("mypkg").unwrap())
+            .and_then(|s| s.iter().next())
+            .expect("mypkg should be present in weak run-exports");
+        let pin = spec.as_pin_subpackage().expect("expected a pin");
+        assert!(pin.exact);
     }
 }

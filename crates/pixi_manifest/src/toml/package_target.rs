@@ -1,15 +1,17 @@
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
 use pixi_build_types::ExtraGroupName;
 use pixi_spec::TomlSpec;
+use pixi_spec_containers::DependencyMap;
 use pixi_toml::{Same, TomlIndexMap, TomlWith};
 use rattler_conda_types::PackageName;
 use toml_span::{DeserError, Value, de_helpers::TableHelper};
 
 use crate::{
-    KnownPreviewFeature, Preview, SpecType, TomlError,
+    KnownPreviewFeature, PackageDependencySpec, Preview, SpecType, TomlError,
     error::GenericError,
     target::PackageTarget,
-    toml::target::combine_target_dependencies,
     utils::{PixiSpanned, inheritable_package_map::InheritablePackageMap},
 };
 
@@ -20,6 +22,41 @@ pub struct TomlPackageTarget {
     pub host_dependencies: Option<PixiSpanned<InheritablePackageMap>>,
     pub build_dependencies: Option<PixiSpanned<InheritablePackageMap>>,
     pub extra_dependencies: IndexMap<PixiSpanned<String>, PixiSpanned<InheritablePackageMap>>,
+}
+
+/// Combines different package target dependencies into a single map, mirroring
+/// `toml::target::combine_target_dependencies` but operating on
+/// [`InheritablePackageMap`]/[`PackageDependencySpec`] (package-level) instead
+/// of `UniquePackageMap`/`PixiSpec` (workspace-level).
+///
+/// Also validates that every `pin-subpackage` entry's key equals
+/// `package_name`, when known (see
+/// `ResolvedPackageMap::validate_pin_subpackage_self_reference`).
+fn combine_package_target_dependencies(
+    iter: impl IntoIterator<Item = (SpecType, Option<PixiSpanned<InheritablePackageMap>>)>,
+    workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
+    is_pixi_build_enabled: bool,
+    package_name: Option<&str>,
+) -> Result<HashMap<SpecType, DependencyMap<PackageName, PackageDependencySpec>>, TomlError> {
+    iter.into_iter()
+        .filter_map(|(ty, deps)| {
+            deps.map(|deps| {
+                deps.value
+                    .resolve(workspace_dependencies, is_pixi_build_enabled)
+                    .and_then(|resolved| {
+                        if let Some(package_name) = package_name {
+                            resolved.validate_pin_subpackage_self_reference(package_name)?;
+                        }
+                        resolved.into_inner(is_pixi_build_enabled)
+                    })
+                    .map(|index_map| {
+                        let dep_map: DependencyMap<PackageName, PackageDependencySpec> =
+                            index_map.into_iter().collect();
+                        (ty, dep_map)
+                    })
+            })
+        })
+        .collect()
 }
 
 impl<'de> toml_span::Deserialize<'de> for TomlPackageTarget {
@@ -50,23 +87,20 @@ impl TomlPackageTarget {
         preview: &Preview,
         workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
     ) -> Result<PackageTarget, TomlError> {
-        let pixi_build_enabled = preview.is_enabled(KnownPreviewFeature::PixiBuild);
+        self.into_package_target_named(preview, workspace_dependencies, None)
+    }
 
-        let resolve = |entry: Option<PixiSpanned<InheritablePackageMap>>| -> Result<
-            Option<PixiSpanned<crate::utils::package_map::UniquePackageMap>>,
-            TomlError,
-        > {
-            entry
-                .map(|spanned| {
-                    let PixiSpanned { value, span } = spanned;
-                    let resolved = value.resolve(workspace_dependencies, pixi_build_enabled)?;
-                    Ok::<_, TomlError>(PixiSpanned {
-                        value: resolved,
-                        span,
-                    })
-                })
-                .transpose()
-        };
+    /// Like [`Self::into_package_target`], but also validates that every
+    /// `pin-subpackage` entry's key equals `package_name`. Pass `None` when
+    /// the package's name isn't known yet (e.g. in isolated unit tests);
+    /// `TomlPackage::into_manifest` always passes `Some`.
+    pub fn into_package_target_named(
+        self,
+        preview: &Preview,
+        workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
+        package_name: Option<&str>,
+    ) -> Result<PackageTarget, TomlError> {
+        let pixi_build_enabled = preview.is_enabled(KnownPreviewFeature::PixiBuild);
 
         let extra_dependencies = self
             .extra_dependencies
@@ -83,6 +117,9 @@ impl TomlPackageTarget {
                 let resolved = dependencies
                     .value
                     .resolve(workspace_dependencies, pixi_build_enabled)?;
+                if let Some(package_name) = package_name {
+                    resolved.validate_pin_subpackage_self_reference(package_name)?;
+                }
                 let dep_map = resolved
                     .into_inner(pixi_build_enabled)?
                     .into_iter()
@@ -92,16 +129,19 @@ impl TomlPackageTarget {
             .collect::<Result<_, _>>()?;
 
         Ok(PackageTarget {
-            dependencies: combine_target_dependencies(
+            dependencies: combine_package_target_dependencies(
                 [
-                    (SpecType::Run, resolve(self.run_dependencies)?),
-                    (SpecType::Host, resolve(self.host_dependencies)?),
-                    (SpecType::Build, resolve(self.build_dependencies)?),
-                    (SpecType::RunConstraints, resolve(self.run_constraints)?),
+                    (SpecType::Run, self.run_dependencies),
+                    (SpecType::Host, self.host_dependencies),
+                    (SpecType::Build, self.build_dependencies),
+                    (SpecType::RunConstraints, self.run_constraints),
                 ],
+                workspace_dependencies,
                 pixi_build_enabled,
+                package_name,
             )?,
             extra_dependencies,
+            run_exports: None,
         })
     }
 }
@@ -146,6 +186,7 @@ mod test {
                 .get(&spec_type)
                 .and_then(|d| d.get(&PackageName::from_str(name).unwrap()))
                 .and_then(|s| s.iter().next())
+                .and_then(|s| s.as_spec())
                 .and_then(|s| s.as_version_spec())
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| panic!("missing {name} in {spec_type:?}"))
@@ -187,5 +228,41 @@ mod test {
             message.contains("extra") && message.contains("invalid character"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn test_pin_subpackage_in_package_target_dependency_tables() {
+        // `pin-subpackage` must parse in every package-target dependency table
+        // (run/host/build-dependencies; package targets don't have a plain
+        // `[dependencies]` table of their own).
+        let input = r#"
+        [run-dependencies]
+        own-package = { pin-subpackage = true }
+
+        [host-dependencies]
+        own-package = { pin-subpackage = { lower-bound = "x.x" } }
+
+        [build-dependencies]
+        own-package = { pin-subpackage = true }
+        "#;
+
+        let package_target = TomlPackageTarget::from_toml_str(input)
+            .unwrap()
+            .into_package_target(&Preview::default(), &IndexMap::new())
+            .unwrap();
+
+        let own_package = PackageName::from_str("own-package").unwrap();
+        for spec_type in [SpecType::Run, SpecType::Host, SpecType::Build] {
+            let spec = package_target
+                .dependencies
+                .get(&spec_type)
+                .and_then(|d| d.get(&own_package))
+                .and_then(|s| s.iter().next())
+                .unwrap_or_else(|| panic!("missing own-package in {spec_type:?}"));
+            assert!(
+                spec.as_pin_subpackage().is_some(),
+                "expected a pin-subpackage entry in {spec_type:?}, got {spec:?}"
+            );
+        }
     }
 }
