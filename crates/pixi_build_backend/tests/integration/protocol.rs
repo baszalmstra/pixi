@@ -1,16 +1,21 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use crate::common::model::{convert_test_model_to_project_model_v1, load_project_model_from_json};
 use imp::TestGenerateRecipe;
 use ordermap::OrderMap;
 use pixi_build_backend::{
-    intermediate_backend::IntermediateBackend, protocol::Protocol, tools::BackendIdentifier,
+    intermediate_backend::{IntermediateBackend, IntermediateBackendInstantiator},
+    protocol::{Protocol, ProtocolInstantiator},
+    tools::BackendIdentifier,
     utils::test::intermediate_conda_outputs,
 };
 use pixi_build_types::{
     BinaryPackageSpec, ConditionalExpression, ExtraGroupName, PackageSpec, PathSpec, ProjectModel,
     SourcePackageName, Target, Targets,
-    procedures::conda_build_v1::{CondaBuildV1Output, CondaBuildV1Params},
+    procedures::{
+        conda_build_v1::{CondaBuildV1Output, CondaBuildV1Params},
+        initialize::InitializeParams,
+    },
 };
 use rattler_build_core::console_utils::LoggingOutputHandler;
 use rattler_conda_types::{ChannelUrl, PackageName, Platform};
@@ -352,5 +357,169 @@ async fn test_conda_outputs_build_number() {
     assert_eq!(
         result_with_bn.outputs[0].metadata.build_number, 42,
         "build number should be 42"
+    );
+}
+
+/// End-to-end round trip for a self-referential `pin-subpackage` run-export,
+/// asserting the full chain described by the implementation plan: manifest
+/// run-export -> wire `PackageSpec::PinCompatible` -> Jinja
+/// `${{ pin_subpackage(...) }}` template -> rendered stage1
+/// `Dependency::PinSubpackage` -> resolved `CondaOutputRunExports` with the
+/// concrete version/build pin of the *same* output (since the manifest
+/// describes exactly one output, "subpackage" can only mean "myself").
+///
+/// Also confirms `info/index.json`'s own `depends` (here, `run_dependencies`)
+/// is unaffected: run-exports affect consumers, not the exporter itself.
+#[tokio::test]
+async fn test_conda_outputs_run_exports_self_pin_exact() {
+    let mut weak_run_exports: OrderMap<SourcePackageName, PackageSpec> = OrderMap::new();
+    weak_run_exports.insert(
+        SourcePackageName::from(PackageName::new_unchecked("self-pin-pkg")),
+        PackageSpec::PinCompatible(pixi_build_types::PinCompatibleSpec {
+            lower_bound: None,
+            upper_bound: None,
+            exact: true,
+            build: None,
+        }),
+    );
+
+    let model = ProjectModel {
+        name: Some("self-pin-pkg".to_string()),
+        version: Some("1.2.3".parse().unwrap()),
+        targets: Some(Targets {
+            default_target: Some(Target {
+                run_exports: Some(pixi_build_types::RunExportsTarget {
+                    weak: Some(weak_run_exports),
+                    ..Default::default()
+                }),
+                ..Target::default()
+            }),
+            conditional: None,
+        }),
+        ..ProjectModel::default()
+    };
+
+    let result = intermediate_conda_outputs::<TestGenerateRecipe>(
+        Some(model),
+        None,
+        Platform::current(),
+        None,
+        None,
+    )
+    .await;
+
+    let output = result.outputs.first().expect("should produce one output");
+
+    // The self-pin resolves against this very output's own (name, version,
+    // build_string), since a native manifest describes exactly one output.
+    let weak = &output.run_exports.weak;
+    assert_eq!(weak.len(), 1, "expected exactly one weak run-export");
+    let pin = &weak[0];
+    assert_eq!(pin.name.as_str(), "self-pin-pkg");
+    match &pin.spec {
+        PackageSpec::Binary(binary) => {
+            assert_eq!(
+                binary.version.as_ref().map(|v| v.to_string()).as_deref(),
+                Some("==1.2.3"),
+                "exact pin should resolve to the output's own version"
+            );
+            assert!(
+                binary.build.is_some(),
+                "exact pin should also carry the output's own build string matcher"
+            );
+        }
+        other => panic!("expected a resolved Binary pin, got {other:?}"),
+    }
+
+    // Other run-export buckets stay empty.
+    assert!(output.run_exports.strong.is_empty());
+    assert!(output.run_exports.noarch.is_empty());
+    assert!(output.run_exports.weak_constrains.is_empty());
+    assert!(output.run_exports.strong_constrains.is_empty());
+
+    // The exporter's own `run_dependencies` (which feed `info/index.json`'s
+    // `depends`) are unaffected by its run-exports.
+    assert!(
+        output.run_dependencies.depends.is_empty(),
+        "run-exports must not leak into the exporting package's own dependencies"
+    );
+}
+
+/// Defense-in-depth: the `SubpackageNotFound` backstop in
+/// `dependencies.rs::convert_dependencies` should never trigger in practice
+/// for native-manifest backends, since manifest-level validation
+/// (`validate_pin_subpackage_self_reference`) guarantees a `pin-subpackage`
+/// entry's name always matches the current package before it ever reaches
+/// the wire. This test exercises that backstop directly by handing the
+/// backend a `PinCompatible` entry whose name does *not* match the project's
+/// own name (something the manifest layer would normally reject, but the
+/// wire protocol itself does not enforce), confirming the backend surfaces a
+/// clear error instead of silently dropping the run-export or panicking.
+#[tokio::test]
+async fn test_conda_outputs_run_exports_subpackage_not_found_backstop() {
+    let mut weak_run_exports: OrderMap<SourcePackageName, PackageSpec> = OrderMap::new();
+    weak_run_exports.insert(
+        SourcePackageName::from(PackageName::new_unchecked("some-other-package")),
+        PackageSpec::PinCompatible(pixi_build_types::PinCompatibleSpec {
+            lower_bound: None,
+            upper_bound: None,
+            exact: true,
+            build: None,
+        }),
+    );
+
+    let model = ProjectModel {
+        name: Some("self-pin-pkg".to_string()),
+        version: Some("1.2.3".parse().unwrap()),
+        targets: Some(Targets {
+            default_target: Some(Target {
+                run_exports: Some(pixi_build_types::RunExportsTarget {
+                    weak: Some(weak_run_exports),
+                    ..Default::default()
+                }),
+                ..Target::default()
+            }),
+            conditional: None,
+        }),
+        ..ProjectModel::default()
+    };
+
+    let manifest_path = PathBuf::from("pixi.toml");
+    let (protocol, _result) = IntermediateBackendInstantiator::<TestGenerateRecipe>::new(
+        BackendIdentifier::new("test-backend", env!("CARGO_PKG_VERSION")),
+        LoggingOutputHandler::default(),
+        Arc::new(TestGenerateRecipe::default()),
+    )
+    .initialize(InitializeParams {
+        workspace_directory: None,
+        checkout_root: None,
+        source_directory: None,
+        manifest_path,
+        project_model: Some(model),
+        configuration: None,
+        target_configuration: None,
+        cache_directory: None,
+        workspace_scratch_directory: None,
+    })
+    .await
+    .unwrap();
+
+    let current_dir = std::env::current_dir().unwrap();
+    let result = protocol
+        .conda_outputs(
+            pixi_build_types::procedures::conda_outputs::CondaOutputsParams {
+                channels: vec![],
+                host_platform: Platform::current(),
+                build_platform: Platform::current(),
+                variant_configuration: None,
+                variant_files: None,
+                work_directory: current_dir,
+            },
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a pin-subpackage referencing an unknown subpackage must surface as an error, not panic or silently drop the run-export"
     );
 }

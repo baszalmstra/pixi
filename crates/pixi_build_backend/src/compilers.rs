@@ -110,7 +110,7 @@ pub fn default_compiler_variants(
 }
 
 /// Create a jinja template item for a matchspec.
-fn template_item(template: JinjaTemplate) -> Item<SerializableMatchSpec> {
+pub(crate) fn template_item(template: JinjaTemplate) -> Item<SerializableMatchSpec> {
     Item::Value(Value::new_template(template, None))
 }
 
