@@ -57,7 +57,7 @@ pub use platform::{
     PlatformGlob, PlatformGlobError, PlatformMove,
 };
 pub use preview::{KnownPreviewFeature, Preview};
-pub use run_exports::ManifestRunExports;
+pub use run_exports::{ManifestRunExports, RunExportKind, RunExports};
 pub use s3::S3Options;
 pub use spec_type::SpecType;
 pub use system_requirements::{

@@ -12,7 +12,8 @@ use ordermap::OrderMap;
 use pixi_build_types::{self as pbt};
 
 use pixi_manifest::{
-    ManifestRunExports, PackageDependencySpec, PackageManifest, PackageTarget, TargetSelector,
+    ManifestRunExports, PackageDependencySpec, PackageManifest, PackageTarget, RunExports,
+    TargetSelector,
 };
 use pixi_spec::{GitReference, MatchspecFields, PixiSpec, SourceLocationSpec, SpecConversionError};
 use rattler_conda_types::{ChannelConfig, NamelessMatchSpec, PackageName};
@@ -169,32 +170,33 @@ fn to_pbt_package_dependencies<'a>(
     .collect()
 }
 
-/// Converts a [`ManifestRunExports`] to a [`pbt::RunExportsTarget`].
+/// Converts a [`ManifestRunExports`] to a [`pbt::RunExportsTarget`]. The wire
+/// struct stays flat; it is constructed once from the five converted buckets.
 fn to_run_exports_v1(
     run_exports: &ManifestRunExports,
     channel_config: &ChannelConfig,
 ) -> Result<pbt::RunExportsTarget, SpecConversionError> {
+    let mut converted: RunExports<Option<OrderMap<pbt::SourcePackageName, pbt::PackageSpec>>> =
+        RunExports::default();
+    for (kind, bucket) in run_exports.iter() {
+        *converted.get_mut(kind) = Some(to_pbt_package_dependencies(
+            bucket.iter_specs(),
+            channel_config,
+        )?);
+    }
+    let RunExports {
+        noarch,
+        strong,
+        weak,
+        strong_constrains,
+        weak_constrains,
+    } = converted;
     Ok(pbt::RunExportsTarget {
-        noarch: Some(to_pbt_package_dependencies(
-            run_exports.noarch.iter_specs(),
-            channel_config,
-        )?),
-        strong: Some(to_pbt_package_dependencies(
-            run_exports.strong.iter_specs(),
-            channel_config,
-        )?),
-        weak: Some(to_pbt_package_dependencies(
-            run_exports.weak.iter_specs(),
-            channel_config,
-        )?),
-        strong_constrains: Some(to_pbt_package_dependencies(
-            run_exports.strong_constrains.iter_specs(),
-            channel_config,
-        )?),
-        weak_constrains: Some(to_pbt_package_dependencies(
-            run_exports.weak_constrains.iter_specs(),
-            channel_config,
-        )?),
+        noarch,
+        strong,
+        weak,
+        strong_constrains,
+        weak_constrains,
     })
 }
 

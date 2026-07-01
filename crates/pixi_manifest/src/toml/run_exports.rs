@@ -5,25 +5,19 @@ use toml_span::{DeserError, Value, de_helpers::TableHelper};
 
 use crate::{
     KnownPreviewFeature, Preview, TomlError,
-    run_exports::ManifestRunExports,
+    run_exports::{ManifestRunExports, RunExportKind, RunExports},
     target::key_looks_conditional,
     utils::{PixiSpanned, inheritable_package_map::InheritablePackageMap},
 };
 
-/// The TOML representation of `[package.run-exports]`.
+/// The TOML representation of `[package.run-exports]`: one optional
+/// (span-carrying) [`InheritablePackageMap`] per run-export bucket.
 ///
 /// Conditional `[package.run-exports.<bucket>."if(...)"]` sub-tables are not
 /// supported in this version; [`reject_conditional_keys`] produces a clear
 /// error instead of letting the unrecognized key fail as an "invalid package
 /// name", or silently dropping it.
-#[derive(Debug, Default)]
-pub struct TomlRunExports {
-    pub noarch: Option<PixiSpanned<InheritablePackageMap>>,
-    pub strong: Option<PixiSpanned<InheritablePackageMap>>,
-    pub weak: Option<PixiSpanned<InheritablePackageMap>>,
-    pub strong_constrains: Option<PixiSpanned<InheritablePackageMap>>,
-    pub weak_constrains: Option<PixiSpanned<InheritablePackageMap>>,
-}
+pub type TomlRunExports = RunExports<Option<PixiSpanned<InheritablePackageMap>>>;
 
 /// Parses one `[package.run-exports.<bucket>]` sub-table, rejecting any
 /// `if(...)`-shaped key before delegating to [`InheritablePackageMap`] (which
@@ -77,20 +71,13 @@ impl<'de> toml_span::Deserialize<'de> for TomlRunExports {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
 
-        let noarch = take_bucket(&mut th, "noarch")?;
-        let strong = take_bucket(&mut th, "strong")?;
-        let weak = take_bucket(&mut th, "weak")?;
-        let strong_constrains = take_bucket(&mut th, "strong-constrains")?;
-        let weak_constrains = take_bucket(&mut th, "weak-constrains")?;
+        let mut result = TomlRunExports::default();
+        for kind in RunExportKind::ALL {
+            *result.get_mut(kind) = take_bucket(&mut th, kind.name())?;
+        }
         th.finalize(None)?;
 
-        Ok(TomlRunExports {
-            noarch,
-            strong,
-            weak,
-            strong_constrains,
-            weak_constrains,
-        })
+        Ok(result)
     }
 }
 
@@ -106,24 +93,13 @@ impl TomlRunExports {
     ) -> Result<ManifestRunExports, TomlError> {
         let pixi_build_enabled = preview.is_enabled(KnownPreviewFeature::PixiBuild);
 
-        let resolve = |entry: Option<PixiSpanned<InheritablePackageMap>>| -> Result<
-            pixi_spec_containers::DependencyMap<PackageName, crate::PackageDependencySpec>,
-            TomlError,
-        > {
+        self.try_map(|_, entry| {
             let Some(PixiSpanned { value, .. }) = entry else {
                 return Ok(Default::default());
             };
             let resolved = value.resolve(workspace_dependencies, pixi_build_enabled)?;
             let resolved = resolved.into_inner(package_name, pixi_build_enabled)?;
             Ok(resolved.into_iter().collect())
-        };
-
-        Ok(ManifestRunExports {
-            noarch: resolve(self.noarch)?,
-            strong: resolve(self.strong)?,
-            weak: resolve(self.weak)?,
-            strong_constrains: resolve(self.strong_constrains)?,
-            weak_constrains: resolve(self.weak_constrains)?,
         })
     }
 }
