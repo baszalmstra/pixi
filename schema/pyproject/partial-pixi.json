@@ -1523,6 +1523,9 @@
                 "$ref": "#/$defs/PinSubpackage"
               },
               {
+                "$ref": "#/$defs/PinCompatible"
+              },
+              {
                 "type": "object",
                 "additionalProperties": {
                   "anyOf": [
@@ -1535,6 +1538,9 @@
                     },
                     {
                       "$ref": "#/$defs/PinSubpackage"
+                    },
+                    {
+                      "$ref": "#/$defs/PinCompatible"
                     }
                   ]
                 },
@@ -1655,6 +1661,9 @@
                 "$ref": "#/$defs/PinSubpackage"
               },
               {
+                "$ref": "#/$defs/PinCompatible"
+              },
+              {
                 "type": "object",
                 "additionalProperties": {
                   "anyOf": [
@@ -1667,6 +1676,9 @@
                     },
                     {
                       "$ref": "#/$defs/PinSubpackage"
+                    },
+                    {
+                      "$ref": "#/$defs/PinCompatible"
                     }
                   ]
                 },
@@ -1768,6 +1780,9 @@
                 "$ref": "#/$defs/PinSubpackage"
               },
               {
+                "$ref": "#/$defs/PinCompatible"
+              },
+              {
                 "type": "object",
                 "additionalProperties": {
                   "anyOf": [
@@ -1780,6 +1795,9 @@
                     },
                     {
                       "$ref": "#/$defs/PinSubpackage"
+                    },
+                    {
+                      "$ref": "#/$defs/PinCompatible"
                     }
                   ]
                 },
@@ -1810,6 +1828,9 @@
                 "$ref": "#/$defs/PinSubpackage"
               },
               {
+                "$ref": "#/$defs/PinCompatible"
+              },
+              {
                 "type": "object",
                 "additionalProperties": {
                   "anyOf": [
@@ -1822,6 +1843,9 @@
                     },
                     {
                       "$ref": "#/$defs/PinSubpackage"
+                    },
+                    {
+                      "$ref": "#/$defs/PinCompatible"
                     }
                   ]
                 },
@@ -1860,6 +1884,30 @@
         }
       }
     },
+    "PinCompatible": {
+      "title": "PinCompatible",
+      "description": "`{ pin-compatible = true }` or `{ pin-compatible = { ... } }`: a pin\nagainst the version of a *dependency* as resolved in the host environment\nduring the build, mirroring rattler-build's `pin_compatible()` Jinja\nhelper. The entry's key must NOT equal the package's own name (the host\nenvironment never contains the package itself; use `pin-subpackage` for\nself-pins). Usable in `[package.run-exports.*]` and in every\npackage-level dependency table; not available in workspace- or\nfeature-level dependency tables.",
+      "type": "object",
+      "required": [
+        "pin-compatible"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pin-compatible": {
+          "title": "Pin-Compatible",
+          "description": "Shorthand `true` for an exact pin, or a table for a bounded/partial pin",
+          "anyOf": [
+            {
+              "type": "boolean",
+              "const": true
+            },
+            {
+              "$ref": "#/$defs/PinSubpackageTable"
+            }
+          ]
+        }
+      }
+    },
     "PinSubpackage": {
       "title": "PinSubpackage",
       "description": "`{ pin-subpackage = true }` or `{ pin-subpackage = { ... } }`: a\nself-referential pin, resolved against the package's own version and\nbuild string once built. The entry's key must equal the package's own\nname \u2014 a native pixi-build manifest describes exactly one output, so\n\"subpackage\" can only mean \"myself.\" Usable in `[package.run-exports.*]`\nand in every package-level dependency table; not available in\nworkspace- or feature-level dependency tables.",
@@ -1886,7 +1934,7 @@
     },
     "PinSubpackageTable": {
       "title": "PinSubpackageTable",
-      "description": "Detailed `pin-subpackage` self-pin, mirroring rattler-build's\n`pin_subpackage(name, lower_bound=, upper_bound=, build=)` Jinja helper.\n\n`exact` and `build` are mutually exclusive.",
+      "description": "Detailed pin table, shared by `pin-subpackage` and `pin-compatible`,\nmirroring rattler-build's\n`pin_subpackage(name, lower_bound=, upper_bound=, build=)` /\n`pin_compatible(...)` Jinja helpers.\n\n`exact` and `build` are mutually exclusive.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -2365,6 +2413,9 @@
               },
               {
                 "$ref": "#/$defs/PinSubpackage"
+              },
+              {
+                "$ref": "#/$defs/PinCompatible"
               }
             ]
           },
@@ -2387,6 +2438,9 @@
               },
               {
                 "$ref": "#/$defs/PinSubpackage"
+              },
+              {
+                "$ref": "#/$defs/PinCompatible"
               }
             ]
           },
@@ -2409,6 +2463,9 @@
               },
               {
                 "$ref": "#/$defs/PinSubpackage"
+              },
+              {
+                "$ref": "#/$defs/PinCompatible"
               }
             ]
           },
@@ -2431,6 +2488,9 @@
               },
               {
                 "$ref": "#/$defs/PinSubpackage"
+              },
+              {
+                "$ref": "#/$defs/PinCompatible"
               }
             ]
           },
@@ -2453,6 +2513,9 @@
               },
               {
                 "$ref": "#/$defs/PinSubpackage"
+              },
+              {
+                "$ref": "#/$defs/PinCompatible"
               }
             ]
           },

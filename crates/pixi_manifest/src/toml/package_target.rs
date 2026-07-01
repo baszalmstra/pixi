@@ -29,26 +29,20 @@ pub struct TomlPackageTarget {
 /// [`InheritablePackageMap`]/[`PackageDependencySpec`] (package-level) instead
 /// of `UniquePackageMap`/`PixiSpec` (workspace-level).
 ///
-/// Also validates that every `pin-subpackage` entry's key equals
-/// `package_name`, when known (see
-/// `ResolvedPackageMap::validate_pin_subpackage_self_reference`).
+/// Every `pin-subpackage`/`pin-compatible` entry is validated against
+/// `package_name` inside `ResolvedPackageMap::into_inner`.
 fn combine_package_target_dependencies(
     iter: impl IntoIterator<Item = (SpecType, Option<PixiSpanned<InheritablePackageMap>>)>,
     workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
     is_pixi_build_enabled: bool,
-    package_name: Option<&str>,
+    package_name: &str,
 ) -> Result<HashMap<SpecType, DependencyMap<PackageName, PackageDependencySpec>>, TomlError> {
     iter.into_iter()
         .filter_map(|(ty, deps)| {
             deps.map(|deps| {
                 deps.value
                     .resolve(workspace_dependencies, is_pixi_build_enabled)
-                    .and_then(|resolved| {
-                        if let Some(package_name) = package_name {
-                            resolved.validate_pin_subpackage_self_reference(package_name)?;
-                        }
-                        resolved.into_inner(is_pixi_build_enabled)
-                    })
+                    .and_then(|resolved| resolved.into_inner(package_name, is_pixi_build_enabled))
                     .map(|index_map| {
                         let dep_map: DependencyMap<PackageName, PackageDependencySpec> =
                             index_map.into_iter().collect();
@@ -82,23 +76,14 @@ impl<'de> toml_span::Deserialize<'de> for TomlPackageTarget {
 }
 
 impl TomlPackageTarget {
-    pub fn into_package_target(
-        self,
-        preview: &Preview,
-        workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
-    ) -> Result<PackageTarget, TomlError> {
-        self.into_package_target_named(preview, workspace_dependencies, None)
-    }
-
-    /// Like [`Self::into_package_target`], but also validates that every
-    /// `pin-subpackage` entry's key equals `package_name`. Pass `None` when
-    /// the package's name isn't known yet (e.g. in isolated unit tests);
-    /// `TomlPackage::into_manifest` always passes `Some`.
+    /// Converts into a [`PackageTarget`], validating every
+    /// `pin-subpackage`/`pin-compatible` entry against `package_name` (the
+    /// package's resolved name, which may come from workspace inheritance).
     pub fn into_package_target_named(
         self,
         preview: &Preview,
         workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
-        package_name: Option<&str>,
+        package_name: &str,
     ) -> Result<PackageTarget, TomlError> {
         let pixi_build_enabled = preview.is_enabled(KnownPreviewFeature::PixiBuild);
 
@@ -117,11 +102,8 @@ impl TomlPackageTarget {
                 let resolved = dependencies
                     .value
                     .resolve(workspace_dependencies, pixi_build_enabled)?;
-                if let Some(package_name) = package_name {
-                    resolved.validate_pin_subpackage_self_reference(package_name)?;
-                }
                 let dep_map = resolved
-                    .into_inner(pixi_build_enabled)?
+                    .into_inner(package_name, pixi_build_enabled)?
                     .into_iter()
                     .collect();
                 Ok::<_, TomlError>((group, dep_map))
@@ -177,7 +159,7 @@ mod test {
 
         let package_target = TomlPackageTarget::from_toml_str(input)
             .unwrap()
-            .into_package_target(&Preview::default(), &IndexMap::new())
+            .into_package_target_named(&Preview::default(), &IndexMap::new(), "own-package")
             .unwrap();
 
         let lookup = |spec_type: SpecType, name: &str| -> String {
@@ -221,7 +203,7 @@ mod test {
         "#;
         let err = TomlPackageTarget::from_toml_str(input)
             .unwrap()
-            .into_package_target(&Preview::default(), &IndexMap::new())
+            .into_package_target_named(&Preview::default(), &IndexMap::new(), "own-package")
             .unwrap_err();
         let message = err.to_string();
         assert!(
@@ -248,7 +230,7 @@ mod test {
 
         let package_target = TomlPackageTarget::from_toml_str(input)
             .unwrap()
-            .into_package_target(&Preview::default(), &IndexMap::new())
+            .into_package_target_named(&Preview::default(), &IndexMap::new(), "own-package")
             .unwrap();
 
         let own_package = PackageName::from_str("own-package").unwrap();
@@ -262,6 +244,38 @@ mod test {
             assert!(
                 spec.as_pin_subpackage().is_some(),
                 "expected a pin-subpackage entry in {spec_type:?}, got {spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pin_compatible_in_package_target_dependency_tables() {
+        // `pin-compatible` must parse in package-target dependency tables and
+        // must reference a name *other* than the package's own.
+        let input = r#"
+        [run-dependencies]
+        numpy = { pin-compatible = { lower-bound = "x.x" } }
+
+        [host-dependencies]
+        numpy = { pin-compatible = true }
+        "#;
+
+        let package_target = TomlPackageTarget::from_toml_str(input)
+            .unwrap()
+            .into_package_target_named(&Preview::default(), &IndexMap::new(), "own-package")
+            .unwrap();
+
+        let numpy = PackageName::from_str("numpy").unwrap();
+        for spec_type in [SpecType::Run, SpecType::Host] {
+            let spec = package_target
+                .dependencies
+                .get(&spec_type)
+                .and_then(|d| d.get(&numpy))
+                .and_then(|s| s.iter().next())
+                .unwrap_or_else(|| panic!("missing numpy in {spec_type:?}"));
+            assert!(
+                spec.as_pin_compatible().is_some(),
+                "expected a pin-compatible entry in {spec_type:?}, got {spec:?}"
             );
         }
     }

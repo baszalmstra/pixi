@@ -262,13 +262,18 @@ impl GeneratedRecipe {
         let version_with_source = VersionWithSource::from_str(&version_str)
             .map_err(|_| GenerateRecipeError::InvalidVersion(version_str))?;
 
+        // The package's own name decides whether a `PinCompatible` wire spec
+        // renders as `pin_subpackage` (self-pin) or `pin_compatible`
+        // (dependency pin).
+        let requirements = from_targets_v1_to_conditional_requirements(
+            &model.targets.unwrap_or_default(),
+            Some(pkg_name.as_normalized()),
+        )?;
+
         let package = Package::new(
             Value::new_concrete(SourcePackageName::from(pkg_name), None),
             Value::new_concrete(version_with_source, None),
         );
-
-        let requirements =
-            from_targets_v1_to_conditional_requirements(&model.targets.unwrap_or_default())?;
 
         macro_rules! derive_value {
             ($ident:ident) => {

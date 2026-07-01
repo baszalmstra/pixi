@@ -136,16 +136,20 @@ fn to_pixi_spec_v1(
 ///
 /// `PackageDependencySpec::Spec(_)` goes through the existing `PixiSpec`
 /// conversion (`Binary`/`Source`); `PackageDependencySpec::PinSubpackage(_)`
-/// becomes a `pbt::PackageSpec::PinCompatible`, using the infallible `Pin ->
+/// and `PackageDependencySpec::PinCompatible(_)` both become a
+/// `pbt::PackageSpec::PinCompatible`, using the infallible `Pin ->
 /// PinCompatibleSpec` conversion (`pixi_spec::pin`, behind the
-/// `pixi_build_types` feature).
+/// `pixi_build_types` feature). The wire variant is shared; the backend
+/// recovers the distinction by comparing the entry's name to the package's
+/// own name (manifest validation guarantees `pin-subpackage` is only ever
+/// recorded under the own name and `pin-compatible` never is).
 fn to_package_dependency_spec_v1(
     spec: &PackageDependencySpec,
     channel_config: &ChannelConfig,
 ) -> Result<pbt::PackageSpec, SpecConversionError> {
     match spec {
         PackageDependencySpec::Spec(spec) => to_pixi_spec_v1(spec, channel_config),
-        PackageDependencySpec::PinSubpackage(pin) => {
+        PackageDependencySpec::PinSubpackage(pin) | PackageDependencySpec::PinCompatible(pin) => {
             Ok(pbt::PackageSpec::PinCompatible(pin.into()))
         }
     }
@@ -568,6 +572,50 @@ mod tests {
                 assert_eq!(binary.version.as_ref().unwrap().to_string(), ">=1.0");
             }
             other => panic!("expected Binary spec, got {other:?}"),
+        }
+    }
+
+    /// A `pin-compatible` entry maps to the same shared wire variant
+    /// (`pbt::PackageSpec::PinCompatible`) as `pin-subpackage`; the backend
+    /// tells them apart by comparing the entry name to the package's own name.
+    #[test]
+    fn test_to_target_v1_pin_compatible() {
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        numpy = { pin-compatible = { lower-bound = "x.x" } }
+        "#;
+
+        let manifest = TomlPackage::from_toml_str(input)
+            .unwrap()
+            .into_manifest(
+                WorkspacePackageProperties::default(),
+                PackageDefaults::default(),
+                &Preview::default(),
+                std::path::Path::new(""),
+            )
+            .unwrap()
+            .value;
+
+        let target = super::to_target_v1(&manifest.dependencies, &some_channel_config()).unwrap();
+        let run_deps = target.run_dependencies.expect("run_dependencies present");
+        let numpy = run_deps
+            .iter()
+            .find(|(name, _)| name.as_str() == "numpy")
+            .map(|(_, spec)| spec)
+            .expect("numpy dependency present");
+        match numpy {
+            pbt::PackageSpec::PinCompatible(pin) => {
+                assert!(!pin.exact);
+                assert!(pin.lower_bound.is_some());
+                assert_eq!(pin.upper_bound, None);
+            }
+            other => panic!("expected PinCompatible spec, got {other:?}"),
         }
     }
 

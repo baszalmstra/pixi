@@ -14,8 +14,12 @@ name = "pixi-build-python"
 version = "*"
 
 # `pin-subpackage` is usable in every package-level dependency table.
+# `pin-compatible` pins a *dependency* (never the package itself) to the
+# version resolved in the host environment.
 [package.run-dependencies]
 project = { pin-subpackage = { lower-bound = "x.x", upper-bound = "x.x.x" } }
+numpy = { pin-compatible = { lower-bound = "x.x" } }
+exact-dep = { pin-compatible = true }
 
 [package.host-dependencies]
 project = { pin-subpackage = { build = "py*" } }
@@ -26,6 +30,7 @@ project = { pin-subpackage = true }
 # ... and in every `[package.run-exports.*]` bucket.
 [package.run-exports.weak]
 project = { pin-subpackage = true }
+libfoo = { pin-compatible = true }
 
 [package.run-exports.strong]
 libzma = "*"

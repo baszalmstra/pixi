@@ -43,10 +43,11 @@ pub struct InheritablePackageMap {
 }
 
 /// A package-level dependency map once workspace inheritance has been
-/// resolved: every entry is a concrete [`PackageDependencySpec`] (either a
-/// regular spec or a `pin-subpackage` pin — workspace inheritance only ever
-/// resolves to a regular spec, since `[workspace.dependencies]` is
-/// `PixiSpec`-typed and structurally cannot carry `pin-subpackage`).
+/// resolved: every entry is a concrete [`PackageDependencySpec`] (a regular
+/// spec, a `pin-subpackage` pin, or a `pin-compatible` pin — workspace
+/// inheritance only ever resolves to a regular spec, since
+/// `[workspace.dependencies]` is `PixiSpec`-typed and structurally cannot
+/// carry a pin entry).
 #[derive(Default, Debug)]
 pub struct ResolvedPackageMap {
     pub specs: IndexMap<PackageName, PackageDependencySpec>,
@@ -86,12 +87,17 @@ where
 }
 
 impl ResolvedPackageMap {
-    /// Returns the underlying specs, after checking that source dependencies
-    /// are only present when the `pixi-build` preview is enabled.
+    /// Returns the underlying specs, after validating every
+    /// `pin-subpackage`/`pin-compatible` entry against `package_name` (the
+    /// package's resolved name) and checking that source dependencies are
+    /// only present when the `pixi-build` preview is enabled. Validation is
+    /// part of extraction on purpose: specs cannot be obtained without it.
     pub fn into_inner(
         self,
+        package_name: &str,
         is_pixi_build_enabled: bool,
     ) -> Result<IndexMap<PackageName, PackageDependencySpec>, TomlError> {
+        self.validate_pin_entries(package_name)?;
         reject_source_without_preview(
             self.specs.iter(),
             &self.value_spans,
@@ -101,26 +107,44 @@ impl ResolvedPackageMap {
         Ok(self.specs)
     }
 
-    /// Validates that every `pin-subpackage` entry's key equals the package's
-    /// own name. A native pixi-build manifest describes exactly one output,
-    /// so "subpackage" can only mean "myself."
-    pub fn validate_pin_subpackage_self_reference(
-        &self,
-        package_name: &str,
-    ) -> Result<(), TomlError> {
+    /// Validates every pin entry against the package's own name:
+    ///
+    /// - `pin-subpackage` must equal it. A native pixi-build manifest
+    ///   describes exactly one output, so "subpackage" can only mean
+    ///   "myself."
+    /// - `pin-compatible` must *not* equal it. It resolves against the host
+    ///   environment, which never contains the package itself; self-pins are
+    ///   what `pin-subpackage` is for.
+    fn validate_pin_entries(&self, package_name: &str) -> Result<(), TomlError> {
         for (name, spec) in &self.specs {
-            if spec.as_pin_subpackage().is_some() && name.as_source() != package_name {
-                return Err(TomlError::Generic(
-                    GenericError::new(format!(
-                        "`pin-subpackage` can only reference the package's own name (`{package_name}`), not `{}`",
-                        name.as_source()
-                    ))
-                    .with_opt_span(self.value_spans.get(name).cloned())
-                    .with_span_label("pin-subpackage used here")
-                    .with_help(format!(
-                        "Use `{package_name} = {{ pin-subpackage = ... }}` to pin to this package's own resolved version."
-                    )),
-                ));
+            match spec {
+                PackageDependencySpec::PinSubpackage(_) if name.as_source() != package_name => {
+                    return Err(TomlError::Generic(
+                        GenericError::new(format!(
+                            "`pin-subpackage` can only reference the package's own name (`{package_name}`), not `{}`",
+                            name.as_source()
+                        ))
+                        .with_opt_span(self.value_spans.get(name).cloned())
+                        .with_span_label("pin-subpackage used here")
+                        .with_help(format!(
+                            "Use `{package_name} = {{ pin-subpackage = ... }}` to pin to this package's own resolved version, or `{} = {{ pin-compatible = ... }}` to pin a dependency to the version resolved in the host environment.",
+                            name.as_source()
+                        )),
+                    ));
+                }
+                PackageDependencySpec::PinCompatible(_) if name.as_source() == package_name => {
+                    return Err(TomlError::Generic(
+                        GenericError::new(format!(
+                            "`pin-compatible` cannot reference the package's own name (`{package_name}`)"
+                        ))
+                        .with_opt_span(self.value_spans.get(name).cloned())
+                        .with_span_label("pin-compatible used here")
+                        .with_help(format!(
+                            "`pin-compatible` pins a dependency to the version resolved in the host environment, which never contains the package itself. Use `{package_name} = {{ pin-subpackage = ... }}` for a self-pin."
+                        )),
+                    ));
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -403,20 +427,23 @@ fn parse_inheritable_entry(value: &mut Value<'_>) -> Result<InheritableSpec, Des
         }
         ValueInner::Table(mut table) => {
             if let Some(ws_val) = table.remove("workspace") {
-                // `{ workspace = true, pin-subpackage = ... }` is rejected: workspace
-                // inheritance is `PixiSpec`-typed only (the pool is populated from
-                // `[workspace.dependencies]`, which can never contain a
-                // `pin-subpackage` entry), so combining the two markers is always a
+                // `{ workspace = true, pin-subpackage = ... }` (and the
+                // `pin-compatible` equivalent) is rejected: workspace
+                // inheritance is `PixiSpec`-typed only (the pool is populated
+                // from `[workspace.dependencies]`, which can never contain a
+                // pin entry), so combining the two markers is always a
                 // mistake.
-                if table.contains_key("pin-subpackage") {
-                    return Err(toml_span::Error {
-                        kind: toml_span::ErrorKind::Custom(
-                            "`pin-subpackage` cannot be combined with `workspace`".into(),
-                        ),
-                        span: outer_span,
-                        line_info: None,
+                for pin_key in ["pin-subpackage", "pin-compatible"] {
+                    if table.contains_key(pin_key) {
+                        return Err(toml_span::Error {
+                            kind: toml_span::ErrorKind::Custom(
+                                format!("`{pin_key}` cannot be combined with `workspace`").into(),
+                            ),
+                            span: outer_span,
+                            line_info: None,
+                        }
+                        .into());
                     }
-                    .into());
                 }
                 parse_workspace_marker(ws_val, table, outer_span)
             } else {
@@ -724,6 +751,17 @@ mod test {
     }
 
     #[test]
+    fn rejects_pin_compatible_combined_with_workspace() {
+        let input = "numpy = { workspace = true, pin-compatible = true }";
+        let err = InheritablePackageMap::from_toml_str(input).expect_err("must reject");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("pin-compatible") && msg.contains("workspace"),
+            "unexpected error: {msg}",
+        );
+    }
+
+    #[test]
     fn resolve_preserves_pin_subpackage_entries() {
         let input = "own-package = { pin-subpackage = true }";
         let map = InheritablePackageMap::from_toml_str(input).unwrap();
@@ -734,5 +772,59 @@ mod test {
             .get(&PackageName::from_str("own-package").unwrap())
             .unwrap();
         assert!(spec.as_pin_subpackage().is_some());
+    }
+
+    #[test]
+    fn into_inner_validates_pin_subpackage_self_reference() {
+        let input = "other-package = { pin-subpackage = true }";
+        let map = InheritablePackageMap::from_toml_str(input).unwrap();
+        let resolved = map.resolve(&pool(&[]), true).unwrap();
+        let err = resolved
+            .into_inner("own-package", true)
+            .expect_err("must reject pin-subpackage referencing another package");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("`pin-subpackage` can only reference the package's own name (`own-package`), not `other-package`"),
+            "unexpected error: {msg}",
+        );
+    }
+
+    #[test]
+    fn into_inner_rejects_pin_compatible_on_own_name() {
+        let input = "own-package = { pin-compatible = true }";
+        let map = InheritablePackageMap::from_toml_str(input).unwrap();
+        let resolved = map.resolve(&pool(&[]), true).unwrap();
+        let err = resolved
+            .into_inner("own-package", true)
+            .expect_err("must reject pin-compatible referencing the package itself");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(
+                "`pin-compatible` cannot reference the package's own name (`own-package`)"
+            ),
+            "unexpected error: {msg}",
+        );
+    }
+
+    #[test]
+    fn into_inner_accepts_valid_pin_entries() {
+        let input = "own-package = { pin-subpackage = true }\nnumpy = { pin-compatible = { lower-bound = \"x.x\" } }";
+        let map = InheritablePackageMap::from_toml_str(input).unwrap();
+        let resolved = map.resolve(&pool(&[]), true).unwrap();
+        let specs = resolved.into_inner("own-package", true).unwrap();
+        assert!(
+            specs
+                .get(&PackageName::from_str("own-package").unwrap())
+                .unwrap()
+                .as_pin_subpackage()
+                .is_some()
+        );
+        assert!(
+            specs
+                .get(&PackageName::from_str("numpy").unwrap())
+                .unwrap()
+                .as_pin_compatible()
+                .is_some()
+        );
     }
 }

@@ -4,16 +4,16 @@
 //! `[package.run-exports.*]` tables).
 //!
 //! This type, and *not* [`PixiSpec`] itself, is what gates the `pin-subpackage`
-//! spec value to package-level tables: workspace- and feature-level dependency
-//! tables keep parsing plain [`PixiSpec`] values directly, so they structurally
-//! cannot accept `pin-subpackage`.
+//! and `pin-compatible` spec values to package-level tables: workspace- and
+//! feature-level dependency tables keep parsing plain [`PixiSpec`] values
+//! directly, so they structurally cannot accept either pin form.
 
 use pixi_spec::{Pin, PixiSpec};
 use toml_span::{DeserError, Value, value::ValueInner};
 
 /// A single dependency value in a package-level dependency table: either a
-/// regular [`PixiSpec`] (version, path, git, url, ...) or a self-referential
-/// `pin-subpackage` pin.
+/// regular [`PixiSpec`] (version, path, git, url, ...), a self-referential
+/// `pin-subpackage` pin, or a `pin-compatible` pin against a dependency.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PackageDependencySpec {
     /// A regular dependency spec, as used everywhere else in the manifest.
@@ -25,6 +25,15 @@ pub enum PackageDependencySpec {
     /// in `TomlPackage::into_manifest`, once the package's resolved name is
     /// known (it may come from workspace inheritance).
     PinSubpackage(Pin),
+    /// `{ pin-compatible = true }` or `{ pin-compatible = { ... } }`: a pin
+    /// against the version of a *dependency* as resolved in the previous
+    /// (host) environment, mirroring rattler-build's `pin_compatible()`.
+    /// Only valid when the entry's key is *not* the package's own name (the
+    /// host environment never contains the package itself; use
+    /// `pin-subpackage` for self-pins); that check happens later, in
+    /// `TomlPackage::into_manifest`, once the package's resolved name is
+    /// known.
+    PinCompatible(Pin),
 }
 
 impl PackageDependencySpec {
@@ -32,24 +41,37 @@ impl PackageDependencySpec {
     pub fn as_spec(&self) -> Option<&PixiSpec> {
         match self {
             PackageDependencySpec::Spec(spec) => Some(spec),
-            PackageDependencySpec::PinSubpackage(_) => None,
+            PackageDependencySpec::PinSubpackage(_) | PackageDependencySpec::PinCompatible(_) => {
+                None
+            }
         }
     }
 
     /// Returns the inner [`Pin`] if this is a `pin-subpackage` entry.
     pub fn as_pin_subpackage(&self) -> Option<&Pin> {
         match self {
-            PackageDependencySpec::Spec(_) => None,
             PackageDependencySpec::PinSubpackage(pin) => Some(pin),
+            PackageDependencySpec::Spec(_) | PackageDependencySpec::PinCompatible(_) => None,
+        }
+    }
+
+    /// Returns the inner [`Pin`] if this is a `pin-compatible` entry.
+    pub fn as_pin_compatible(&self) -> Option<&Pin> {
+        match self {
+            PackageDependencySpec::PinCompatible(pin) => Some(pin),
+            PackageDependencySpec::Spec(_) | PackageDependencySpec::PinSubpackage(_) => None,
         }
     }
 
     /// Returns `true` if this is a source dependency (path, git, or url).
-    /// `pin-subpackage` entries are never source dependencies.
+    /// `pin-subpackage` and `pin-compatible` entries are never source
+    /// dependencies.
     pub fn is_source(&self) -> bool {
         match self {
             PackageDependencySpec::Spec(spec) => spec.is_source(),
-            PackageDependencySpec::PinSubpackage(_) => false,
+            PackageDependencySpec::PinSubpackage(_) | PackageDependencySpec::PinCompatible(_) => {
+                false
+            }
         }
     }
 }
@@ -60,7 +82,8 @@ impl From<PixiSpec> for PackageDependencySpec {
     }
 }
 
-/// `{ pin-subpackage = true }` is sugar for `{ pin-subpackage = { exact = true } }`.
+/// `{ pin-subpackage = true }` / `{ pin-compatible = true }` are sugar for
+/// `{ ... = { exact = true } }`.
 fn exact_pin() -> Pin {
     Pin {
         lower_bound: None,
@@ -75,8 +98,8 @@ impl<'de> toml_span::Deserialize<'de> for PackageDependencySpec {
         let outer_span = value.span;
         let inner = value.take();
 
-        // Only tables can carry a `pin-subpackage` key; strings (plain version
-        // specs) go straight to `PixiSpec`.
+        // Only tables can carry a `pin-subpackage`/`pin-compatible` key;
+        // strings (plain version specs) go straight to `PixiSpec`.
         let mut table = match inner {
             ValueInner::Table(table) => table,
             other => {
@@ -89,20 +112,46 @@ impl<'de> toml_span::Deserialize<'de> for PackageDependencySpec {
             }
         };
 
-        let Some(mut pin_value) = table.remove("pin-subpackage") else {
-            // No `pin-subpackage` key: delegate the whole table to `PixiSpec`.
-            let mut table_value = Value::with_span(ValueInner::Table(table), outer_span);
-            return <PixiSpec as toml_span::Deserialize>::deserialize(&mut table_value)
-                .map(PackageDependencySpec::Spec);
-        };
+        let pin_subpackage = table.remove("pin-subpackage");
+        let pin_compatible = table.remove("pin-compatible");
+        type Constructor = fn(Pin) -> PackageDependencySpec;
+        let (key, constructor, mut pin_value): (&str, Constructor, _) =
+            match (pin_subpackage, pin_compatible) {
+                (Some(_), Some(_)) => {
+                    return Err(toml_span::Error {
+                        kind: toml_span::ErrorKind::Custom(
+                            "`pin-subpackage` and `pin-compatible` cannot be combined".into(),
+                        ),
+                        span: outer_span,
+                        line_info: None,
+                    }
+                    .into());
+                }
+                (Some(value), None) => (
+                    "pin-subpackage",
+                    PackageDependencySpec::PinSubpackage,
+                    value,
+                ),
+                (None, Some(value)) => (
+                    "pin-compatible",
+                    PackageDependencySpec::PinCompatible,
+                    value,
+                ),
+                (None, None) => {
+                    // Neither pin key: delegate the whole table to `PixiSpec`.
+                    let mut table_value = Value::with_span(ValueInner::Table(table), outer_span);
+                    return <PixiSpec as toml_span::Deserialize>::deserialize(&mut table_value)
+                        .map(PackageDependencySpec::Spec);
+                }
+            };
 
-        // `pin-subpackage` cannot combine with any other matchspec field.
+        // A pin cannot combine with any other matchspec field.
         if !table.is_empty() {
             let other_key = table.keys().next().map(|k| k.name.to_string());
             return Err(toml_span::Error {
                 kind: toml_span::ErrorKind::Custom(
                     format!(
-                        "`pin-subpackage` cannot be combined with other fields (found `{}`)",
+                        "`{key}` cannot be combined with other fields (found `{}`)",
                         other_key.unwrap_or_default()
                     )
                     .into(),
@@ -118,7 +167,10 @@ impl<'de> toml_span::Deserialize<'de> for PackageDependencySpec {
             ValueInner::Boolean(false) => {
                 return Err(toml_span::Error {
                     kind: toml_span::ErrorKind::Custom(
-                        "`pin-subpackage = false` has no meaning; remove the key or use a table to configure the pin".into(),
+                        format!(
+                            "`{key} = false` has no meaning; remove the key or use a table to configure the pin"
+                        )
+                        .into(),
                     ),
                     span: pin_value.span,
                     line_info: None,
@@ -139,7 +191,7 @@ impl<'de> toml_span::Deserialize<'de> for PackageDependencySpec {
             }
         };
 
-        Ok(PackageDependencySpec::PinSubpackage(pin))
+        Ok(constructor(pin))
     }
 }
 
@@ -243,5 +295,53 @@ mod tests {
             err.contains("exact") && err.contains("build"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parses_pin_compatible_shorthand_as_exact() {
+        let spec = parse("v = { pin-compatible = true }");
+        let pin = spec.as_pin_compatible().expect("expected a pin");
+        assert!(pin.exact);
+        assert_eq!(pin.lower_bound, None);
+        assert_eq!(pin.upper_bound, None);
+        assert_eq!(pin.build, None);
+        assert!(spec.as_pin_subpackage().is_none());
+        assert!(spec.as_spec().is_none());
+    }
+
+    #[test]
+    fn parses_detailed_pin_compatible_table() {
+        let spec = parse(
+            r#"v = { pin-compatible = { lower-bound = "x.x", upper-bound = "x.x.x", build = "py*" } }"#,
+        );
+        let pin = spec.as_pin_compatible().expect("expected a pin");
+        assert!(!pin.exact);
+        assert!(pin.lower_bound.is_some());
+        assert!(pin.upper_bound.is_some());
+        assert_eq!(pin.build.as_deref(), Some("py*"));
+    }
+
+    #[test]
+    fn rejects_pin_compatible_combined_with_pin_subpackage() {
+        let err = parse_err("v = { pin-subpackage = true, pin-compatible = true }");
+        assert!(
+            err.contains("`pin-subpackage` and `pin-compatible` cannot be combined"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_pin_compatible_combined_with_other_fields() {
+        let err = parse_err(r#"v = { pin-compatible = true, channel = "conda-forge" }"#);
+        assert!(
+            err.contains("pin-compatible") && err.contains("combined"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_pin_compatible_false() {
+        let err = parse_err("v = { pin-compatible = false }");
+        assert!(err.contains("pin-compatible"), "unexpected error: {err}");
     }
 }

@@ -653,8 +653,10 @@ ConditionalExtraDependencies = (
 
 
 class PinSubpackageTable(StrictBaseModel):
-    """Detailed `pin-subpackage` self-pin, mirroring rattler-build's
-    `pin_subpackage(name, lower_bound=, upper_bound=, build=)` Jinja helper.
+    """Detailed pin table, shared by `pin-subpackage` and `pin-compatible`,
+    mirroring rattler-build's
+    `pin_subpackage(name, lower_bound=, upper_bound=, build=)` /
+    `pin_compatible(...)` Jinja helpers.
 
     `exact` and `build` are mutually exclusive.
     """
@@ -689,12 +691,29 @@ class PinSubpackage(StrictBaseModel):
     )
 
 
-InheritablePackageMatchSpec = InheritableMatchSpec | PinSubpackage
+class PinCompatible(StrictBaseModel):
+    """`{ pin-compatible = true }` or `{ pin-compatible = { ... } }`: a pin
+    against the version of a *dependency* as resolved in the host environment
+    during the build, mirroring rattler-build's `pin_compatible()` Jinja
+    helper. The entry's key must NOT equal the package's own name (the host
+    environment never contains the package itself; use `pin-subpackage` for
+    self-pins). Usable in `[package.run-exports.*]` and in every
+    package-level dependency table; not available in workspace- or
+    feature-level dependency tables.
+    """
 
-# Package-level dependency tables additionally accept `pin-subpackage`
-# (gated to package-level tables only — workspace/feature dependency tables
-# use `ConditionalInheritableDependencies`/`InheritableDependencies`, which do
-# not include `PinSubpackage`).
+    pin_compatible: Literal[True] | PinSubpackageTable = Field(
+        description="Shorthand `true` for an exact pin, or a table for a bounded/partial pin"
+    )
+
+
+InheritablePackageMatchSpec = InheritableMatchSpec | PinSubpackage | PinCompatible
+
+# Package-level dependency tables additionally accept `pin-subpackage` and
+# `pin-compatible` (gated to package-level tables only — workspace/feature
+# dependency tables use
+# `ConditionalInheritableDependencies`/`InheritableDependencies`, which do
+# not include `PinSubpackage`/`PinCompatible`).
 ConditionalInheritablePackageDependencies = (
     dict[
         CondaPackageName,

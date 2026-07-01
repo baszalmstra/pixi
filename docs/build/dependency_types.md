@@ -153,6 +153,29 @@ same entry, and is **not** available in workspace- or feature-level dependency t
 (`[dependencies]`, `[feature.x.dependencies]`) — only inside `[package.*]` tables. Conditional
 `[package.run-exports.*."if(...)"]` sub-tables are not yet supported.
 
+##### Pinning dependencies with `pin-compatible`
+
+To pin a *dependency* — rather than the package itself — to the version that was resolved in the host
+environment during the build, use the `pin-compatible` spec value, mirroring rattler-build's
+`pin_compatible()` Jinja helper. It takes the same value grammar as `pin-subpackage` (`true` as
+shorthand for an exact pin, or a table with `lower-bound`/`upper-bound`/`exact`/`build`):
+
+```toml
+[package.host-dependencies]
+numpy = "*"
+
+[package.run-dependencies]
+# Whatever numpy version the host environment resolved, require a compatible one at run time.
+numpy = { pin-compatible = { lower-bound = "x.x", upper-bound = "x" } }
+```
+
+The self vs. non-self rule: `pin-subpackage` must reference the package's **own** name, while
+`pin-compatible` must reference a name **other than** the package's own — it resolves against the host
+environment, which never contains the package itself. Use `pin-subpackage` for self-pins and
+`pin-compatible` for dependency pins; combining both keys on one entry is an error. Like
+`pin-subpackage`, `pin-compatible` is usable in `[package.run-exports.*]` and in every package-level
+dependency table, and cannot be combined with any other matchspec field.
+
 ### [Dependencies (Run Dependencies)](../reference/pixi_manifest.md#dependencies)
 
 These are the dependencies that are required to when running the package, they are the most common dependencies.

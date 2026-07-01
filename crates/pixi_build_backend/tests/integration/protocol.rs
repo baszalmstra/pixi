@@ -1,21 +1,16 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use crate::common::model::{convert_test_model_to_project_model_v1, load_project_model_from_json};
 use imp::TestGenerateRecipe;
 use ordermap::OrderMap;
 use pixi_build_backend::{
-    intermediate_backend::{IntermediateBackend, IntermediateBackendInstantiator},
-    protocol::{Protocol, ProtocolInstantiator},
-    tools::BackendIdentifier,
+    intermediate_backend::IntermediateBackend, protocol::Protocol, tools::BackendIdentifier,
     utils::test::intermediate_conda_outputs,
 };
 use pixi_build_types::{
     BinaryPackageSpec, ConditionalExpression, ExtraGroupName, PackageSpec, PathSpec, ProjectModel,
     SourcePackageName, Target, Targets,
-    procedures::{
-        conda_build_v1::{CondaBuildV1Output, CondaBuildV1Params},
-        initialize::InitializeParams,
-    },
+    procedures::conda_build_v1::{CondaBuildV1Output, CondaBuildV1Params},
 };
 use rattler_build_core::console_utils::LoggingOutputHandler;
 use rattler_conda_types::{ChannelUrl, PackageName, Platform};
@@ -445,18 +440,15 @@ async fn test_conda_outputs_run_exports_self_pin_exact() {
     );
 }
 
-/// Defense-in-depth: the `SubpackageNotFound` backstop in
-/// `dependencies.rs::convert_dependencies` should never trigger in practice
-/// for native-manifest backends, since manifest-level validation
-/// (`validate_pin_subpackage_self_reference`) guarantees a `pin-subpackage`
-/// entry's name always matches the current package before it ever reaches
-/// the wire. This test exercises that backstop directly by handing the
-/// backend a `PinCompatible` entry whose name does *not* match the project's
-/// own name (something the manifest layer would normally reject, but the
-/// wire protocol itself does not enforce), confirming the backend surfaces a
-/// clear error instead of silently dropping the run-export or panicking.
+/// A `PinCompatible` wire entry whose name does *not* match the project's own
+/// name is a `pin-compatible` dependency pin: the backend renders it as a
+/// `${{ pin_compatible('<name>', ...) }}` Jinja item (manifest validation
+/// guarantees `pin-subpackage` only ever appears under the own name), and the
+/// conda_outputs path passes it through unresolved — resolution against the
+/// host environment happens later, at build time, when that environment
+/// exists.
 #[tokio::test]
-async fn test_conda_outputs_run_exports_subpackage_not_found_backstop() {
+async fn test_conda_outputs_run_exports_pin_compatible_passthrough() {
     let mut weak_run_exports: OrderMap<SourcePackageName, PackageSpec> = OrderMap::new();
     weak_run_exports.insert(
         SourcePackageName::from(PackageName::new_unchecked("some-other-package")),
@@ -484,42 +476,28 @@ async fn test_conda_outputs_run_exports_subpackage_not_found_backstop() {
         ..ProjectModel::default()
     };
 
-    let manifest_path = PathBuf::from("pixi.toml");
-    let (protocol, _result) = IntermediateBackendInstantiator::<TestGenerateRecipe>::new(
-        BackendIdentifier::new("test-backend", env!("CARGO_PKG_VERSION")),
-        LoggingOutputHandler::default(),
-        Arc::new(TestGenerateRecipe::default()),
+    let result = intermediate_conda_outputs::<TestGenerateRecipe>(
+        Some(model),
+        None,
+        Platform::current(),
+        None,
+        None,
     )
-    .initialize(InitializeParams {
-        workspace_directory: None,
-        checkout_root: None,
-        source_directory: None,
-        manifest_path,
-        project_model: Some(model),
-        configuration: None,
-        target_configuration: None,
-        cache_directory: None,
-        workspace_scratch_directory: None,
-    })
-    .await
-    .unwrap();
+    .await;
 
-    let current_dir = std::env::current_dir().unwrap();
-    let result = protocol
-        .conda_outputs(
-            pixi_build_types::procedures::conda_outputs::CondaOutputsParams {
-                channels: vec![],
-                host_platform: Platform::current(),
-                build_platform: Platform::current(),
-                variant_configuration: None,
-                variant_files: None,
-                work_directory: current_dir,
-            },
-        )
-        .await;
+    let output = result.outputs.first().expect("should produce one output");
 
-    assert!(
-        result.is_err(),
-        "a pin-subpackage referencing an unknown subpackage must surface as an error, not panic or silently drop the run-export"
-    );
+    let weak = &output.run_exports.weak;
+    assert_eq!(weak.len(), 1, "expected exactly one weak run-export");
+    let pin = &weak[0];
+    assert_eq!(pin.name.as_str(), "some-other-package");
+    match &pin.spec {
+        PackageSpec::PinCompatible(spec) => {
+            assert!(
+                spec.exact,
+                "the pin's arguments must survive the round trip"
+            );
+        }
+        other => panic!("expected an unresolved PinCompatible passthrough, got {other:?}"),
+    }
 }

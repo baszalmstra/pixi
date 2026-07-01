@@ -51,6 +51,11 @@ pub enum ConvertDependencyError {
     #[error("could not apply pin. The following subpackage is not available: {0:?}")]
     SubpackageNotFound(PackageName),
 
+    #[error(
+        "`pin-compatible` is not supported in constraint buckets (`strong-constrains`/`weak-constrains`); found an entry for `{0}`"
+    )]
+    PinCompatibleConstraintNotSupported(PackageName),
+
     #[error("could not apply pin: {0}")]
     PinApplyError(PinError),
 }
@@ -253,7 +258,14 @@ fn convert_constraint_dependency(
                 .apply(&subpackage.version, &subpackage.build_string)
                 .map_err(ConvertDependencyError::PinApplyError)?
         }
-        _ => todo!("Handle other dependency types"),
+        // The wire `ConstraintSpec` has no unresolved-pin variant, so a
+        // `pin_compatible(...)` cannot be passed through here (it can only be
+        // resolved at build time, against the host environment).
+        Dependency::PinCompatible(pin) => {
+            return Err(ConvertDependencyError::PinCompatibleConstraintNotSupported(
+                pin.pin_compatible.name.clone(),
+            ));
+        }
     };
 
     // Apply a variant if it is applicable.

@@ -96,14 +96,13 @@ impl<'de> toml_span::Deserialize<'de> for TomlRunExports {
 
 impl TomlRunExports {
     /// `package_name` is the package's resolved name (it may come from
-    /// workspace inheritance), used to validate that every `pin-subpackage`
-    /// entry references it. `None` skips validation (used by isolated unit
-    /// tests); `TomlPackage::into_manifest` always passes `Some`.
+    /// workspace inheritance); every `pin-subpackage`/`pin-compatible` entry
+    /// is validated against it inside `ResolvedPackageMap::into_inner`.
     pub fn into_manifest_run_exports(
         self,
         preview: &Preview,
         workspace_dependencies: &IndexMap<PackageName, TomlSpec>,
-        package_name: Option<&str>,
+        package_name: &str,
     ) -> Result<ManifestRunExports, TomlError> {
         let pixi_build_enabled = preview.is_enabled(KnownPreviewFeature::PixiBuild);
 
@@ -115,10 +114,7 @@ impl TomlRunExports {
                 return Ok(Default::default());
             };
             let resolved = value.resolve(workspace_dependencies, pixi_build_enabled)?;
-            if let Some(package_name) = package_name {
-                resolved.validate_pin_subpackage_self_reference(package_name)?;
-            }
-            let resolved = resolved.into_inner(pixi_build_enabled)?;
+            let resolved = resolved.into_inner(package_name, pixi_build_enabled)?;
             Ok(resolved.into_iter().collect())
         };
 
@@ -163,7 +159,7 @@ mod test {
 
         let toml = TomlRunExports::from_toml_str(input).unwrap();
         let run_exports = toml
-            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), None)
+            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), "own-package")
             .unwrap();
 
         let libzma = PackageName::from_str("libzma").unwrap();
@@ -200,7 +196,7 @@ mod test {
         "#;
         let toml = TomlRunExports::from_toml_str(input).unwrap();
         let run_exports = toml
-            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), Some("own-package"))
+            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), "own-package")
             .unwrap();
         let own_package = PackageName::from_str("own-package").unwrap();
         let spec = run_exports
@@ -219,11 +215,49 @@ mod test {
         "#;
         let toml = TomlRunExports::from_toml_str(input).unwrap();
         let err = toml
-            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), Some("own-package"))
+            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), "own-package")
             .expect_err("must reject pin-subpackage referencing another package");
         let message = format!("{err}");
         assert!(
             message.contains("own-package") && message.contains("other-package"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn test_run_exports_pin_compatible_value() {
+        let input = r#"
+        [weak]
+        numpy = { pin-compatible = { lower-bound = "x.x" } }
+        "#;
+        let toml = TomlRunExports::from_toml_str(input).unwrap();
+        let run_exports = toml
+            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), "own-package")
+            .unwrap();
+        let numpy = PackageName::from_str("numpy").unwrap();
+        let spec = run_exports
+            .weak
+            .get(&numpy)
+            .and_then(|s| s.iter().next())
+            .unwrap();
+        assert!(spec.as_pin_compatible().is_some());
+    }
+
+    #[test]
+    fn test_run_exports_pin_compatible_own_name_rejected() {
+        let input = r#"
+        [weak]
+        own-package = { pin-compatible = true }
+        "#;
+        let toml = TomlRunExports::from_toml_str(input).unwrap();
+        let err = toml
+            .into_manifest_run_exports(&Preview::default(), &IndexMap::new(), "own-package")
+            .expect_err("must reject pin-compatible referencing the package itself");
+        let message = format!("{err}");
+        assert!(
+            message.contains(
+                "`pin-compatible` cannot reference the package's own name (`own-package`)"
+            ),
             "unexpected error: {message}"
         );
     }

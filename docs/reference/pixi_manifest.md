@@ -1581,4 +1581,25 @@ my-package = { pin-subpackage = { lower-bound = "x.x", upper-bound = "x.x.x", bu
 
 `pin-subpackage` must reference the package's own name and cannot be combined with any other matchspec
 field (`version`, `channel`, `build`, ...) on the same entry — `exact` and `build` are themselves mutually
-exclusive within the detailed form.
+exclusive within the detailed form. For pinning a *dependency* instead of the package itself, see
+[`pin-compatible`](#pin-compatible) below.
+
+#### `pin-compatible`
+
+`pin-compatible` is the sibling of `pin-subpackage` for *dependencies*: it pins an entry to a version
+compatible with the one resolved in the host environment during the build — mirroring rattler-build's
+`pin_compatible()` Jinja helper. It takes the same value grammar as `pin-subpackage` and is usable in the
+same tables.
+
+```toml
+# Shorthand exact pin (sugar for `{ pin-compatible = { exact = true } }`)
+numpy = { pin-compatible = true }
+
+# Detailed pin, mirrors pin_compatible(name, lower_bound=, upper_bound=, build=)
+numpy = { pin-compatible = { lower-bound = "x.x", upper-bound = "x" } }
+```
+
+The self vs. non-self rule: `pin-subpackage` must reference the package's **own** name; `pin-compatible`
+must reference a name **other than** the package's own (it resolves against the host environment, which
+never contains the package itself — use `pin-subpackage` for self-pins). The two keys cannot be combined
+on one entry, and `pin-compatible` cannot be combined with any other matchspec field either.

@@ -372,6 +372,16 @@ impl TomlPackage {
             "version",
         )?;
 
+        // `pin-subpackage`/`pin-compatible` entries are validated against the
+        // package's resolved name (which may come from workspace inheritance
+        // or package defaults). When no name could be resolved at all,
+        // validate against the empty string: no valid package name is empty,
+        // so `pin-subpackage` entries (which must equal the own name) are
+        // rejected — without a known name a self-pin can never be resolved —
+        // while `pin-compatible` entries (which must *not* equal it) are
+        // unaffected.
+        let pin_validation_name = name.as_deref().unwrap_or("");
+
         // Split each package-level dependency table into its unconditional
         // entries and any `if(<expression>)` sub-tables.
         let (run_unconditional, run_conditional) = split_section(self.run_dependencies);
@@ -409,7 +419,11 @@ impl TomlPackage {
             build_dependencies: build_unconditional,
             extra_dependencies: extra_unconditional,
         }
-        .into_package_target_named(preview, &workspace_dependencies, name.as_deref())?;
+        .into_package_target_named(
+            preview,
+            &workspace_dependencies,
+            pin_validation_name,
+        )?;
 
         // `[package.run-exports.*]` is only supported on the default (unconditional)
         // target; conditional run-exports are rejected earlier, while parsing
@@ -418,7 +432,7 @@ impl TomlPackage {
             let run_exports = toml_run_exports.into_manifest_run_exports(
                 preview,
                 &workspace_dependencies,
-                name.as_deref(),
+                pin_validation_name,
             )?;
             if !run_exports.is_empty() {
                 default_package_target.run_exports = Some(run_exports);
@@ -495,17 +509,18 @@ impl TomlPackage {
         // `if(...)` conditionals are not platform selectors; they are kept
         // separate and passed through to rattler-build, which evaluates the
         // expression. Every `pin-subpackage` entry's key must equal the
-        // package's own name: a native pixi-build manifest describes exactly
-        // one output, so "subpackage" can only mean "myself." That validation
-        // happens inside `into_package_target_named`, using the now-resolved
-        // name (which may come from workspace inheritance).
+        // package's own name (a native pixi-build manifest describes exactly
+        // one output, so "subpackage" can only mean "myself"), and every
+        // `pin-compatible` entry's key must *not*. That validation happens
+        // inside `into_package_target_named`, using the now-resolved name
+        // (which may come from workspace inheritance).
         let mut conditional_dependencies: IndexMap<ConditionalExpression, PackageTarget> =
             IndexMap::new();
         for (expression, toml_target) in conditional_targets {
             let target = toml_target.into_package_target_named(
                 preview,
                 &workspace_dependencies,
-                name.as_deref(),
+                pin_validation_name,
             )?;
             conditional_dependencies.insert(expression, target);
         }
@@ -2218,5 +2233,97 @@ mod test {
             .expect("mypkg should be present in weak run-exports");
         let pin = spec.as_pin_subpackage().expect("expected a pin");
         assert!(pin.exact);
+    }
+
+    #[test]
+    fn test_pin_compatible_round_trip() {
+        // `pin-compatible` pins a *dependency* (never the package itself) and
+        // must parse end-to-end in both the regular dependency tables and the
+        // run-exports buckets.
+        let input = r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        numpy = { pin-compatible = { lower-bound = "x.x", upper-bound = "x.x.x" } }
+
+        [run-exports.weak]
+        libfoo = { pin-compatible = true }
+        "#;
+
+        let manifest = parse_package(input);
+
+        let run_spec = manifest
+            .dependencies
+            .dependencies
+            .get(&SpecType::Run)
+            .and_then(|d| d.get(&PackageName::from_str("numpy").unwrap()))
+            .and_then(|s| s.iter().next())
+            .expect("numpy should be present in run-dependencies");
+        let pin = run_spec.as_pin_compatible().expect("expected a pin");
+        assert!(!pin.exact);
+        assert!(pin.lower_bound.is_some());
+        assert!(pin.upper_bound.is_some());
+
+        let run_exports = manifest
+            .dependencies
+            .run_exports
+            .expect("run_exports should be populated");
+        let export_spec = run_exports
+            .weak
+            .get(&PackageName::from_str("libfoo").unwrap())
+            .and_then(|s| s.iter().next())
+            .expect("libfoo should be present in weak run-exports");
+        let pin = export_spec.as_pin_compatible().expect("expected a pin");
+        assert!(pin.exact);
+    }
+
+    #[test]
+    fn test_pin_compatible_own_name_rejected() {
+        // `pin-compatible` resolves against the host environment, which never
+        // contains the package itself; self-pins must use `pin-subpackage`.
+        let rendered = expect_parse_failure(
+            r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-exports.weak]
+        mypkg = { pin-compatible = true }
+        "#,
+        );
+        assert!(
+            rendered.contains("`pin-compatible` cannot reference the package's own name (`mypkg`)"),
+            "unexpected error message: {rendered}"
+        );
+        assert!(
+            rendered.contains("pin-subpackage"),
+            "help should suggest `pin-subpackage` for self-pins: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_pin_subpackage_and_pin_compatible_combination_rejected() {
+        let rendered = expect_parse_failure(
+            r#"
+        name = "mypkg"
+        version = "1.0"
+
+        [build]
+        backend = { name = "bla", version = "1.0" }
+
+        [run-dependencies]
+        mypkg = { pin-subpackage = true, pin-compatible = true }
+        "#,
+        );
+        assert!(
+            rendered.contains("`pin-subpackage` and `pin-compatible` cannot be combined"),
+            "unexpected error message: {rendered}"
+        );
     }
 }

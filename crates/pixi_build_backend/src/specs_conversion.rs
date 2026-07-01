@@ -113,9 +113,9 @@ fn jinja_string_literal(s: &str) -> String {
 }
 
 /// Renders a single bound (`lower_bound`/`upper_bound`) of a [`PinCompatibleSpec`]
-/// as a `pin_subpackage(...)` keyword argument value: a quoted pin expression
-/// (`"x.x.x"`) or a quoted literal version, matching rattler-build's
-/// `Pin`/`pin_subpackage()` Jinja helper signature.
+/// as a `pin_subpackage(...)`/`pin_compatible(...)` keyword argument value: a
+/// quoted pin expression (`"x.x.x"`) or a quoted literal version, matching
+/// rattler-build's `Pin` Jinja helper signature.
 fn pin_bound_arg(bound: &PinBound) -> String {
     match bound {
         PinBound::Expression(expr) => jinja_string_literal(&expr.0),
@@ -123,18 +123,25 @@ fn pin_bound_arg(bound: &PinBound) -> String {
     }
 }
 
-/// Render a [`PackageSpec::PinCompatible`] self-pin as a literal Jinja
-/// `${{ pin_subpackage('<name>', ...) }}` template item, mirroring
-/// `compilers.rs`'s `${{ compiler('<lang>') }}` pattern exactly. The
-/// rendering happens through the *existing* rattler-build-recipe Jinja
-/// `pin_subpackage()` mechanism (the same one `recipe.yaml` authors already
-/// use), so resolution against the current output's own
-/// `(name, version, build_string)` is handled entirely downstream, by code
-/// that is already correct and already tested for the `recipe.yaml` path.
+/// Render a [`PackageSpec::PinCompatible`] as a literal Jinja
+/// `${{ <function>('<name>', ...) }}` template item — `function` is
+/// `"pin_subpackage"` for self-pins or `"pin_compatible"` for pins against a
+/// dependency — mirroring `compilers.rs`'s `${{ compiler('<lang>') }}`
+/// pattern exactly. The rendering happens through the *existing*
+/// rattler-build-recipe Jinja `pin_subpackage()`/`pin_compatible()`
+/// mechanisms (the same ones `recipe.yaml` authors already use), so
+/// resolution against the current output's own `(name, version,
+/// build_string)` — or the host environment's resolved version — is handled
+/// entirely downstream, by code that is already correct and already tested
+/// for the `recipe.yaml` path.
 ///
 /// Boolean casing (`exact=true`, lowercase) is confirmed against the literal
 /// fixture at `tests/recipe/pin-subpackage/recipe.yaml`.
-fn pin_subpackage_item(name: &str, pin: &PinCompatibleSpec) -> Item<SerializableMatchSpec> {
+fn pin_item(
+    function: &str,
+    name: &str,
+    pin: &PinCompatibleSpec,
+) -> miette::Result<Item<SerializableMatchSpec>> {
     let mut args = vec![jinja_string_literal(name)];
     if let Some(lower_bound) = &pin.lower_bound {
         args.push(format!("lower_bound={}", pin_bound_arg(lower_bound)));
@@ -148,22 +155,43 @@ fn pin_subpackage_item(name: &str, pin: &PinCompatibleSpec) -> Item<Serializable
     if let Some(build) = &pin.build {
         args.push(format!("build={}", jinja_string_literal(build)));
     }
-    let template = JinjaTemplate::new(format!("${{{{ pin_subpackage({}) }}}}", args.join(", ")))
-        .expect("valid jinja template");
-    crate::compilers::template_item(template)
+    let template = JinjaTemplate::new(format!("${{{{ {function}({}) }}}}", args.join(", ")))
+        .map_err(|err| {
+            miette::miette!(
+                "failed to render `{function}('{name}', ...)` as a Jinja template: {err:?}"
+            )
+        })?;
+    Ok(crate::compilers::template_item(template))
 }
 
 /// Convert a single `(name, PackageSpec)` pair into an
 /// `Item<SerializableMatchSpec>`. `PinCompatible` specs render as a literal
-/// `pin_subpackage(...)` Jinja template via [`pin_subpackage_item`];
-/// `Binary`/`Source` specs go through the existing concrete
-/// `PackageDependency` conversion.
+/// Jinja template via [`pin_item`]; `Binary`/`Source` specs go through the
+/// existing concrete `PackageDependency` conversion.
+///
+/// `package_name` is the package's own (output) name, used to decide whether
+/// a `PinCompatible` wire spec renders as `pin_subpackage` or
+/// `pin_compatible` (see below).
 fn package_spec_to_item(
     name: &SourcePackageName,
     spec: &PackageSpec,
+    package_name: Option<&str>,
 ) -> miette::Result<Item<SerializableMatchSpec>> {
     match spec {
-        PackageSpec::PinCompatible(pin) => Ok(pin_subpackage_item(name.as_str(), pin)),
+        PackageSpec::PinCompatible(pin) => {
+            // The wire format shares a single variant for both pin forms; the
+            // distinction is recovered by name. Manifest validation guarantees
+            // the bijection: `pin-subpackage` is only ever recorded under the
+            // package's own name and `pin-compatible` never is. When the
+            // package's name is unknown (`None`), default to `pin_compatible`:
+            // `pin_compatible(own-name)` is impossible by construction, and a
+            // self-pin could not be resolved without a known name anyway.
+            let function = match package_name {
+                Some(own_name) if name.as_str().eq_ignore_ascii_case(own_name) => "pin_subpackage",
+                _ => "pin_compatible",
+            };
+            pin_item(function, name.as_str(), pin)
+        }
         _ => {
             let dep = package_spec_to_package_dependency(
                 PackageName::new_unchecked(name.as_str()),
@@ -177,13 +205,15 @@ fn package_spec_to_item(
 /// Convert an ordered map of `(name, PackageSpec)` into `Item`s, preserving
 /// order. Unlike [`package_specs_to_package_dependency`], this handles
 /// `PackageSpec::PinCompatible` by emitting a Jinja template item instead of
-/// erroring.
+/// erroring. `package_name` is the package's own name (see
+/// [`package_spec_to_item`]).
 fn package_specs_to_items(
     specs: &OrderMap<SourcePackageName, PackageSpec>,
+    package_name: Option<&str>,
 ) -> miette::Result<Vec<Item<SerializableMatchSpec>>> {
     specs
         .iter()
-        .map(|(name, spec)| package_spec_to_item(name, spec))
+        .map(|(name, spec)| package_spec_to_item(name, spec, package_name))
         .collect()
 }
 
@@ -218,11 +248,13 @@ struct RunExportItems {
 
 impl RequirementItems {
     /// Add the dependencies of `target`, wrapping each one in `condition` when
-    /// one is given.
+    /// one is given. `package_name` is the package's own name (see
+    /// [`package_spec_to_item`]).
     fn add_target(
         &mut self,
         target: &Target,
         condition: Option<&JinjaExpression>,
+        package_name: Option<&str>,
     ) -> Result<(), SpecItemConversionError> {
         let wrap = |item: Item<SerializableMatchSpec>| -> Item<SerializableMatchSpec> {
             match condition {
@@ -241,7 +273,7 @@ impl RequirementItems {
             SpecItemConversionError,
         > {
             let items = match specs {
-                Some(specs) => package_specs_to_items(specs)?,
+                Some(specs) => package_specs_to_items(specs, package_name)?,
                 None => Vec::new(),
             };
             Ok(items.into_iter().map(wrap).collect::<Vec<_>>())
@@ -257,7 +289,9 @@ impl RequirementItems {
 
         if let Some(target_extras) = &target.extra_dependencies {
             for (group, deps) in target_extras {
-                let items = package_specs_to_items(deps)?.into_iter().map(wrap);
+                let items = package_specs_to_items(deps, package_name)?
+                    .into_iter()
+                    .map(wrap);
                 self.extras
                     .entry(group.to_string())
                     .or_default()
@@ -292,14 +326,19 @@ impl RequirementItems {
     }
 }
 
+/// Convert `targets` into rattler-build `Requirements`. `package_name` is the
+/// package's own (output) name; it decides whether a `PinCompatible` wire spec
+/// renders as `pin_subpackage` (self-pin) or `pin_compatible` (dependency pin)
+/// — see [`package_spec_to_item`].
 pub fn from_targets_v1_to_conditional_requirements(
     targets: &Targets,
+    package_name: Option<&str>,
 ) -> Result<Requirements, SelectorConversionError> {
     let mut items = RequirementItems::default();
 
     // Add default target
     if let Some(default_target) = &targets.default_target {
-        items.add_target(default_target, None)?;
+        items.add_target(default_target, None, package_name)?;
     }
 
     // Add conditional `if(...)` targets. The expression is handed to
@@ -312,7 +351,7 @@ pub fn from_targets_v1_to_conditional_requirements(
                     message,
                 }
             })?;
-            items.add_target(target, Some(&condition))?;
+            items.add_target(target, Some(&condition), package_name)?;
         }
     }
 
@@ -467,7 +506,7 @@ pub(crate) fn package_specs_to_package_dependency(
 /// (used by [`from_targets_v1_to_conditional_requirements`], the actual
 /// manifest -> Jinja-recipe conversion path) does **not** go through this
 /// type for that reason — it calls [`package_specs_to_items`] instead, which
-/// renders `PinCompatible` as a Jinja template item via [`pin_subpackage_item`].
+/// renders `PinCompatible` as a Jinja template item via [`pin_item`].
 /// Prefer that path; this struct exists for callers that only ever see
 /// resolved/concrete specs.
 #[derive(Clone, Default)]
@@ -746,7 +785,7 @@ mod test {
             }),
             conditional: None,
         };
-        let requirements = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let requirements = from_targets_v1_to_conditional_requirements(&targets, None).unwrap();
         let value = serde_json::to_value(&requirements.extras).unwrap();
 
         assert_eq!(
@@ -784,7 +823,7 @@ mod test {
             conditional: Some(conditional),
         };
 
-        let requirements = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let requirements = from_targets_v1_to_conditional_requirements(&targets, None).unwrap();
 
         let value = serde_json::to_string(&requirements.build).unwrap();
         assert!(
@@ -824,7 +863,7 @@ mod test {
             conditional: Some(conditional),
         };
 
-        let result = from_targets_v1_to_conditional_requirements(&targets);
+        let result = from_targets_v1_to_conditional_requirements(&targets, None);
         assert!(
             result.is_err(),
             "a malformed selector expression must return an error, not panic"
@@ -864,7 +903,7 @@ mod test {
             conditional: Some(conditional),
         };
 
-        let requirements = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let requirements = from_targets_v1_to_conditional_requirements(&targets, None).unwrap();
         let test_group = requirements
             .extras
             .get("test")
@@ -967,7 +1006,7 @@ mod test {
             conditional: Some(conditional_map),
         };
 
-        let req = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let req = from_targets_v1_to_conditional_requirements(&targets, None).unwrap();
         assert!(req.build.is_empty());
         assert!(req.host.is_empty());
         assert!(req.run.is_empty());
@@ -1023,10 +1062,25 @@ mod test {
             exact: true,
             build: None,
         };
-        let item = pin_subpackage_item("my-package", &pin);
+        let item = pin_item("pin_subpackage", "my-package", &pin).unwrap();
         assert_eq!(
             item_template_str(&item),
             "${{ pin_subpackage('my-package', exact=true) }}"
+        );
+    }
+
+    #[test]
+    fn test_pin_compatible_item_exact() {
+        let pin = PinCompatibleSpec {
+            lower_bound: None,
+            upper_bound: None,
+            exact: true,
+            build: None,
+        };
+        let item = pin_item("pin_compatible", "numpy", &pin).unwrap();
+        assert_eq!(
+            item_template_str(&item),
+            "${{ pin_compatible('numpy', exact=true) }}"
         );
     }
 
@@ -1042,7 +1096,7 @@ mod test {
             exact: false,
             build: Some("py*".to_string()),
         };
-        let item = pin_subpackage_item("my-package", &pin);
+        let item = pin_item("pin_subpackage", "my-package", &pin).unwrap();
         assert_eq!(
             item_template_str(&item),
             "${{ pin_subpackage('my-package', lower_bound='x.x', upper_bound='x.x.x', build='py*') }}"
@@ -1057,7 +1111,7 @@ mod test {
             exact: false,
             build: None,
         };
-        let item = pin_subpackage_item("my-package", &pin);
+        let item = pin_item("pin_subpackage", "my-package", &pin).unwrap();
         assert_eq!(
             item_template_str(&item),
             "${{ pin_subpackage('my-package', lower_bound='1.2.3') }}"
@@ -1072,7 +1126,7 @@ mod test {
             exact: false,
             build: None,
         };
-        let item = pin_subpackage_item("my-package", &pin);
+        let item = pin_item("pin_subpackage", "my-package", &pin).unwrap();
         assert_eq!(
             item_template_str(&item),
             "${{ pin_subpackage('my-package') }}"
@@ -1092,7 +1146,7 @@ mod test {
             exact: false,
             build: Some("py'3.9".to_string()),
         };
-        let item = pin_subpackage_item("my-package", &pin);
+        let item = pin_item("pin_subpackage", "my-package", &pin).unwrap();
         assert_eq!(
             item_template_str(&item),
             r"${{ pin_subpackage('my-package', build='py\'3.9') }}"
@@ -1101,7 +1155,7 @@ mod test {
 
     /// A package name containing a single quote (defense in depth; package
     /// names are validated elsewhere and shouldn't actually contain one, but
-    /// `pin_subpackage_item` itself must not assume that) must also be
+    /// `pin_item` itself must not assume that) must also be
     /// escaped rather than corrupting the generated template.
     #[test]
     fn test_pin_subpackage_item_escapes_quotes_in_name() {
@@ -1111,7 +1165,7 @@ mod test {
             exact: true,
             build: None,
         };
-        let item = pin_subpackage_item("weird'name", &pin);
+        let item = pin_item("pin_subpackage", "weird'name", &pin).unwrap();
         assert_eq!(
             item_template_str(&item),
             r"${{ pin_subpackage('weird\'name', exact=true) }}"
@@ -1119,8 +1173,9 @@ mod test {
     }
 
     /// A `PackageSpec::PinCompatible` entry in a regular dependency table
-    /// (not just run-exports) must render as a `pin_subpackage(...)` Jinja
-    /// item rather than erroring.
+    /// (not just run-exports) must render as a Jinja item rather than
+    /// erroring; under the package's own name it renders as
+    /// `pin_subpackage(...)`.
     #[test]
     fn test_pin_compatible_in_regular_dependency_table() {
         let mut dependencies = OrderMap::new();
@@ -1142,12 +1197,125 @@ mod test {
             conditional: None,
         };
 
-        let requirements = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let requirements =
+            from_targets_v1_to_conditional_requirements(&targets, Some("my-package")).unwrap();
         assert_eq!(requirements.run.len(), 1);
         let item = requirements.run.iter().next().unwrap();
         assert_eq!(
             item_template_str(item),
             "${{ pin_subpackage('my-package', exact=true) }}"
+        );
+    }
+
+    /// A `PackageSpec::PinCompatible` wire spec under a name *other than* the
+    /// package's own must render as `pin_compatible(...)`: it came from a
+    /// `pin-compatible` manifest entry (manifest validation guarantees
+    /// `pin-subpackage` only ever appears under the own name).
+    #[test]
+    fn test_pin_compatible_non_self_name_renders_pin_compatible() {
+        let mut dependencies = OrderMap::new();
+        dependencies.insert(
+            SourcePackageName::from(PackageName::new_unchecked("numpy")),
+            PackageSpec::PinCompatible(PinCompatibleSpec {
+                lower_bound: Some(PinBound::Expression(pixi_build_types::PinExpression(
+                    "x.x".to_string(),
+                ))),
+                upper_bound: None,
+                exact: false,
+                build: None,
+            }),
+        );
+
+        let targets = Targets {
+            default_target: Some(Target {
+                run_dependencies: Some(dependencies),
+                ..Target::default()
+            }),
+            conditional: None,
+        };
+
+        let requirements =
+            from_targets_v1_to_conditional_requirements(&targets, Some("my-package")).unwrap();
+        assert_eq!(requirements.run.len(), 1);
+        let item = requirements.run.iter().next().unwrap();
+        assert_eq!(
+            item_template_str(item),
+            "${{ pin_compatible('numpy', lower_bound='x.x') }}"
+        );
+    }
+
+    /// The self name must still render as `pin_subpackage(...)` when a
+    /// non-self `pin_compatible` entry sits right next to it.
+    #[test]
+    fn test_self_and_non_self_pins_discriminated_by_name() {
+        let mut dependencies = OrderMap::new();
+        dependencies.insert(
+            SourcePackageName::from(PackageName::new_unchecked("my-package")),
+            PackageSpec::PinCompatible(PinCompatibleSpec {
+                lower_bound: None,
+                upper_bound: None,
+                exact: true,
+                build: None,
+            }),
+        );
+        dependencies.insert(
+            SourcePackageName::from(PackageName::new_unchecked("numpy")),
+            PackageSpec::PinCompatible(PinCompatibleSpec {
+                lower_bound: None,
+                upper_bound: None,
+                exact: true,
+                build: None,
+            }),
+        );
+
+        let targets = Targets {
+            default_target: Some(Target {
+                run_dependencies: Some(dependencies),
+                ..Target::default()
+            }),
+            conditional: None,
+        };
+
+        let requirements =
+            from_targets_v1_to_conditional_requirements(&targets, Some("my-package")).unwrap();
+        let rendered: Vec<String> = requirements.run.iter().map(item_template_str).collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "${{ pin_subpackage('my-package', exact=true) }}".to_string(),
+                "${{ pin_compatible('numpy', exact=true) }}".to_string(),
+            ]
+        );
+    }
+
+    /// When the package's own name is unknown, `PinCompatible` wire specs
+    /// default to `pin_compatible(...)` (the non-self interpretation).
+    #[test]
+    fn test_pin_compatible_without_package_name_defaults_to_pin_compatible() {
+        let mut dependencies = OrderMap::new();
+        dependencies.insert(
+            SourcePackageName::from(PackageName::new_unchecked("numpy")),
+            PackageSpec::PinCompatible(PinCompatibleSpec {
+                lower_bound: None,
+                upper_bound: None,
+                exact: true,
+                build: None,
+            }),
+        );
+
+        let targets = Targets {
+            default_target: Some(Target {
+                run_dependencies: Some(dependencies),
+                ..Target::default()
+            }),
+            conditional: None,
+        };
+
+        let requirements = from_targets_v1_to_conditional_requirements(&targets, None).unwrap();
+        let item = requirements.run.iter().next().unwrap();
+        assert_eq!(
+            item_template_str(item),
+            "${{ pin_compatible('numpy', exact=true) }}"
         );
     }
 
@@ -1188,7 +1356,8 @@ mod test {
             conditional: None,
         };
 
-        let requirements = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let requirements =
+            from_targets_v1_to_conditional_requirements(&targets, Some("my-package")).unwrap();
         assert_eq!(requirements.run_exports.weak.len(), 1);
         let weak_item = requirements.run_exports.weak.iter().next().unwrap();
         assert_eq!(
@@ -1234,7 +1403,7 @@ mod test {
             conditional: None,
         };
 
-        let requirements = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let requirements = from_targets_v1_to_conditional_requirements(&targets, None).unwrap();
         let weak_items: Vec<_> = requirements.run_exports.weak.iter().collect();
         assert_eq!(
             weak_items.len(),
