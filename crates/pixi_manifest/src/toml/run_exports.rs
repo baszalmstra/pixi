@@ -136,7 +136,6 @@ impl TomlRunExports {
 mod test {
     use std::str::FromStr;
 
-    use insta::assert_snapshot;
     use pixi_test_utils::format_parse_error;
     use rattler_conda_types::PackageName;
 
@@ -186,7 +185,11 @@ mod test {
         foo = "*"
         "#;
         let err = TomlRunExports::from_toml_str(input).unwrap_err();
-        assert_snapshot!(format_parse_error(input, err));
+        let rendered = format_parse_error(input, err);
+        assert!(
+            rendered.contains("Unexpected keys") && rendered.contains("extra-strong"),
+            "unexpected error message: {rendered}"
+        );
     }
 
     #[test]

@@ -18,8 +18,8 @@ pub use input_glob_set::InputGlobSet;
 pub use project_model::{
     BinaryPackageSpec, ConditionalExpression, ConstraintSpec, GitReference, GitSpec, NamedSpec,
     PackageSpec, PathSpec, PinBound, PinCompatibleSpec, PinExpression, ProjectModel,
-    SourcePackageLocationSpec, SourcePackageName, SourcePackageSpec, Target, TargetSelector,
-    Targets, UrlSpec,
+    RunExportsTarget, SourcePackageLocationSpec, SourcePackageName, SourcePackageSpec, Target,
+    TargetSelector, Targets, UrlSpec,
 };
 use rattler_conda_types::{
     GenericVirtualPackage, PackageName, Platform, Version, VersionSpec,

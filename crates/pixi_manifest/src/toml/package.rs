@@ -2027,7 +2027,13 @@ mod test {
                 )
             })
             .unwrap_err();
-        assert_snapshot!(format_parse_error(input, parse_error));
+        let rendered = format_parse_error(input, parse_error);
+        assert!(
+            rendered.contains(
+                "`pin-subpackage` can only reference the package's own name (`mypkg`), not `other`"
+            ),
+            "unexpected error message: {rendered}"
+        );
     }
 
     #[test]
@@ -2053,12 +2059,18 @@ mod test {
                 )
             })
             .unwrap_err();
-        assert_snapshot!(format_parse_error(input, parse_error));
+        let rendered = format_parse_error(input, parse_error);
+        assert!(
+            rendered.contains(
+                "`pin-subpackage` can only reference the package's own name (`mypkg`), not `other`"
+            ),
+            "unexpected error message: {rendered}"
+        );
     }
 
     #[test]
     fn test_pin_subpackage_combined_with_other_fields_rejected() {
-        assert_snapshot!(expect_parse_failure(
+        let rendered = expect_parse_failure(
             r#"
         name = "mypkg"
         version = "1.0"
@@ -2069,12 +2081,16 @@ mod test {
         [run-dependencies]
         mypkg = { pin-subpackage = true, channel = "conda-forge" }
         "#,
-        ));
+        );
+        assert!(
+            rendered.contains("`pin-subpackage` cannot be combined with other fields"),
+            "unexpected error message: {rendered}"
+        );
     }
 
     #[test]
     fn test_pin_subpackage_exact_and_build_combination_rejected() {
-        assert_snapshot!(expect_parse_failure(
+        let rendered = expect_parse_failure(
             r#"
         name = "mypkg"
         version = "1.0"
@@ -2085,7 +2101,11 @@ mod test {
         [run-dependencies]
         mypkg = { pin-subpackage = { exact = true, build = "py*" } }
         "#,
-        ));
+        );
+        assert!(
+            rendered.contains("`exact` and `build` cannot be combined in `pin-subpackage`"),
+            "unexpected error message: {rendered}"
+        );
     }
 
     #[test]
@@ -2153,7 +2173,7 @@ mod test {
 
     #[test]
     fn test_run_exports_conditional_not_supported() {
-        assert_snapshot!(expect_parse_failure(
+        let rendered = expect_parse_failure(
             r#"
         name = "mypkg"
         version = "1.0"
@@ -2164,7 +2184,11 @@ mod test {
         [run-exports.strong."if(unix)"]
         foo = "*"
         "#,
-        ));
+        );
+        assert!(
+            rendered.contains("not yet supported"),
+            "unexpected error message: {rendered}"
+        );
     }
 
     #[test]

@@ -1210,4 +1210,66 @@ mod test {
         assert!(requirements.run_exports.strong_constraints.is_empty());
         assert!(requirements.run_exports.weak_constraints.is_empty());
     }
+
+    #[test]
+    fn test_targets_v1_run_exports_with_source_dependency() {
+        use pixi_build_types::PathSpec;
+
+        let mut weak = OrderMap::new();
+        weak.insert(
+            SourcePackageName::from(PackageName::new_unchecked("sibling-package")),
+            PackageSpec::Source(SourcePackageSpec::from(PathSpec {
+                path: "../sibling-package".to_string(),
+            })),
+        );
+
+        let targets = Targets {
+            default_target: Some(Target {
+                run_exports: Some(pixi_build_types::RunExportsTarget {
+                    weak: Some(weak),
+                    ..Default::default()
+                }),
+                ..Target::default()
+            }),
+            conditional: None,
+        };
+
+        let requirements = from_targets_v1_to_conditional_requirements(&targets).unwrap();
+        let weak_items: Vec<_> = requirements.run_exports.weak.iter().collect();
+        assert_eq!(
+            weak_items.len(),
+            1,
+            "default-target source run-export should produce exactly one item"
+        );
+        let concrete = weak_items[0]
+            .as_value()
+            .expect("default-target run-export should be a bare value")
+            .as_concrete()
+            .expect("expected a concrete match spec");
+        let match_spec = &concrete.0;
+        assert_eq!(
+            match_spec
+                .name
+                .as_exact()
+                .expect("name should be exact")
+                .as_normalized(),
+            "sibling-package",
+        );
+        let url = match_spec
+            .url
+            .as_ref()
+            .expect("source run-export must serialize with a source URL");
+        assert_eq!(url.scheme(), "source");
+        let path_pair = url
+            .query_pairs()
+            .find(|(k, _)| k == "path")
+            .expect("source URL must encode the path");
+        assert_eq!(path_pair.1, "../sibling-package");
+
+        // Other kinds must remain empty.
+        assert_eq!(requirements.run_exports.strong.iter().count(), 0);
+        assert!(requirements.run_exports.noarch.is_empty());
+        assert!(requirements.run_exports.strong_constraints.is_empty());
+        assert!(requirements.run_exports.weak_constraints.is_empty());
+    }
 }
