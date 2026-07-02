@@ -148,14 +148,23 @@ impl FreshnessStore {
             .map_err(|err| FreshnessStoreError::io("locking marker file", &path, err.error))?;
 
         // Read the contents while holding the shared lock, then release it
-        // immediately; parsing does not need the lock.
-        let mut contents = String::new();
+        // immediately; parsing does not need the lock. Read raw bytes, not a
+        // string: a torn write can leave invalid UTF-8, which is corruption
+        // like any other and must degrade to `None`, not an error.
+        let mut contents = Vec::new();
         locked_file
-            .read_to_string(&mut contents)
+            .read_to_end(&mut contents)
             .await
             .map_err(|err| FreshnessStoreError::io("reading marker file", &path, err))?;
         drop(locked_file);
 
+        let Ok(contents) = String::from_utf8(contents) else {
+            tracing::debug!(
+                "marker file '{}' contains invalid UTF-8; treating as absent",
+                path.display()
+            );
+            return Ok(None);
+        };
         Ok(parse_entry(&contents, &path))
     }
 
@@ -197,7 +206,11 @@ impl FreshnessStore {
         // schema version and the optimistic version counter.
         let mut entry = entry;
         entry.schema_version = SCHEMA_VERSION;
-        entry.version = expected_version + 1;
+        // A version at u64::MAX can only come from a corrupted or tampered
+        // marker echoed back through `read`. Wrap to 1 — never 0, the
+        // never-written sentinel — so the counter is repaired like any other
+        // corruption instead of overflowing.
+        entry.version = expected_version.checked_add(1).unwrap_or(1);
         let bytes = serde_json::to_vec(&entry).map_err(|err| FreshnessStoreError::Serialize {
             path: path.clone(),
             source: err,
@@ -225,12 +238,24 @@ impl FreshnessStore {
             .await
             .map_err(|err| FreshnessStoreError::io("locking marker file", &path, err.error))?;
 
-        // Re-read under the exclusive lock to detect concurrent writers.
-        let mut current_contents = String::new();
+        // Re-read under the exclusive lock to detect concurrent writers. Raw
+        // bytes, not a string: invalid UTF-8 (a torn write) is corruption and
+        // must be treated as absent so this write repairs it — erroring here
+        // would poison the key permanently, since the repair path IS this
+        // write.
+        let mut current_bytes = Vec::new();
         locked_file
-            .read_to_string(&mut current_contents)
+            .read_to_end(&mut current_bytes)
             .await
             .map_err(|err| FreshnessStoreError::io("reading marker file", &path, err))?;
+        let current_len = current_bytes.len();
+        let current_contents = String::from_utf8(current_bytes).unwrap_or_else(|_| {
+            tracing::debug!(
+                "marker file '{}' contains invalid UTF-8; treating as absent",
+                path.display()
+            );
+            String::new()
+        });
 
         // If a valid entry exists and was written since the caller's read,
         // report the conflict. An empty, unparseable, or schema-incompatible
@@ -253,11 +278,16 @@ impl FreshnessStore {
             .write_all(&bytes)
             .await
             .map_err(|err| FreshnessStoreError::io("writing marker file", &path, err))?;
-        locked_file
-            .inner_mut()
-            .set_len(bytes.len() as u64)
-            .await
-            .map_err(|err| FreshnessStoreError::io("truncating marker file", &path, err))?;
+        // Truncation only changes anything when the rewrite shrank the file.
+        // Compare against the raw on-disk length: invalid-UTF-8 garbage maps
+        // to an empty `current_contents`, but its bytes still occupy the file.
+        if bytes.len() < current_len {
+            locked_file
+                .inner_mut()
+                .set_len(bytes.len() as u64)
+                .await
+                .map_err(|err| FreshnessStoreError::io("truncating marker file", &path, err))?;
+        }
         locked_file
             .flush()
             .await
@@ -408,7 +438,7 @@ pub enum FreshnessStoreError {
     #[error("an IO error occurred while {operation} '{}'", path.display())]
     Io {
         /// The operation that failed, e.g. "opening marker file".
-        operation: String,
+        operation: &'static str,
         /// The path that was being accessed.
         path: PathBuf,
         /// The underlying I/O error.
@@ -432,9 +462,9 @@ pub enum FreshnessStoreError {
 impl FreshnessStoreError {
     /// Wraps an I/O error with the operation that failed and the path that
     /// was being accessed.
-    fn io(operation: &str, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+    fn io(operation: &'static str, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
-            operation: operation.to_string(),
+            operation,
             path: path.into(),
             source,
         }
@@ -491,6 +521,66 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn non_utf8_garbage_reads_as_none_and_is_repaired_by_write() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+
+        // A torn write or disk-level corruption can leave arbitrary bytes.
+        let path = store.entry_path("key");
+        fs_err::create_dir_all(path.parent().unwrap()).unwrap();
+        fs_err::write(&path, [0xFF, 0xFE, 0x80, 0x00, 0xC3]).unwrap();
+
+        // The documented contract: damaged contents degrade to `None`,
+        // never to an error.
+        assert!(store.read::<Marker>("key").await.unwrap().is_none());
+
+        // And the next write repairs the marker rather than erroring, even
+        // when the replacement is shorter than the garbage it overwrites.
+        let result = store
+            .try_write("key", VersionedEntry::new(marker("a", 1)), 0)
+            .await
+            .unwrap();
+        assert!(matches!(result, WriteResult::Written));
+        let repaired = store.read::<Marker>("key").await.unwrap().unwrap();
+        assert_eq!(repaired.payload(), &marker("a", 1));
+    }
+
+    #[tokio::test]
+    async fn version_at_u64_max_wraps_to_one_instead_of_panicking() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+
+        // Seed a valid entry, then tamper the on-disk version up to u64::MAX
+        // the same way external corruption or hand-editing would.
+        let seeded = store
+            .try_write("key", VersionedEntry::new(marker("a", 1)), 0)
+            .await
+            .unwrap();
+        assert!(matches!(seeded, WriteResult::Written));
+        let path = store.entry_path("key");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&fs_err::read_to_string(&path).unwrap()).unwrap();
+        raw["version"] = serde_json::Value::from(u64::MAX);
+        fs_err::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+        // The caller observes the poisoned version and echoes it back, as the
+        // optimistic-concurrency contract prescribes.
+        let observed = store.read::<Marker>("key").await.unwrap().unwrap();
+        assert_eq!(observed.version(), u64::MAX);
+
+        // Writing must not overflow: the counter is repaired by wrapping to 1,
+        // never to 0, which `read` treats as the never-written sentinel.
+        let result = store
+            .try_write("key", VersionedEntry::new(marker("b", 2)), u64::MAX)
+            .await
+            .unwrap();
+        assert!(matches!(result, WriteResult::Written));
+        let repaired = store.read::<Marker>("key").await.unwrap().unwrap();
+        assert_eq!(repaired.version(), 1);
+        assert_eq!(repaired.payload(), &marker("b", 2));
     }
 
     #[tokio::test]
