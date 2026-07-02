@@ -120,6 +120,18 @@ impl<'p> Environment<'p> {
         }
     }
 
+    /// The [`LockedEnvironmentHash`](crate::environment::LockedEnvironmentHash)
+    /// recorded in this environment's `conda-meta/pixi` marker file by the
+    /// last prefix install/validation: a digest of every locked package
+    /// (conda *and* pypi) the prefix was installed from. `None` when the
+    /// environment isn't installed yet or the marker is unreadable.
+    pub fn installed_lock_file_hash(&self) -> Option<crate::environment::LockedEnvironmentHash> {
+        match crate::environment::read_environment_file(&self.dir()) {
+            Ok(Some(file)) => Some(file.environment_lock_file_hash),
+            _ => None,
+        }
+    }
+
     /// The name of the workspace platform this environment was last installed
     /// for, recovered by matching the resolved platform in `conda-meta/pixi`
     /// (subdir + virtual packages) against the declared platforms. Lets `pixi

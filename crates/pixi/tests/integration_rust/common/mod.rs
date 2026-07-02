@@ -676,8 +676,7 @@ impl PixiControl {
                         )
                         .await?;
                     let env =
-                        get_task_env(&task.run_environment, args.clean_env, None, false, false)
-                            .await?;
+                        get_task_env(&task.run_environment, args.clean_env, false, false).await?;
                     task_env.insert(env)
                 }
                 Some(task_env) => task_env,

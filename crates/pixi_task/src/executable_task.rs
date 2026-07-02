@@ -24,7 +24,6 @@ use pixi_manifest::{
     task::{ArgValues, TaskRenderContext, TemplateStringError},
 };
 use pixi_progress::await_in_progress;
-use rattler_lock::LockFile;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 
@@ -303,29 +302,43 @@ impl<'p> ExecutableTask<'p> {
 
     /// Compute the post-run task hash by updating inputs and outputs.
     /// This does not emit any warnings; it only reflects the current filesystem state.
+    ///
+    /// The environment components of the key are always re-derived from the
+    /// current on-disk markers: `previous_hash` may have been computed
+    /// before an install that changed them.
+    ///
+    /// Returns `Ok(None)` when the environment has no completed-install
+    /// fingerprint marker (e.g. `--no-install` runs before any install):
+    /// no cache key can be derived, so nothing will be saved. In that case
+    /// the caller also gets no hash to feed
+    /// [`Self::warn_on_missing_globs`], so missing-glob warnings are
+    /// skipped on such runs.
     pub async fn compute_post_run_hash(
         &self,
-        lock_file: &LockFile,
         previous_hash: Option<TaskHash>,
     ) -> Result<Option<TaskHash>, InputHashesError> {
-        // Start from provided hash if available, otherwise from current task state.
-        // If neither is available, create a minimal hash so we can report warnings
-        // and make a consistent caching decision.
-        let mut hash = if let Some(hash) = previous_hash {
-            hash
-        } else if let Some(hash) = TaskHash::from_task(self, lock_file).await? {
-            hash
-        } else {
-            TaskHash {
+        let Some((environment, locked_environment)) = TaskHash::environment_hashes(self) else {
+            // No install fingerprint: task caching is disengaged.
+            return Ok(None);
+        };
+
+        // Start from the hash `can_skip` computed if available, otherwise
+        // from a minimal hash, so we can report warnings and make a
+        // consistent caching decision. Inputs and outputs are refreshed
+        // from the post-run filesystem below either way.
+        let mut hash = match previous_hash {
+            Some(mut hash) => {
+                hash.environment = environment;
+                hash.locked_environment = locked_environment;
+                hash
+            }
+            None => TaskHash {
                 command: self.full_command().ok().flatten(),
                 inputs: None,
                 outputs: None,
-                environment: pixi_core::environment::EnvironmentHash::from_environment(
-                    &self.run_environment,
-                    &std::collections::HashMap::new(),
-                    lock_file,
-                ),
-            }
+                environment,
+                locked_environment,
+            },
         };
 
         // Update inputs/outputs based on the current filesystem
@@ -398,7 +411,10 @@ impl<'p> ExecutableTask<'p> {
     /// `CanSkip::No` and includes the hash of the task that caused the task
     /// to not be skipped - we can use this later to update the cache file
     /// quickly.
-    pub async fn can_skip(&self, lock_file: &LockFile) -> Result<CanSkip, std::io::Error> {
+    ///
+    /// Without a completed-install fingerprint marker for the environment no
+    /// task hash can be derived, so the task is never skipped.
+    pub async fn can_skip(&self) -> Result<CanSkip, std::io::Error> {
         tracing::info!("Checking if task can be skipped");
         let args_hash = TaskHash::task_args_hash(self).unwrap_or_default();
         let cache_name = self.cache_name(args_hash);
@@ -406,7 +422,7 @@ impl<'p> ExecutableTask<'p> {
         if cache_file.exists() {
             let cache = tokio_fs::read_to_string(&cache_file).await?;
             let cache: TaskCache = serde_json::from_str(&cache)?;
-            let hash = TaskHash::from_task(self, lock_file).await;
+            let hash = TaskHash::from_task(self).await;
             if let Ok(Some(hash)) = hash {
                 if hash.computation_hash() != cache.hash {
                     return Ok(CanSkip::No(Some(hash)));
@@ -532,7 +548,6 @@ fn get_export_specific_task_env(
 pub async fn get_task_env(
     environment: &Environment<'_>,
     clean_env: bool,
-    lock_file: Option<&LockFile>,
     force_activate: bool,
     experimental_cache: bool,
 ) -> miette::Result<HashMap<String, String>> {
@@ -547,7 +562,6 @@ pub async fn get_task_env(
             environment.workspace().env_vars(),
             environment,
             env_var_behavior,
-            lock_file,
             force_activate,
             experimental_cache,
         )
@@ -881,7 +895,7 @@ exit 0
         .unwrap();
 
         let environment = workspace.default_environment();
-        let env = get_task_env(&environment, false, None, false, false)
+        let env = get_task_env(&environment, false, false, false)
             .await
             .unwrap();
         assert_eq!(
@@ -891,5 +905,185 @@ exit 0
                 .to_string_lossy()
                 .to_string()
         );
+    }
+
+    /// Write a completed-install fingerprint marker for `env_dir` via the
+    /// install lock, the way a finished install does, so fingerprint-keyed
+    /// caching engages. `fp` must be 16 hex chars (the on-disk width).
+    async fn write_fingerprint(env_dir: &Path, fp: &str) {
+        pixi_utils::EnvironmentLock::acquire(env_dir)
+            .await
+            .unwrap()
+            .finish(&pixi_utils::EnvironmentFingerprint::from_string(
+                fp.to_string(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    /// Build a workspace rooted in `dir` whose `test` task declares an input
+    /// glob, plus the matching input file, so [`TaskHash::from_task`]
+    /// produces input hashes and the task cache participates.
+    fn cacheable_task_workspace(dir: &Path) -> Workspace {
+        fs_err::write(dir.join("input.txt"), "input-contents").unwrap();
+        let manifest = format!(
+            "{PROJECT_BOILERPLATE}\n[tasks]\ntest = {{ cmd = \"echo hi\", inputs = [\"input.txt\"] }}\n"
+        );
+        Workspace::from_str(dir.join("pixi.toml").as_path(), &manifest).unwrap()
+    }
+
+    /// The task hash is keyed on the prefix's install fingerprint: stable
+    /// while the fingerprint is unchanged, different once a re-install
+    /// records different content.
+    #[tokio::test]
+    async fn test_task_hash_keyed_on_install_fingerprint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = cacheable_task_workspace(temp_dir.path());
+        let task = task_from_snippet(&workspace, "test");
+        let env_dir = workspace.default_environment().dir();
+
+        write_fingerprint(&env_dir, "000000000000000a").await;
+        let hash_a = TaskHash::from_task(&task)
+            .await
+            .unwrap()
+            .expect("inputs are declared, so a hash must be computed")
+            .computation_hash();
+
+        // Recomputing under the same fingerprint gives the same key.
+        let hash_a2 = TaskHash::from_task(&task)
+            .await
+            .unwrap()
+            .unwrap()
+            .computation_hash();
+        assert_eq!(hash_a, hash_a2);
+
+        // A re-install with different content changes the key.
+        write_fingerprint(&env_dir, "000000000000000b").await;
+        let hash_b = TaskHash::from_task(&task)
+            .await
+            .unwrap()
+            .unwrap()
+            .computation_hash();
+        assert_ne!(
+            hash_a, hash_b,
+            "the task hash must change when the installed fingerprint changes"
+        );
+    }
+
+    /// Write a minimal `conda-meta/pixi` environment file recording
+    /// `lock_hash` as the locked-environment digest, mirroring what a
+    /// prefix install persists.
+    fn write_environment_file(env_dir: &Path, lock_hash: &str) {
+        let conda_meta = env_dir.join(pixi_consts::consts::CONDA_META_DIR);
+        fs_err::create_dir_all(&conda_meta).unwrap();
+        fs_err::write(
+            conda_meta.join(pixi_consts::consts::ENVIRONMENT_FILE_NAME),
+            format!(
+                r#"{{"manifest_path":"pixi.toml","environment_name":"default","pixi_version":"0.0.0","environment_lock_file_hash":"{lock_hash}"}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The task hash also folds the locked-environment digest recorded in
+    /// `conda-meta/pixi`: it covers pypi packages, which the conda install
+    /// fingerprint cannot see, so a pypi-only change must still invalidate
+    /// the task cache.
+    #[tokio::test]
+    async fn test_task_hash_keyed_on_installed_lock_hash() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = cacheable_task_workspace(temp_dir.path());
+        let task = task_from_snippet(&workspace, "test");
+        let env_dir = workspace.default_environment().dir();
+
+        write_fingerprint(&env_dir, "000000000000000a").await;
+        let hash_without_marker = TaskHash::from_task(&task)
+            .await
+            .unwrap()
+            .unwrap()
+            .computation_hash();
+
+        // Recording an environment file (as a prefix install does) changes
+        // the key...
+        write_environment_file(&env_dir, "lock-hash-1");
+        let hash_a = TaskHash::from_task(&task)
+            .await
+            .unwrap()
+            .unwrap()
+            .computation_hash();
+        assert_ne!(hash_without_marker, hash_a);
+
+        // ...and a different locked-environment digest under the same
+        // install fingerprint (a pypi bump leaves the conda fingerprint
+        // unchanged) changes it again.
+        write_environment_file(&env_dir, "lock-hash-2");
+        let hash_b = TaskHash::from_task(&task)
+            .await
+            .unwrap()
+            .unwrap()
+            .computation_hash();
+        assert_ne!(
+            hash_a, hash_b,
+            "the task hash must change when the installed locked-environment digest changes"
+        );
+    }
+
+    /// Without a completed-install fingerprint marker (e.g. `--no-install`
+    /// before any install, or an interrupted install) task caching
+    /// disengages: no hash is computed, nothing is saved, nothing skips.
+    #[tokio::test]
+    async fn test_task_cache_disengages_without_fingerprint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = cacheable_task_workspace(temp_dir.path());
+        let task = task_from_snippet(&workspace, "test");
+
+        // No marker was ever written: no key can be computed...
+        assert!(
+            TaskHash::from_task(&task).await.unwrap().is_none(),
+            "no task hash may be derived without an install fingerprint"
+        );
+        // ...so a run saves nothing...
+        assert!(
+            task.compute_post_run_hash(None).await.unwrap().is_none(),
+            "no post-run hash may be saved without an install fingerprint"
+        );
+        // ...and the task is never skipped.
+        assert!(matches!(task.can_skip().await.unwrap(), CanSkip::No(None)));
+    }
+
+    /// End-to-end cache round-trip: a saved entry skips while the
+    /// fingerprint is unchanged, misses after a re-install records a new
+    /// fingerprint, and disengages when the marker disappears.
+    #[tokio::test]
+    async fn test_task_cache_follows_install_fingerprint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = cacheable_task_workspace(temp_dir.path());
+        let task = task_from_snippet(&workspace, "test");
+        let env_dir = workspace.default_environment().dir();
+
+        write_fingerprint(&env_dir, "000000000000000a").await;
+
+        // Nothing cached yet.
+        assert!(matches!(task.can_skip().await.unwrap(), CanSkip::No(_)));
+
+        // Simulate a successful run: compute and persist the cache entry.
+        let post_hash = task.compute_post_run_hash(None).await.unwrap();
+        assert!(post_hash.is_some());
+        task.save_cache(post_hash).await.unwrap();
+
+        // Unchanged fingerprint and inputs: the task can be skipped.
+        assert!(matches!(task.can_skip().await.unwrap(), CanSkip::Yes));
+
+        // A re-install with different content invalidates the entry.
+        write_fingerprint(&env_dir, "000000000000000b").await;
+        assert!(
+            matches!(task.can_skip().await.unwrap(), CanSkip::No(Some(_))),
+            "a changed install fingerprint must invalidate the cached entry"
+        );
+
+        // A missing marker (interrupted install) disengages caching even
+        // though a cache file exists on disk.
+        fs_err::remove_dir_all(env_dir.join("conda-meta")).unwrap();
+        assert!(matches!(task.can_skip().await.unwrap(), CanSkip::No(None)));
     }
 }

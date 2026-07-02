@@ -543,27 +543,27 @@ mod tests {
         }
     }
 
-    /// Lock-fallback classification: a machine matching no declared platform
-    /// runs the environment "by accident" when the lock-resolved minimum is
-    /// satisfied, and not at all when it isn't.
-    #[test]
-    fn classify_runnability_falls_back_to_lock_minimum() {
-        let current = Platform::current();
-        let manifest = format!(
+    /// A manifest declaring a single `gpu` platform (current subdir,
+    /// `__cuda = 99`) that no test machine satisfies, so classification
+    /// cannot succeed via a declared platform.
+    fn cuda_manifest(current: Platform) -> String {
+        format!(
             r#"
             [workspace]
             name = "demo"
             channels = []
             platforms = [{{ name = "gpu", platform = "{current}", cuda = "99" }}]
             "#
-        );
-        let workspace =
-            crate::Workspace::from_str(std::path::Path::new("pixi.toml"), &manifest).unwrap();
-        let environment = workspace.default_environment();
+        )
+    }
 
-        let lock = |depends: &str| {
-            let source = format!(
-                r#"version: 7
+    /// A minimal lock file for the [`cuda_manifest`] workspace: a single
+    /// `gpu` platform resolving one binary package with the given extra
+    /// `depends` block (one YAML line per dependency, e.g. a `__cuda`
+    /// requirement no machine provides).
+    fn cuda_lock(current: Platform, depends: &str) -> rattler_lock::LockFile {
+        let source = format!(
+            r#"version: 7
 platforms:
 - name: gpu
   subdir: {current}
@@ -579,9 +579,20 @@ environments:
 packages:
 - conda: https://conda.anaconda.org/conda-forge/{current}/foo-1.0-h0.conda
 {depends}"#
-            );
-            rattler_lock::LockFile::from_str_with_base_directory(&source, None).unwrap()
-        };
+        );
+        rattler_lock::LockFile::from_str_with_base_directory(&source, None).unwrap()
+    }
+
+    /// Lock-fallback classification: a machine matching no declared platform
+    /// runs the environment "by accident" when the lock-resolved minimum is
+    /// satisfied, and not at all when it isn't.
+    #[test]
+    fn classify_runnability_falls_back_to_lock_minimum() {
+        let current = Platform::current();
+        let manifest = cuda_manifest(current);
+        let workspace =
+            crate::Workspace::from_str(std::path::Path::new("pixi.toml"), &manifest).unwrap();
+        let environment = workspace.default_environment();
 
         // No lock file: nothing to fall back on.
         assert_eq!(
@@ -590,21 +601,80 @@ packages:
         );
         // The resolved package needs no virtual packages: runs by accident.
         assert_eq!(
-            classify_environment_runnability(&environment, Some(&lock(""))),
+            classify_environment_runnability(&environment, Some(&cuda_lock(current, ""))),
             EnvironmentRunnability::ByAccident,
         );
         // The resolved package needs a `__cuda` no machine provides.
         assert_eq!(
             classify_environment_runnability(
                 &environment,
-                Some(&lock("  depends:\n  - __cuda >=9999\n")),
+                Some(&cuda_lock(current, "  depends:\n  - __cuda >=9999\n")),
             ),
             EnvironmentRunnability::Unsupported,
         );
     }
 
+    /// Marker-first classification: once `conda-meta/pixi` records the
+    /// installed platforms, the verdict comes from the marker alone and the
+    /// lock file no longer participates -- so callers on the hot path may
+    /// classify with `None` and only fall back to the lock when that answers
+    /// `Unsupported` (the no-marker case pinned by
+    /// [`classify_runnability_falls_back_to_lock_minimum`]).
+    #[test]
+    fn classify_runnability_prefers_marker_over_lock() {
+        let current = Platform::current();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manifest = cuda_manifest(current);
+        let workspace =
+            crate::Workspace::from_str(temp_dir.path().join("pixi.toml").as_path(), &manifest)
+                .unwrap();
+        let environment = workspace.default_environment();
+
+        // A lock whose resolved packages need a `__cuda` no machine provides,
+        // so the lock fallback alone would answer `Unsupported`.
+        let hostile_lock = cuda_lock(current, "  depends:\n  - __cuda >=9999\n");
+
+        // Sanity: without a marker the lock decides.
+        assert_eq!(
+            classify_environment_runnability(&environment, None),
+            EnvironmentRunnability::Unsupported,
+        );
+        assert_eq!(
+            classify_environment_runnability(&environment, Some(&hostile_lock)),
+            EnvironmentRunnability::Unsupported,
+        );
+
+        // Record the installed-platforms marker the way an install does:
+        // resolved for the bare current subdir with no virtual packages.
+        crate::environment::write_environment_file(
+            &environment.dir(),
+            crate::environment::EnvironmentFile {
+                manifest_path: temp_dir.path().join("pixi.toml"),
+                environment_name: environment.name().to_string(),
+                pixi_version: "0.0.0-test".to_string(),
+                environment_lock_file_hash: crate::environment::LockedEnvironmentHash::invalid(),
+                resolved_platform: Some(platform_data(current, vec![])),
+                minimum_supported_platform: Some(platform_data(current, vec![])),
+            },
+        )
+        .unwrap();
+
+        // Marker present: identical verdicts with and without a lock, even
+        // one whose minimum this machine could never satisfy.
+        assert_eq!(
+            classify_environment_runnability(&environment, None),
+            EnvironmentRunnability::ByDesign,
+        );
+        assert_eq!(
+            classify_environment_runnability(&environment, Some(&hostile_lock)),
+            EnvironmentRunnability::ByDesign,
+        );
+    }
+
     /// A machine-compatible declared platform classifies as "by design"
-    /// without consulting any lock file.
+    /// without consulting any lock file — even a hostile one, which pins
+    /// that the lock can only ever upgrade an `Unsupported` verdict (the
+    /// invariant `pixi run`'s marker-first guard relies on).
     #[test]
     fn classify_runnability_by_design_via_declared_platform() {
         let current = Platform::current();
@@ -620,6 +690,13 @@ packages:
             crate::Workspace::from_str(std::path::Path::new("pixi.toml"), &manifest).unwrap();
         assert_eq!(
             classify_environment_runnability(&workspace.default_environment(), None),
+            EnvironmentRunnability::ByDesign,
+        );
+        assert_eq!(
+            classify_environment_runnability(
+                &workspace.default_environment(),
+                Some(&cuda_lock(current, "  depends:\n  - __cuda >=9999\n")),
+            ),
             EnvironmentRunnability::ByDesign,
         );
     }

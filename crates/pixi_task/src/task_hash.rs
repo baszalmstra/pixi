@@ -1,7 +1,6 @@
 use miette::Diagnostic;
-use pixi_core::environment::EnvironmentHash;
+use pixi_core::environment::{EnvironmentHash, LockedEnvironmentHash};
 use pixi_manifest::task::TemplateStringError;
-use rattler_lock::LockFile;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -65,7 +64,15 @@ pub struct TaskCache {
 /// with the [`TaskHash::computation_hash`] method.
 #[derive(Debug)]
 pub struct TaskHash {
+    /// Key over the prefix's installed conda content and the activation
+    /// inputs, see [`TaskHash::environment_hashes`].
     pub environment: EnvironmentHash,
+    /// Digest of the locked packages (conda *and* pypi) the prefix was last
+    /// installed from, read from the `conda-meta/pixi` marker. Covers what
+    /// the conda install fingerprint cannot see: pypi packages leave no
+    /// trace there, but their locked URLs are folded into this digest at
+    /// install time. `None` when the marker was never recorded.
+    pub locked_environment: Option<LockedEnvironmentHash>,
     pub command: Option<String>,
     pub inputs: Option<InputHashes>,
     pub outputs: Option<OutputHashes>,
@@ -73,10 +80,20 @@ pub struct TaskHash {
 
 impl TaskHash {
     /// Constructs an instance from an executable task.
-    pub async fn from_task(
-        task: &ExecutableTask<'_>,
-        lock_file: &LockFile,
-    ) -> Result<Option<Self>, InputHashesError> {
+    ///
+    /// Returns `Ok(None)` when no cache key can be derived because the
+    /// environment has no completed-install fingerprint (see
+    /// [`Self::environment_hashes`]), or when the task declares no inputs
+    /// or outputs (there is nothing to cache) — in both cases task caching
+    /// disengages.
+    pub async fn from_task(task: &ExecutableTask<'_>) -> Result<Option<Self>, InputHashesError> {
+        // Probe the cheap marker-derived key components first: without them
+        // there is no cache key, so skip the (potentially expensive) file
+        // hashing entirely.
+        let Some((environment, locked_environment)) = Self::environment_hashes(task) else {
+            return Ok(None);
+        };
+
         let input_hashes = InputHashes::from_task(task).await?;
         let output_hashes = OutputHashes::from_task(task).await?;
 
@@ -88,13 +105,38 @@ impl TaskHash {
             command: task.full_command().ok().flatten(),
             outputs: output_hashes,
             inputs: input_hashes,
-            // Skipping environment variables used for caching the task
-            environment: EnvironmentHash::from_environment(
-                &task.run_environment,
-                &HashMap::new(),
-                lock_file,
-            ),
+            environment,
+            locked_environment,
         }))
+    }
+
+    /// The environment-derived components of the task-cache key, read from
+    /// the markers a completed install leaves next to the prefix (no lock
+    /// file needed):
+    ///
+    /// - an [`EnvironmentHash`] keyed on the install fingerprint
+    ///   ([`pixi_utils::EnvironmentFingerprint`]), which follows the
+    ///   *installed* conda content — so a source rebuild invalidates the
+    ///   cache while lock-file churn that doesn't change the prefix does
+    ///   not;
+    /// - the [`LockedEnvironmentHash`] recorded in `conda-meta/pixi`, which
+    ///   also covers pypi packages (invisible to the conda fingerprint).
+    ///
+    /// Returns `None` when no completed install recorded a fingerprint
+    /// (never installed, interrupted install, or `--no-install` runs);
+    /// callers treat that as "task caching disengaged".
+    pub(crate) fn environment_hashes(
+        task: &ExecutableTask<'_>,
+    ) -> Option<(EnvironmentHash, Option<LockedEnvironmentHash>)> {
+        let fingerprint = pixi_utils::EnvironmentFingerprint::read(&task.run_environment.dir())?;
+        let environment = EnvironmentHash::for_activation(
+            &task.run_environment,
+            // Environment variables are deliberately not part of the task
+            // cache key.
+            &HashMap::new(),
+            &fingerprint,
+        );
+        Some((environment, task.run_environment.installed_lock_file_hash()))
     }
 
     pub async fn update_output(
@@ -120,6 +162,7 @@ impl TaskHash {
         self.inputs.hash(&mut hasher);
         self.outputs.hash(&mut hasher);
         self.environment.hash(&mut hasher);
+        self.locked_environment.hash(&mut hasher);
         ComputationHash(format!("{:x}", hasher.finish()))
     }
 

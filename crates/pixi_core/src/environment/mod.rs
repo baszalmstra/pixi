@@ -16,7 +16,7 @@ use pixi_spec::{GitSpec, PixiSpec};
 use pixi_utils::EnvironmentFingerprint;
 use pixi_utils::{prefix::Prefix, rlimit::try_increase_rlimit_to_sensible};
 use rattler_conda_types::{GenericVirtualPackage, Platform};
-use rattler_lock::{LockFile, LockedPackage};
+use rattler_lock::LockedPackage;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::{
@@ -108,45 +108,10 @@ async fn prefix_location_changed(
 pub struct EnvironmentHash(String);
 
 impl EnvironmentHash {
-    /// Compute a hash that combines the project + locked-environment
-    /// state.
+    /// Compute the cache key for prefix-content-dependent caches (the
+    /// activation env-var cache and the task cache).
     ///
-    /// Used for **task** caching: a task's cached result is keyed on
-    /// inputs the user can change without going through an install
-    /// (manifest, lock file, env vars, activation scripts), so this
-    /// flavour folds locked package URLs into the hash directly.
-    ///
-    /// The activation cache uses [`Self::for_activation`] instead —
-    /// see the docs there for why URL-based hashing is too coarse for
-    /// that use case.
-    pub fn from_environment(
-        run_environment: &workspace::Environment<'_>,
-        input_environment_variables: &HashMap<String, Option<String>>,
-        lock_file: &LockFile,
-    ) -> Self {
-        let mut hasher = Xxh3::new();
-        Self::hash_common_inputs(&mut hasher, run_environment, input_environment_variables);
-
-        // Hash the packages
-        let mut urls = Vec::new();
-        if let Some(env) = lock_file.environment(run_environment.name().as_str())
-            && let Some(best) = run_environment.best_declared_platform()
-            && let Some(lock_platform) = lock_file.platform(best.name().as_str())
-            && let Some(packages) = env.packages(lock_platform)
-        {
-            for package in packages {
-                urls.push(package.location().to_string())
-            }
-        }
-        urls.sort();
-        urls.hash(&mut hasher);
-
-        EnvironmentHash(format!("{:x}", hasher.finish()))
-    }
-
-    /// Compute the cache key for the activation env-var map.
-    ///
-    /// Activation results depend on:
+    /// Results depend on:
     /// 1. Shell input env vars referenced by the activation scripts.
     /// 2. The project's activation scripts and activation env.
     /// 3. What is actually installed in the prefix.
@@ -157,11 +122,10 @@ impl EnvironmentHash {
     /// [`pixi_utils::EnvironmentFingerprint`].
     ///
     /// We deliberately do **not** fold locked package URLs into this
-    /// hash like [`Self::from_environment`] does: for source
-    /// packages a URL is a stable path string that doesn't change
-    /// when the source content (and therefore the built artifact)
-    /// changes, so a URL-based key would falsely accept stale
-    /// activation env vars after a source-rebuild. The fingerprint
+    /// hash: for source packages a URL is a stable path string that
+    /// doesn't change when the source content (and therefore the
+    /// built artifact) changes, so a URL-based key would falsely
+    /// accept stale results after a source-rebuild. The fingerprint
     /// is the smallest authoritative summary of the prefix's
     /// content, so URLs add no signal beyond it.
     pub fn for_activation(
@@ -175,10 +139,10 @@ impl EnvironmentHash {
         EnvironmentHash(format!("{:x}", hasher.finish()))
     }
 
-    /// Fold every input shared by both hash flavours into `hasher`:
-    /// the shell input env vars (sorted by key for determinism),
-    /// the activation scripts in declaration order, and the project
-    /// activation env (sorted by key).
+    /// Fold the non-prefix inputs into `hasher`: the shell input env
+    /// vars (sorted by key for determinism), the activation scripts in
+    /// declaration order, and the project activation env (sorted by
+    /// key).
     fn hash_common_inputs(
         hasher: &mut Xxh3,
         run_environment: &workspace::Environment<'_>,

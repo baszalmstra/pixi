@@ -1274,7 +1274,6 @@ impl LazyEnvironmentVariables for LazyPixiEnvironmentVars<'_> {
                 workspace.env_vars(),
                 &environment,
                 CurrentEnvVarBehavior::Exclude,
-                None,
                 false,
                 false,
             )
