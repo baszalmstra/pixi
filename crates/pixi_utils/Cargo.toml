@@ -27,6 +27,7 @@ indicatif = { workspace = true }
 is_executable = { workspace = true }
 itertools = { workspace = true }
 miette = { workspace = true }
+nanoid = { workspace = true }
 pep508_rs = { workspace = true }
 pixi_auth = { workspace = true }
 pixi_config = { workspace = true }

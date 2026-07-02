@@ -3,6 +3,7 @@ pub mod cache;
 pub mod conda_environment_file;
 mod environment_fingerprint;
 mod environment_lock;
+pub mod freshness_store;
 pub mod indicatif;
 pub mod prefix;
 mod prefix_guard;
