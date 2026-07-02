@@ -6841,6 +6841,7 @@ name = "pixi_glob"
 version = "0.1.0"
 dependencies = [
  "dashmap",
+ "filetime",
  "fs-err",
  "ignore",
  "insta",
@@ -6851,6 +6852,7 @@ dependencies = [
  "rattler_digest",
  "rstest",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

@@ -18,12 +18,14 @@ memchr = { workspace = true }
 parking_lot = { workspace = true }
 pixi_path = { workspace = true }
 rattler_digest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+filetime = { workspace = true }
 insta = { workspace = true, features = ["yaml", "redactions"] }
 rstest = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
