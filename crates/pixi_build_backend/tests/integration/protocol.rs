@@ -407,23 +407,26 @@ async fn test_conda_outputs_run_exports_self_pin_exact() {
 
     // The self-pin resolves against this very output's own (name, version,
     // build_string), since a native manifest describes exactly one output.
+    // Because the pinned package is itself a local source package (built from
+    // `.`), the resolved pin comes back as a `Source` spec carrying the
+    // source location alongside the exact version and build string.
     let weak = &output.run_exports.weak;
     assert_eq!(weak.len(), 1, "expected exactly one weak run-export");
     let pin = &weak[0];
     assert_eq!(pin.name.as_str(), "self-pin-pkg");
     match &pin.spec {
-        PackageSpec::Binary(binary) => {
+        PackageSpec::Source(source) => {
             assert_eq!(
-                binary.version.as_ref().map(|v| v.to_string()).as_deref(),
+                source.version.as_ref().map(|v| v.to_string()).as_deref(),
                 Some("==1.2.3"),
                 "exact pin should resolve to the output's own version"
             );
             assert!(
-                binary.build.is_some(),
+                source.build.is_some(),
                 "exact pin should also carry the output's own build string matcher"
             );
         }
-        other => panic!("expected a resolved Binary pin, got {other:?}"),
+        other => panic!("expected a resolved Source pin, got {other:?}"),
     }
 
     // Other run-export buckets stay empty.

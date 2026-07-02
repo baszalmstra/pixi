@@ -21,7 +21,7 @@ use crate::{
 /// `[workspace.dependencies]`.
 #[derive(Debug)]
 pub enum InheritableSpec {
-    Direct(PackageDependencySpec),
+    Direct(Box<PackageDependencySpec>),
     /// Inherited from the workspace pool. `overrides.version` is always `None`.
     Inherited {
         marker_span: Range<usize>,
@@ -168,7 +168,7 @@ impl InheritablePackageMap {
             let name_span = self.name_spans.get(&name).cloned();
             let value_span = self.value_spans.get(&name).cloned();
             let resolved = match spec {
-                InheritableSpec::Direct(spec) => spec,
+                InheritableSpec::Direct(spec) => *spec,
                 InheritableSpec::NotWorkspace { marker_span } => {
                     return Err(GenericError::new("`workspace` cannot be false")
                         .with_help("Remove the `workspace = false` entry; inheritance from the workspace is opt-in.")
@@ -423,7 +423,7 @@ fn parse_inheritable_entry(value: &mut Value<'_>) -> Result<InheritableSpec, Des
         ValueInner::String(s) => {
             let mut tmp = Value::with_span(ValueInner::String(s), outer_span);
             let spec = <PackageDependencySpec as toml_span::Deserialize>::deserialize(&mut tmp)?;
-            Ok(InheritableSpec::Direct(spec))
+            Ok(InheritableSpec::Direct(Box::new(spec)))
         }
         ValueInner::Table(mut table) => {
             if let Some(ws_val) = table.remove("workspace") {
@@ -450,7 +450,7 @@ fn parse_inheritable_entry(value: &mut Value<'_>) -> Result<InheritableSpec, Des
                 let mut tmp = Value::with_span(ValueInner::Table(table), outer_span);
                 let spec =
                     <PackageDependencySpec as toml_span::Deserialize>::deserialize(&mut tmp)?;
-                Ok(InheritableSpec::Direct(spec))
+                Ok(InheritableSpec::Direct(Box::new(spec)))
             }
         }
         other => Err(expected("a string or a table", other, outer_span).into()),

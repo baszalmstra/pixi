@@ -52,7 +52,8 @@ pub enum ConvertDependencyError {
     SubpackageNotFound(PackageName),
 
     #[error(
-        "`pin-compatible` is not supported in constraint buckets (`strong-constrains`/`weak-constrains`); found an entry for `{0}`"
+        "`pin-compatible` is not supported in constraint buckets (`strong-constrains`/`weak-constrains`); found an entry for `{}`",
+        .0.as_source()
     )]
     PinCompatibleConstraintNotSupported(PackageName),
 

@@ -770,7 +770,6 @@ mod test {
     use assert_matches::assert_matches;
     use fs_err as fs;
     use insta::assert_snapshot;
-    use pixi_spec::PixiSpec;
     use pixi_test_utils::format_parse_error;
     use rattler_conda_types::PackageName;
     use tempfile::TempDir;
@@ -2285,8 +2284,9 @@ mod test {
     fn test_pin_compatible_own_name_rejected() {
         // `pin-compatible` resolves against the host environment, which never
         // contains the package itself; self-pins must use `pin-subpackage`.
-        let rendered = expect_parse_failure(
-            r#"
+        // The check runs against the package's resolved name, so it happens in
+        // `into_manifest`, not during the raw TOML parse.
+        let input = r#"
         name = "mypkg"
         version = "1.0"
 
@@ -2295,8 +2295,18 @@ mod test {
 
         [run-exports.weak]
         mypkg = { pin-compatible = true }
-        "#,
-        );
+        "#;
+        let parse_error = TomlPackage::from_toml_str(input)
+            .and_then(|w| {
+                w.into_manifest(
+                    WorkspacePackageProperties::default(),
+                    PackageDefaults::default(),
+                    &Preview::default(),
+                    Path::new(""),
+                )
+            })
+            .unwrap_err();
+        let rendered = format_parse_error(input, parse_error);
         assert!(
             rendered.contains("`pin-compatible` cannot reference the package's own name (`mypkg`)"),
             "unexpected error message: {rendered}"
