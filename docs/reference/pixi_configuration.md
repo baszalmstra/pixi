@@ -94,14 +94,88 @@ workspace manifest.
 - `change-ps1`:  When set to `false`, the `(pixi)` prefix in the shell prompt is removed.
   This applies to the `pixi shell` subcommand.
   You can override this from the CLI with `--change-ps1`.
-- `force-activate`: When set to `true` the re-activation of the environment will always happen.
-  This is used in combination with the [`experimental`](#experimental) feature `use-environment-activation-cache`.
+- `force-activate`: When set to `true` the re-activation of the environment will always happen:
+  the [activation cache](#environment-activation-cache) is not read, but it is still refreshed with
+  the fresh activation result. You can also pass `--force-activate` to
+  `pixi run`/`pixi shell`/`pixi shell-hook` for a one-off re-activation.
 - `source-completion-scripts`: When set to `false`, Pixi will not source the autocompletion scripts of the environment
   when going into the shell.
+- `use-activation-cache`: When set to `false`, the [activation cache](#environment-activation-cache)
+  is neither read nor written and every invocation runs a full activation. Defaults to `true`.
 
 ```toml title="config.toml"
 --8<-- "docs/source_files/pixi_config_tomls/main_config.toml:shell"
 ```
+
+#### Environment activation cache
+
+`pixi run`, `pixi shell`, and `pixi shell-hook` need the environment variables that result from
+activating the environment. Computing them means running the environment's activation scripts in a
+subprocess, which is usually the slowest part of an otherwise no-op invocation. To avoid this cost,
+pixi caches the resulting environment variables in the `.pixi/activation-env-v0` folder in the
+workspace root and reuses them while they are still valid. This is enabled by default.
+
+The cache holds one JSON file per activated environment:
+
+```bash
+> tree .pixi/activation-env-v0/
+.pixi/activation-env-v0/
+├── activation_default.json
+└── activation_lint.json
+
+> cat  .pixi/activation-env-v0/activation_lint.json
+{"hash":"8d8344e0751d377a","environment_variables":{<ENVIRONMENT_VARIABLES_USED_IN_ACTIVATION>}}
+```
+
+- The `hash` fingerprints the inputs of the activation: the content of the installed prefix (the
+  per-package install fingerprint), the environment's `[activation.scripts]` and `[activation.env]`
+  tables from the manifest, and the current shell values of the environment variables the previous
+  activation produced.
+- The `environment_variables` are the environment variables that were set when the environment was
+  last activated.
+
+The cached result is invalidated — and the cache refreshed — whenever any of those inputs change:
+after an install changes the prefix, after `[activation.scripts]` or `[activation.env]` change in
+the manifest, or when the shell values of the variables the activation produced change.
+
+!!! warning "Known staleness gaps"
+
+    Two kinds of changes are **not** detected and can leave a stale activation in use:
+
+    - **Environment variables an activation script only *reads*.** The cache key covers the current
+      shell values of the variables the activation *emits*; a variable a script merely reads
+      (without also setting it) never enters the key, so changing it does not invalidate the cache.
+    - **The *contents* of activation script files.** The manifest's list of activation script
+      *paths* is part of the key, but the files' contents are not, so editing a script file in
+      place does not invalidate the cache.
+
+    In both cases, run once with `--force-activate` to refresh the cache, or opt out entirely as
+    described below.
+
+**Opting out.** There are three levers, from one-off to persistent:
+
+- Pass `--force-activate` to `pixi run`/`pixi shell`/`pixi shell-hook` to ignore the cached value
+  once and refresh the cache with the fresh activation result.
+- Set `shell.force-activate = true` to always re-run the activation while still keeping the cache
+  file up to date.
+- Set `shell.use-activation-cache = false` to disable the cache completely (neither read nor
+  written):
+
+```shell
+# For all of your workspaces
+pixi config set shell.use-activation-cache false --global
+
+# For a specific workspace
+pixi config set shell.use-activation-cache false --local
+```
+
+!!! note "Deprecated: `experimental.use-environment-activation-cache`"
+
+    The activation cache used to be opt-in through the
+    `experimental.use-environment-activation-cache` key. That key is deprecated but still honored
+    when `shell.use-activation-cache` is not set; loading a config file that contains it emits a
+    deprecation warning pointing at the new key. When both keys are set,
+    `shell.use-activation-cache` wins.
 
 ### `tls-no-verify`
 
@@ -482,50 +556,14 @@ activated.
 
 ### Caching environment activations
 
-Turn this feature on from configuration with the following command:
+The environment activation cache is no longer experimental: it is enabled by default and is
+configured through [`shell.use-activation-cache`](#environment-activation-cache).
 
-```shell
-# For all of your workspaces
-pixi config set experimental.use-environment-activation-cache true --global
-
-# For a specific workspace
-pixi config set experimental.use-environment-activation-cache true --local
-```
-
-This will cache the environment activation in the `.pixi/activation-env-v0` folder in the workspace root.
-It will create a json file for each environment that is activated, and it will be used to activate the environment in
-the future.
-
-```bash
-> tree .pixi/activation-env-v0/
-.pixi/activation-env-v0/
-├── activation_default.json
-└── activation_lint.json
-
-> cat  .pixi/activation-env-v0/activation_lint.json
-{"hash":"8d8344e0751d377a","environment_variables":{<ENVIRONMENT_VARIABLES_USED_IN_ACTIVATION>}}
-```
-
-- The `hash` is a hash of the data on that environment in the `pixi.lock`, plus some important information on the
-  environment activation.
-  Like `[activation.scripts]` and `[activation.env]` from the manifest file.
-- The `environment_variables` are the environment variables that are set when activating the environment.
-
-You can ignore the cache by running:
-
-```
-pixi run/shell/shell-hook --force-activate
-```
-
-Set the configuration with:
+The old opt-in key is deprecated but still honored when the new key is not set:
 
 ```toml title="config.toml"
 --8<-- "docs/source_files/pixi_config_tomls/main_config.toml:experimental"
 ```
-
-!!! note "Why is this experimental?"
-This feature is experimental because the cache invalidation is very tricky,
-and we don't want to disturb users that are not affected by activation times.
 
 ## Mirror configuration
 

@@ -120,6 +120,7 @@ Config {
     ),
     shell: ShellConfig {
         force_activate: None,
+        use_activation_cache: None,
         source_completion_scripts: None,
         change_ps1: Some(
             true,
