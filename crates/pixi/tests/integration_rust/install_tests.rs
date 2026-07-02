@@ -2051,3 +2051,60 @@ async fn install_all_skips_unsupported_environments() {
             "install -e other should fail because it does not support the current platform",
         );
 }
+
+/// After an install, the `conda-meta/pixi` marker records the xxh3 digest of
+/// the on-disk `pixi.lock` bytes and whether the environment contains source
+/// packages, so later invocations can answer freshness questions without
+/// parsing the lock file.
+#[tokio::test]
+async fn install_records_lock_file_digest_and_source_flag() {
+    setup_tracing();
+
+    let mut db = MockRepoData::default();
+    db.add_package(
+        Package::build("foo", "1")
+            .with_subdir(Platform::current())
+            .with_materialize(true)
+            .finish(),
+    );
+    let channel = db.into_channel().await.unwrap();
+
+    let pixi = PixiControl::from_manifest(&format!(
+        r#"
+        [workspace]
+        name = "record-marker-facts"
+        channels = ["{channel}"]
+        platforms = ["{platform}"]
+
+        [dependencies]
+        foo = "*"
+        "#,
+        channel = channel.url(),
+        platform = Platform::current(),
+    ))
+    .unwrap();
+
+    pixi.install().await.unwrap();
+
+    // The marker struct is pub(crate) inside pixi_core; read it as plain JSON.
+    let marker_path = pixi
+        .default_env_path()
+        .unwrap()
+        .join(consts::CONDA_META_DIR)
+        .join(consts::ENVIRONMENT_FILE_NAME);
+    let marker: serde_json::Value =
+        serde_json::from_str(&fs_err::read_to_string(marker_path).unwrap()).unwrap();
+
+    let lock_bytes = fs_err::read(pixi.workspace_path().join(consts::PROJECT_LOCK_FILE)).unwrap();
+    let expected_digest = format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&lock_bytes));
+    assert_eq!(
+        marker["lock_file_digest"].as_str(),
+        Some(expected_digest.as_str()),
+        "marker must record the digest of the lock file bytes the prefix was installed from",
+    );
+    assert_eq!(
+        marker["contains_source_packages"].as_bool(),
+        Some(false),
+        "a binary-only environment must record that it contains no source packages",
+    );
+}

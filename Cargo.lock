@@ -6006,6 +6006,7 @@ dependencies = [
  "uv-installer",
  "uv-normalize",
  "uv-python",
+ "xxhash-rust",
  "zip",
 ]
 

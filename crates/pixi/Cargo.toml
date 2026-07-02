@@ -82,4 +82,5 @@ uv-configuration = { workspace = true }
 uv-installer = { workspace = true }
 uv-normalize = { workspace = true }
 uv-python = { workspace = true }
+xxhash-rust = { workspace = true, features = ["xxh3"] }
 zip = { workspace = true }
