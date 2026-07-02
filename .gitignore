@@ -68,6 +68,7 @@ cachegrind.out.*
 
 # Rust
 target/
+/shared-target/
 /vendor/
 *.orig
 **/*.rs.bk
