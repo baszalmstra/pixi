@@ -1058,6 +1058,15 @@ pub struct ExperimentalConfig {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_environment_activation_cache: Option<bool>,
+
+    /// The option to opt into the workspace freshness cache: a workspace-scoped
+    /// input fingerprint that lets pixi skip the lock-file up-to-date check
+    /// when none of the inputs changed since the last successful run.
+    /// This is an experimental feature and may be removed in the future or made
+    /// default.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_workspace_freshness_cache: Option<bool>,
 }
 
 impl ExperimentalConfig {
@@ -1066,14 +1075,24 @@ impl ExperimentalConfig {
             use_environment_activation_cache: other
                 .use_environment_activation_cache
                 .or(self.use_environment_activation_cache),
+            use_workspace_freshness_cache: other
+                .use_workspace_freshness_cache
+                .or(self.use_workspace_freshness_cache),
         }
     }
     pub fn use_environment_activation_cache(&self) -> bool {
         self.use_environment_activation_cache.unwrap_or(false)
     }
 
+    /// Returns true if the workspace freshness cache is enabled. Defaults to
+    /// `false` when unset.
+    pub fn use_workspace_freshness_cache(&self) -> bool {
+        self.use_workspace_freshness_cache.unwrap_or(false)
+    }
+
     pub fn is_default(&self) -> bool {
         self.use_environment_activation_cache.is_none()
+            && self.use_workspace_freshness_cache.is_none()
     }
 }
 
@@ -1547,6 +1566,7 @@ impl From<ConfigCli> for Config {
                 } else {
                     None
                 },
+                use_workspace_freshness_cache: None,
             },
             pinning_strategy: cli.pinning_strategy,
             allow_symbolic_links: cli.no_symbolic_links.then_some(false),
@@ -2102,6 +2122,7 @@ impl Config {
             "detached-environments",
             "experimental",
             "experimental.use-environment-activation-cache",
+            "experimental.use-workspace-freshness-cache",
             "mirrors",
             "pinning-strategy",
             "proxy-config",
@@ -2266,6 +2287,13 @@ impl Config {
 
     pub fn experimental_activation_cache_usage(&self) -> bool {
         self.experimental.use_environment_activation_cache()
+    }
+
+    /// Returns true if the experimental workspace freshness cache (a
+    /// workspace-scoped input fingerprint used to skip the lock-file
+    /// up-to-date check) is enabled.
+    pub fn experimental_workspace_freshness_cache_usage(&self) -> bool {
+        self.experimental.use_workspace_freshness_cache()
     }
 
     /// Retrieve the value for the max_concurrent_solves field.
@@ -2545,6 +2573,10 @@ impl Config {
                 match subkey {
                     "use-environment-activation-cache" => {
                         self.experimental.use_environment_activation_cache =
+                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                    }
+                    "use-workspace-freshness-cache" => {
+                        self.experimental.use_workspace_freshness_cache =
                             value.map(|v| v.parse()).transpose().into_diagnostic()?;
                     }
                     _ => return Err(err),
@@ -3083,6 +3115,7 @@ UNUSED = "unused"
             pinning_strategy: Some(PinningStrategy::NoPin),
             experimental: ExperimentalConfig {
                 use_environment_activation_cache: Some(true),
+                use_workspace_freshness_cache: None,
             },
             loaded_from: Vec::from([PathBuf::from_str("test").unwrap()]),
             shell: ShellConfig {
@@ -4257,5 +4290,62 @@ UNUSED = "unused"
         };
         let err = config.validate().unwrap_err();
         assert!(format!("{err}").contains("cache.conda-packages"));
+    }
+
+    #[test]
+    fn test_workspace_freshness_cache_config() {
+        // Default: the flag is off and the experimental section counts as
+        // default.
+        let config = Config::default();
+        assert!(!config.experimental_workspace_freshness_cache_usage());
+        assert!(config.experimental.is_default());
+
+        // TOML parsing.
+        let toml = "[experimental]\nuse-workspace-freshness-cache = true";
+        let (config, _) = Config::from_toml(toml, None).unwrap();
+        assert_eq!(
+            config.experimental.use_workspace_freshness_cache,
+            Some(true)
+        );
+        assert!(config.experimental_workspace_freshness_cache_usage());
+        assert!(!config.experimental.is_default());
+
+        // `pixi config set` handler sets and unsets the key.
+        let mut config = Config::default();
+        config
+            .set(
+                "experimental.use-workspace-freshness-cache",
+                Some("true".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            config.experimental.use_workspace_freshness_cache,
+            Some(true)
+        );
+        config
+            .set("experimental.use-workspace-freshness-cache", None)
+            .unwrap();
+        assert_eq!(config.experimental.use_workspace_freshness_cache, None);
+
+        // Merging: `other` takes precedence over `self`, `None` keeps `self`.
+        let low = ExperimentalConfig {
+            use_workspace_freshness_cache: Some(false),
+            ..ExperimentalConfig::default()
+        };
+        let high = ExperimentalConfig {
+            use_workspace_freshness_cache: Some(true),
+            ..ExperimentalConfig::default()
+        };
+        let merged = low.clone().merge(high);
+        assert_eq!(merged.use_workspace_freshness_cache, Some(true));
+        let merged = low.merge(ExperimentalConfig::default());
+        assert_eq!(merged.use_workspace_freshness_cache, Some(false));
+
+        // The key is discoverable through `get_keys`.
+        assert!(
+            Config::default()
+                .get_keys()
+                .contains(&"experimental.use-workspace-freshness-cache")
+        );
     }
 }

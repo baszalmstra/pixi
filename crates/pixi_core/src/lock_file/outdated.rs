@@ -90,6 +90,14 @@ pub struct OutdatedEnvironments<'p> {
     /// This is shared across platforms since static metadata is platform-independent.
     pub static_metadata_cache: HashMap<PathBuf, pypi_metadata::LocalPackageMetadata>,
 
+    /// True when the satisfiability walk was interrupted by cancellation
+    /// (e.g. Ctrl-C shutting the command dispatcher down). Skipped targets
+    /// are silently treated as verified, so an empty [`Self::conda`]/
+    /// [`Self::pypi`] is *not* an up-to-date proof when this is set. Consumers
+    /// that persist "the lock file is up-to-date" conclusions (the workspace
+    /// freshness fingerprint) must not do so when this flag is true.
+    pub verification_cancelled: bool,
+
     /// Locked pypi records with metadata, resolved during the satisfiability
     /// check. Forwarded to the update path to avoid re-reading source trees.
     pub locked_pypi_records: HashMap<(Environment<'p>, PixiPlatformName), LockedPypiRecordsByName>,
@@ -132,6 +140,7 @@ impl<'p> OutdatedEnvironments<'p> {
                 mut outdated_conda,
                 mut outdated_pypi,
                 disregard_locked_content,
+                verification_cancelled,
             },
             uv_context,
             build_caches,
@@ -195,6 +204,7 @@ impl<'p> OutdatedEnvironments<'p> {
             build_caches,
             static_metadata_cache,
             locked_pypi_records,
+            verification_cancelled,
         }
     }
 
@@ -210,6 +220,9 @@ struct UnsatisfiableTargets<'p> {
     outdated_conda: HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
     outdated_pypi: HashMap<Environment<'p>, HashSet<PixiPlatformName>>,
     disregard_locked_content: DisregardLockedContent<'p>,
+    /// True when at least one satisfiability task was cancelled, in which
+    /// case the outdated maps are incomplete rather than a proof.
+    verification_cancelled: bool,
 }
 
 /// Find all targets (combination of environment and platform) who's
@@ -407,6 +420,12 @@ async fn find_unsatisfiable_targets<'p>(
                 }
                 Err(CommandDispatcherError::Failed(_)) => unreachable!("platform task cannot fail"),
             }
+        }
+
+        // A cancelled walk silently skipped the remaining platforms: whatever
+        // was collected so far is incomplete, not a proof of freshness.
+        if platform_futures.is_cancelled() {
+            unsatisfiable_targets.verification_cancelled = true;
         }
     }
 

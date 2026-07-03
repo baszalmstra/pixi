@@ -61,7 +61,7 @@ use uv_normalize::ExtraName;
 
 use super::{
     CondaPrefixUpdater, InstallSubset, PixiRecordsByName, PypiRecordsByName,
-    UnresolvedPixiRecordsByName, outdated::OutdatedEnvironments, resolve_lock_platform,
+    UnresolvedPixiRecordsByName, freshness, outdated::OutdatedEnvironments, resolve_lock_platform,
     utils::IoConcurrencyLimit,
 };
 use crate::{
@@ -307,6 +307,41 @@ impl Workspace {
             return Ok((derived, false));
         }
 
+        // Experimental input-fingerprint fast path: when a previously
+        // recorded workspace fingerprint validates against the current
+        // inputs (manifest bytes, resolved config, lock bytes, override env
+        // vars, pixi version), the satisfiability result of the last
+        // successful run still holds, so building the resolver and walking
+        // `OutdatedEnvironments` can be skipped entirely. Any doubt (stale,
+        // absent, or corrupt marker) falls through to the normal path below.
+        let freshness_cache_enabled = self.config().experimental_workspace_freshness_cache_usage();
+        if freshness_cache_enabled
+            && !needs_format_upgrade
+            && matches!(options.lock_file_usage, LockFileUsage::Update)
+        {
+            match freshness::check_workspace_freshness(self).await {
+                freshness::FreshnessCheck::Fresh => {
+                    tracing::info!(
+                        "workspace inputs are unchanged since the last successful run; \
+                         skipping the lock file up-to-date check"
+                    );
+                    return Ok((derived, false));
+                }
+                freshness::FreshnessCheck::Stale(reason) => {
+                    tracing::debug!(
+                        "workspace input fingerprint is stale ({reason}); \
+                         running the full lock file up-to-date check"
+                    );
+                }
+                freshness::FreshnessCheck::Absent => {
+                    tracing::debug!(
+                        "no usable workspace input fingerprint; \
+                         running the full lock file up-to-date check"
+                    );
+                }
+            }
+        }
+
         // Check which environments are out of date.
         let resolver = derived.resolver()?;
         let mut outdated = OutdatedEnvironments::from_workspace_and_lock_file(
@@ -326,6 +361,24 @@ impl Workspace {
                 );
             } else {
                 tracing::info!("the lock file is up-to-date");
+            }
+
+            // The lock file was just proven consistent with its inputs:
+            // record the workspace input fingerprint so the next run can skip
+            // this check. `record_workspace_freshness` owns the eligibility
+            // predicate (flag, dry runs, old-format locks, source packages)
+            // and is non-fatal. Recording after `--frozen` is unreachable:
+            // that path returned above without proving anything. A cancelled
+            // walk (e.g. Ctrl-C mid-check) leaves `outdated` vacuously empty
+            // — that is not a proof, so nothing may be persisted from it.
+            if !outdated.verification_cancelled {
+                freshness::record_workspace_freshness(
+                    self,
+                    &derived.lock_file,
+                    options.lock_file_usage,
+                    needs_format_upgrade,
+                )
+                .await;
             }
 
             // If no-environment is outdated we can return early. Pass the
@@ -407,6 +460,21 @@ impl Workspace {
 
         if options.lock_file_usage != LockFileUsage::DryRun {
             lock_file_derived_data.write_to_disk()?;
+
+            // The solve succeeded and the lock file hit the disk in the
+            // latest format: record the workspace input fingerprint so the
+            // next run can skip the up-to-date check.
+            // `record_workspace_freshness` owns the eligibility predicate
+            // (flag, dry runs, source packages) and is non-fatal;
+            // `needs_format_upgrade` is `false` here because `write_to_disk`
+            // always writes the latest format.
+            freshness::record_workspace_freshness(
+                self,
+                &lock_file_derived_data.lock_file,
+                options.lock_file_usage,
+                false,
+            )
+            .await;
         }
 
         Ok((lock_file_derived_data, true))
