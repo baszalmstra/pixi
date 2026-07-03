@@ -439,6 +439,9 @@ impl WorkspaceMut {
             }
             e
         })?;
+        // The update flow always finishes with a parsed lock file, so this
+        // just unwraps the handle.
+        let lock_file = lock_file.into_inner().await?;
 
         let mut implicit_constraints = HashMap::new();
         if !conda_specs_to_add_constraints_for.is_empty() {
@@ -486,7 +489,7 @@ impl WorkspaceMut {
         updated_lock_file.io_concurrency_limit = io_concurrency_limit;
         updated_lock_file.build_caches = build_caches;
         if !dry_run {
-            updated_lock_file.write_to_disk()?;
+            updated_lock_file.write_to_disk().await?;
         }
         if !no_install
             && !dry_run
@@ -516,8 +519,10 @@ impl WorkspaceMut {
             }
         }
 
-        let lock_file_diff =
-            LockFileDiff::from_lock_files(&original_lock_file, &updated_lock_file.into_lock_file());
+        let lock_file_diff = LockFileDiff::from_lock_files(
+            &original_lock_file,
+            &updated_lock_file.into_lock_file().await?,
+        );
 
         Ok(Some(UpdateDeps {
             implicit_constraints,

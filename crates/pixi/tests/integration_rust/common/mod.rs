@@ -770,11 +770,12 @@ impl PixiControl {
     /// project.
     pub async fn update_lock_file(&self) -> miette::Result<LockFile> {
         let project = self.workspace()?;
-        Ok(project
+        project
             .update_lock_file(None, UpdateLockFileOptions::default())
             .await?
             .0
-            .into_lock_file())
+            .into_lock_file()
+            .await
     }
 
     /// Returns an [`LockBuilder`].

@@ -192,7 +192,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         )
         .await?
         .0
-        .into_lock_file();
+        .into_lock_file()
+        .await?;
 
     let mut environments = Vec::new();
     if let Some(env_names) = args.environment {

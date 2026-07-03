@@ -5,7 +5,7 @@ use pixi_config::ConfigCli;
 use pixi_core::{
     UpdateLockFileOptions, WorkspaceLocator,
     environment::{InstallFilter, get_update_lock_file_and_prefixes},
-    lock_file::{LockFileDerivedData, PackageFilterNames, ReinstallPackages, UpdateMode},
+    lock_file::{PackageFilterNames, ReinstallPackages, UpdateMode},
     workspace::{HasWorkspaceRef, PlatformOverrides, PlatformSource},
 };
 use pixi_manifest::PixiPlatformName;
@@ -145,7 +145,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         .target_packages(args.only.clone().unwrap_or_default());
 
     // Update the prefixes by installing all packages
-    let (LockFileDerivedData { lock_file, .. }, _) = get_update_lock_file_and_prefixes(
+    let (derived_data, _) = get_update_lock_file_and_prefixes(
         &environments,
         target_platform.as_ref(),
         Some(pixi_reporters::TopLevelProgress::from_global()),
@@ -160,6 +160,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         &filter,
     )
     .await?;
+    let lock_file = derived_data.into_lock_file().await?;
 
     // Message what's installed
     let mut message = console::style(console::Emoji("✔ ", "")).green().to_string();

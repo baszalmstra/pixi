@@ -88,7 +88,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         .await
         .wrap_err("Failed to update lock file")?
         .0
-        .into_lock_file();
+        .into_lock_file()
+        .await?;
 
     let workspace_platforms = (&workspace)
         .workspace_manifest()
