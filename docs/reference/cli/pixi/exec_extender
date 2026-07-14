@@ -1,3 +1,10 @@
+--8<-- [start:description]
+
+Everything after the executable is passed to it verbatim, so pixi's own options must be placed *before* the executable:
+in `pixi exec -c conda-forge python -c "print(42)"` the first `-c` is pixi's `--channel`, while the second one is passed to `python`.
+Use `--` to run an executable whose name itself starts with a dash.
+--8<-- [end:description]
+
 --8<-- [start:example]
 
 ## Examples

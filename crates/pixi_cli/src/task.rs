@@ -68,6 +68,12 @@ pub struct AddArgs {
     pub name: TaskName,
 
     /// One or more commands to actually execute.
+    ///
+    /// Unlike `pixi run` and `pixi exec`, the command is not captured
+    /// verbatim: options of `pixi task add` itself may appear before or after
+    /// it. Quote the command, or separate it with `--`, when it contains
+    /// dashed flags of its own: `pixi task add build "cargo build --release"`
+    /// or `pixi task add build -- cargo build --release`.
     #[clap(required = true, num_args = 1.., id = "COMMAND")]
     pub commands: Vec<String>,
 
@@ -242,7 +248,7 @@ impl From<AliasArgs> for Task {
 
 /// Interact with tasks in the workspace
 #[derive(Parser, Debug)]
-#[clap(trailing_var_arg = true, arg_required_else_help = true)]
+#[clap(arg_required_else_help = true)]
 pub struct Args {
     #[clap(flatten)]
     pub config_source: pixi_config::ConfigSourceCli,

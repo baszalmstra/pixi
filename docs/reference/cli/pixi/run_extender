@@ -1,3 +1,10 @@
+--8<-- [start:description]
+
+Everything after the task name is passed to the task verbatim, so pixi's own options must be placed *before* the task:
+in `pixi run -e lint fmt --check`, `-e lint` selects the environment, while `--check` is passed to the `fmt` task.
+Use `--` to run a task whose name itself starts with a dash.
+--8<-- [end:description]
+
 --8<-- [start:example]
 ## Examples
 

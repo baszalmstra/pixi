@@ -529,6 +529,165 @@ fn print_installed_commands() {
 mod tests {
     use super::*;
 
+    /// Locks the argument-passing convention of the commands that wrap a
+    /// foreign command line:
+    ///
+    /// * `pixi run` and `pixi exec` capture everything after the first
+    ///   command/task token verbatim (even tokens that look like pixi
+    ///   options), so pixi's own options must be placed before the command.
+    ///   `--` force-starts the command for names that begin with a dash.
+    /// * `pixi task add` is *not* a passthrough command: its own options are
+    ///   recognized on both sides of the command, so dashed command flags
+    ///   must be quoted or separated with `--`.
+    mod passthrough {
+        use clap::error::ErrorKind;
+
+        use super::*;
+
+        fn parse(argv: &[&str]) -> Result<Args, clap::Error> {
+            Args::try_parse_from(argv)
+        }
+
+        fn exec_args(argv: &[&str]) -> exec::Args {
+            match parse(argv).expect("expected argv to parse").command {
+                Some(Command::Exec(args)) => args,
+                other => panic!("expected `pixi exec`, got {other:?}"),
+            }
+        }
+
+        fn run_args(argv: &[&str]) -> run::Args {
+            match parse(argv).expect("expected argv to parse").command {
+                Some(Command::Run(args)) => args,
+                other => panic!("expected `pixi run`, got {other:?}"),
+            }
+        }
+
+        fn task_add_args(argv: &[&str]) -> task::AddArgs {
+            match parse(argv).expect("expected argv to parse").command {
+                Some(Command::Task(args)) => match args.operation {
+                    task::Operation::Add(add) => add,
+                    other => panic!("expected `pixi task add`, got {other:?}"),
+                },
+                other => panic!("expected `pixi task`, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn exec_captures_flags_after_the_command() {
+            let args = exec_args(&["pixi", "exec", "python", "-c", "print(42)"]);
+            assert_eq!(args.command, ["python", "-c", "print(42)"]);
+        }
+
+        #[test]
+        fn exec_options_before_the_command_belong_to_pixi() {
+            // The first `-c` is pixi's `--channel`, the second one is python's.
+            let args = exec_args(&[
+                "pixi",
+                "exec",
+                "-c",
+                "conda-forge",
+                "python",
+                "-c",
+                "print(42)",
+            ]);
+            assert_eq!(args.command, ["python", "-c", "print(42)"]);
+        }
+
+        #[test]
+        fn exec_captures_help_after_the_command() {
+            let args = exec_args(&["pixi", "exec", "python", "--help"]);
+            assert_eq!(args.command, ["python", "--help"]);
+        }
+
+        #[test]
+        fn exec_rejects_unknown_options_before_the_command() {
+            let err = parse(&["pixi", "exec", "--typo", "python"]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+        }
+
+        #[test]
+        fn exec_double_dash_forces_the_command() {
+            let args = exec_args(&["pixi", "exec", "--", "-weird", "-c"]);
+            assert_eq!(args.command, ["-weird", "-c"]);
+        }
+
+        #[test]
+        fn run_captures_flags_after_the_task() {
+            let args = run_args(&["pixi", "run", "pytest", "-x", "--help"]);
+            assert_eq!(args.task, ["pytest", "-x", "--help"]);
+            assert!(!args.executable);
+        }
+
+        #[test]
+        fn run_captures_global_flags_after_the_task() {
+            let args = run_args(&["pixi", "run", "mytask", "-v", "--color", "always"]);
+            assert_eq!(args.task, ["mytask", "-v", "--color", "always"]);
+        }
+
+        #[test]
+        fn run_options_before_the_task_belong_to_pixi() {
+            let args = run_args(&["pixi", "run", "-e", "lint", "fmt", "--check"]);
+            assert_eq!(args.environment.as_deref(), Some("lint"));
+            assert_eq!(args.task, ["fmt", "--check"]);
+        }
+
+        #[test]
+        fn run_bare_help_is_still_pixis() {
+            let err = parse(&["pixi", "run", "--help"]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        }
+
+        #[test]
+        fn run_double_dash_forces_the_task() {
+            let args = run_args(&["pixi", "run", "--", "-weird"]);
+            assert_eq!(args.task, ["-weird"]);
+        }
+
+        #[test]
+        fn task_add_accepts_own_options_on_both_sides_of_the_command() {
+            let args =
+                task_add_args(&["pixi", "task", "add", "test", "pytest", "--feature", "dev"]);
+            assert_eq!(args.commands, ["pytest"]);
+            assert_eq!(args.feature.as_deref(), Some("dev"));
+        }
+
+        #[test]
+        fn task_add_rejects_unquoted_command_flags() {
+            let err = parse(&[
+                "pixi",
+                "task",
+                "add",
+                "build",
+                "cargo",
+                "build",
+                "--release",
+            ])
+            .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+        }
+
+        #[test]
+        fn task_add_quoted_command_is_verbatim() {
+            let args = task_add_args(&["pixi", "task", "add", "build", "cargo build --release"]);
+            assert_eq!(args.commands, ["cargo build --release"]);
+        }
+
+        #[test]
+        fn task_add_double_dash_captures_command_flags() {
+            let args = task_add_args(&[
+                "pixi",
+                "task",
+                "add",
+                "build",
+                "--",
+                "cargo",
+                "build",
+                "--release",
+            ]);
+            assert_eq!(args.commands, ["cargo", "build", "--release"]);
+        }
+    }
+
     #[test]
     fn test_clap_boolean_env_var_behavior() {
         // Test PIXI_FROZEN=true

@@ -27,10 +27,16 @@ use crate::{cli_config::ChannelsConfig, match_spec_or_path::MatchSpecOrPath, pro
 ///
 /// Remove the temporary environments with `pixi clean cache --exec`.
 #[derive(Parser, Debug)]
-#[clap(trailing_var_arg = true, arg_required_else_help = true)]
+#[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The executable to run, followed by any arguments.
-    #[clap(num_args = 1.., value_hint = ValueHint::CommandWithArguments)]
+    ///
+    /// Everything after the executable is passed to it verbatim: in `pixi exec
+    /// -c conda-forge python -c "print(42)"` the first `-c` is pixi's
+    /// `--channel` while the second one is passed to `python`. Pixi's own
+    /// options must therefore be placed before the executable. Use `--` to run
+    /// an executable whose name itself starts with a dash.
+    #[clap(trailing_var_arg = true, num_args = 1.., value_hint = ValueHint::CommandWithArguments)]
     pub command: Vec<String>,
 
     /// Matchspecs of package to install.

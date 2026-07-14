@@ -53,13 +53,20 @@ use crate::shared::install_platform::resolve_install_platform;
 /// `pixi run` will also update the lock file and install the environment if it
 /// is required.
 #[derive(Parser, Debug, Default)]
-#[clap(trailing_var_arg = true, disable_help_flag = true)]
+#[clap(disable_help_flag = true)]
 pub struct Args {
     #[clap(flatten)]
     pub config_source: pixi_config::ConfigSourceCli,
 
     /// The pixi task or a task shell command you want to run in the workspace's
     /// environment, which can be an executable in the environment's PATH.
+    ///
+    /// Everything after the task name is passed to the task verbatim: in `pixi
+    /// run -e lint fmt --check`, `-e lint` selects the environment while
+    /// `--check` is passed to the `fmt` task. Pixi's own options must
+    /// therefore be placed before the task name. Use `--` to run a task whose
+    /// name itself starts with a dash.
+    #[clap(trailing_var_arg = true)]
     pub task: Vec<String>,
 
     /// Execute the command as an executable without resolving Pixi tasks.

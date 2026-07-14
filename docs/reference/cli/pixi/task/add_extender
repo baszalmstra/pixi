@@ -1,3 +1,10 @@
+--8<-- [start:description]
+
+Unlike `pixi run` and `pixi exec`, the command is not captured verbatim: options of `pixi task add` itself (like `--platform` or `--depends-on`) may appear before or after the command.
+Quote the command, or separate it with `--`, when it contains dashed flags of its own:
+`pixi task add build "cargo build --release"` or `pixi task add build -- cargo build --release`.
+--8<-- [end:description]
+
 --8<-- [start:example]
 
 ## Examples
