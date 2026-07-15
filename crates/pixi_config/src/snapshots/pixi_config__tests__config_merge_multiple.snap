@@ -127,6 +127,7 @@ Config {
     },
     experimental: ExperimentalConfig {
         use_environment_activation_cache: None,
+        use_workspace_freshness_cache: None,
     },
     concurrency: ConcurrencyConfig {
         solves: 1,
