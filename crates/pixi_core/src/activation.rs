@@ -9,7 +9,6 @@ use itertools::Itertools;
 use miette::IntoDiagnostic;
 use pixi_manifest::EnvironmentName;
 use pixi_manifest::FeaturesExt;
-use rattler_lock::LockFile;
 use rattler_shell::{
     activation::{
         ActivationError::FailedToRunActivationScript, ActivationVariables, Activator,
@@ -38,11 +37,8 @@ pub enum CurrentEnvVarBehavior {
 struct ActivationCache {
     /// Hash of the environment that produced these activation results.
     /// Captures input env vars, activation scripts, project activation
-    /// env vars, and either:
-    /// - the prefix's install fingerprint (preferred — see
-    ///   `InstallPixiEnvironmentResult::installed_fingerprint`), or
-    /// - locked package URLs (legacy fallback when no fingerprint is
-    ///   stored next to the prefix).
+    /// env vars, and the prefix's install fingerprint (see
+    /// `InstallPixiEnvironmentResult::installed_fingerprint`).
     hash: EnvironmentHash,
     /// The environment variables set by the activation.
     environment_variables: HashMap<String, String>,
@@ -283,15 +279,12 @@ async fn try_get_valid_activation_cache(
 
 /// Runs and caches the activation script.
 ///
-/// The `_lock_file` parameter is retained for API stability (several
-/// callers still pass one) but is no longer consulted: the activation
-/// cache is now keyed on the prefix's install fingerprint instead of
-/// locked package URLs (see [`EnvironmentHash::for_activation`]).
-#[allow(clippy::needless_pass_by_value)]
+/// The activation cache is keyed on the prefix's install fingerprint
+/// (see [`EnvironmentHash::for_activation`]), so no lock file is
+/// needed here.
 pub async fn run_activation(
     environment: &Environment<'_>,
     env_var_behavior: &CurrentEnvVarBehavior,
-    _lock_file: Option<&LockFile>,
     force_activate: bool,
     experimental: bool,
 ) -> miette::Result<HashMap<String, String>> {
@@ -508,22 +501,16 @@ pub(crate) fn get_clean_environment_variables() -> HashMap<String, String> {
 /// variables from the project and based on the clean_env setting it will also add in the current
 /// shell environment variables.
 ///
-/// If a lock file is given this will also create/use an activated environment cache when possible.
+/// When `experimental` is set this will also create/use an activated environment cache keyed on
+/// the prefix's install fingerprint when possible.
 pub(crate) async fn initialize_env_variables(
     environment: &Environment<'_>,
     env_var_behavior: CurrentEnvVarBehavior,
-    lock_file: Option<&LockFile>,
     force_activate: bool,
     experimental: bool,
 ) -> miette::Result<HashMap<String, String>> {
-    let activation_env = run_activation(
-        environment,
-        &env_var_behavior,
-        lock_file,
-        force_activate,
-        experimental,
-    )
-    .await?;
+    let activation_env =
+        run_activation(environment, &env_var_behavior, force_activate, experimental).await?;
 
     // Get environment variables from the currently activated shell.
     let current_shell_env_vars = match env_var_behavior {
@@ -709,30 +696,18 @@ mod tests {
 
         // Without an install fingerprint, the cache is never written
         // even with experimental=true and a lock file present.
-        let env = run_activation(
-            &default_env,
-            &CurrentEnvVarBehavior::Include,
-            Some(&LockFile::default()),
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        let env = run_activation(&default_env, &CurrentEnvVarBehavior::Include, false, true)
+            .await
+            .unwrap();
         assert!(env.contains_key("CONDA_PREFIX"));
         assert!(!project.activation_env_cache_folder().exists());
 
         // Write a fingerprint marker so the cache becomes operative.
         write_fingerprint(&default_env.dir(), "000000000000000a").await;
 
-        let _env = run_activation(
-            &default_env,
-            &CurrentEnvVarBehavior::Include,
-            Some(&LockFile::default()),
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        let _env = run_activation(&default_env, &CurrentEnvVarBehavior::Include, false, true)
+            .await
+            .unwrap();
         assert!(project.activation_env_cache_folder().exists());
         let cache_file = project.default_environment().activation_cache_file_path();
         assert!(cache_file.exists());
@@ -742,30 +717,18 @@ mod tests {
         let contents = tokio_fs::read_to_string(&cache_file).await.unwrap();
         let modified = contents.replace("ACTIVATION123", "ACTIVATION456");
         tokio_fs::write(&cache_file, modified).await.unwrap();
-        let env = run_activation(
-            &default_env,
-            &CurrentEnvVarBehavior::Include,
-            Some(&LockFile::default()),
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        let env = run_activation(&default_env, &CurrentEnvVarBehavior::Include, false, true)
+            .await
+            .unwrap();
         assert_eq!(env.get("TEST").unwrap(), "ACTIVATION456");
 
         // Bumping the fingerprint mimics a fresh install with
         // different content — the cache key changes, so activation
         // runs again and overwrites the cache file.
         write_fingerprint(&default_env.dir(), "000000000000000b").await;
-        let env = run_activation(
-            &default_env,
-            &CurrentEnvVarBehavior::Include,
-            Some(&LockFile::default()),
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        let env = run_activation(&default_env, &CurrentEnvVarBehavior::Include, false, true)
+            .await
+            .unwrap();
         assert_eq!(env.get("TEST").unwrap(), "ACTIVATION123");
     }
 
@@ -790,15 +753,9 @@ mod tests {
         let default_env = project.default_environment();
         // A fingerprint marker is required for the cache to engage at all.
         write_fingerprint(&default_env.dir(), "00000000000000fb").await;
-        let env = run_activation(
-            &default_env,
-            &CurrentEnvVarBehavior::Include,
-            Some(&LockFile::default()),
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        let env = run_activation(&default_env, &CurrentEnvVarBehavior::Include, false, true)
+            .await
+            .unwrap();
         assert_eq!(env.get("TEST").unwrap(), "ACTIVATION123",);
 
         // Modify the variable in cache
@@ -823,15 +780,9 @@ mod tests {
         let default_env = project.default_environment();
         // Marker survives the manifest edit (same prefix dir).
         write_fingerprint(&default_env.dir(), "00000000000000fb").await;
-        let env = run_activation(
-            &default_env,
-            &CurrentEnvVarBehavior::Include,
-            Some(&LockFile::default()),
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        let env = run_activation(&default_env, &CurrentEnvVarBehavior::Include, false, true)
+            .await
+            .unwrap();
         assert_eq!(
             env.get("TEST").unwrap(),
             "ACTIVATION123",

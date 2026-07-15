@@ -3,7 +3,6 @@ use std::{collections::HashMap, default::Default, path::PathBuf};
 use clap::Parser;
 use miette::IntoDiagnostic;
 use pixi_config::{ConfigCli, ConfigCliActivation, ConfigCliPrompt};
-use rattler_lock::LockFile;
 use rattler_shell::{
     activation::{ActivationVariables, PathModificationBehavior},
     shell::{Shell, ShellEnum},
@@ -124,7 +123,6 @@ async fn generate_activation_script(
 /// activating the provided pixi environment.
 async fn generate_environment_json(
     environment: &Environment<'_>,
-    lock_file: &LockFile,
     force_activate: bool,
     experimental_cache: bool,
 ) -> miette::Result<String> {
@@ -132,7 +130,6 @@ async fn generate_environment_json(
         environment.workspace().env_vars(),
         environment,
         CurrentEnvVarBehavior::Exclude,
-        Some(lock_file),
         force_activate,
         experimental_cache,
     )
@@ -167,7 +164,9 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     let environment = workspace.environment_from_name_or_env_var(args.environment)?;
 
-    let (lock_file_data, _prefix) = get_update_lock_file_and_prefix(
+    // Run purely for the install/validation side effect; activation below
+    // needs no lock file.
+    let (_, _) = get_update_lock_file_and_prefix(
         &environment,
         Some(pixi_reporters::TopLevelProgress::from_global()),
         UpdateMode::QuickValidate,
@@ -186,7 +185,6 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         true => {
             generate_environment_json(
                 &environment,
-                &lock_file_data.into_lock_file(),
                 workspace.config().force_activate(),
                 workspace.config().experimental_activation_cache_usage(),
             )
