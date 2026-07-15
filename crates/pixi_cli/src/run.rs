@@ -294,6 +294,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     // task.
     let mut task_idx = 0;
     let mut task_envs = HashMap::new();
+    // Environments whose prefix has already been ensured in this run.
+    let mut ensured_prefixes = HashSet::new();
     let signal = KillSignal::default();
     // make sure that child processes are killed when pixi stops
     let _drop_guard = signal.clone().drop_guard();
@@ -373,12 +375,30 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             continue;
         }
 
-        // check task cache
-        let task_cache = match executable_task
-            .can_skip(lock_file.as_lock_file())
-            .await
-            .into_diagnostic()?
+        // Ensure the environment's prefix is up-to-date *before* consulting
+        // the task cache: the cache key is derived from the installed
+        // fingerprint next to the prefix, so the prefix must reflect the
+        // (possibly just re-solved) lock file first. Otherwise a lock-file
+        // change without an intervening install could still match a cache
+        // entry recorded for the old prefix — skipping both the task and the
+        // install that would have reconciled the environment.
+        // `QuickValidate` makes this a marker read + hash when nothing
+        // changed.
+        if args.lock_and_install_config.allow_installs()
+            && ensured_prefixes.insert(executable_task.run_environment.clone())
         {
+            lock_file
+                .prefix(
+                    &executable_task.run_environment,
+                    UpdateMode::QuickValidate,
+                    &ReinstallPackages::default(),
+                    &pixi_core::environment::InstallFilter::default(),
+                )
+                .await?;
+        }
+
+        // check task cache
+        let task_cache = match executable_task.can_skip().await.into_diagnostic()? {
             CanSkip::No(cache) => cache,
             CanSkip::Yes => {
                 let args_text = if !executable_task.args().is_empty() {
@@ -407,19 +427,11 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             Entry::Vacant(entry) => {
                 // Check if we allow installs
                 if args.lock_and_install_config.allow_installs() {
-                    // Ensure there is a valid prefix
-                    lock_file
-                        .prefix(
-                            &executable_task.run_environment,
-                            UpdateMode::QuickValidate,
-                            &ReinstallPackages::default(),
-                            &pixi_core::environment::InstallFilter::default(),
-                        )
-                        .await?;
-
-                    // Validate that the auto-detected machine (or explicit
-                    // `--platform`) can run what was installed, comparing
-                    // against the resolved/minimum platforms in conda-meta/pixi.
+                    // The prefix was already ensured before the task-cache
+                    // check above. Validate that the auto-detected machine
+                    // (or explicit `--platform`) can run what was installed,
+                    // comparing against the resolved/minimum platforms in
+                    // conda-meta/pixi.
                     pixi_core::workspace::virtual_packages::verify_run_platform(
                         &executable_task.run_environment,
                         user_platform.as_ref(),
@@ -467,7 +479,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
         // Compute post-run hash, warn on missing globs, and update the cache
         let post_hash = executable_task
-            .compute_post_run_hash(lock_file.as_lock_file(), task_cache)
+            .compute_post_run_hash(task_cache)
             .await
             .into_diagnostic()?;
         if let Some(ref hash) = post_hash {
