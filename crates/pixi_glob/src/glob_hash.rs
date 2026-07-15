@@ -82,6 +82,16 @@ impl GlobHash {
             matching_files,
         })
     }
+
+    /// Constructs a [`GlobHash`] from a previously computed hash value, for
+    /// example one recorded by the [`crate::PersistentGlobHashCache`].
+    pub(crate) fn from_hash(hash: Sha256Hash) -> Self {
+        Self {
+            hash,
+            #[cfg(test)]
+            matching_files: Vec::new(),
+        }
+    }
 }
 
 /// This function copy the contents of the reader to the writer but normalizes

@@ -6,8 +6,10 @@ mod glob_hash;
 mod glob_hash_cache;
 mod glob_mtime;
 mod glob_set;
+mod persistent_glob_hash_cache;
 
 pub use glob_hash::{GlobHash, GlobHashError};
 pub use glob_hash_cache::{GlobHashCache, GlobHashKey};
 pub use glob_mtime::{GlobModificationTime, GlobModificationTimeError};
 pub use glob_set::{GlobSet, GlobSetError, Match};
+pub use persistent_glob_hash_cache::{PersistentGlobHashCache, PersistentGlobHashCacheError};
