@@ -532,7 +532,6 @@ fn get_export_specific_task_env(
 pub async fn get_task_env(
     environment: &Environment<'_>,
     clean_env: bool,
-    lock_file: Option<&LockFile>,
     force_activate: bool,
     experimental_cache: bool,
 ) -> miette::Result<HashMap<String, String>> {
@@ -547,7 +546,6 @@ pub async fn get_task_env(
             environment.workspace().env_vars(),
             environment,
             env_var_behavior,
-            lock_file,
             force_activate,
             experimental_cache,
         )
@@ -881,7 +879,7 @@ exit 0
         .unwrap();
 
         let environment = workspace.default_environment();
-        let env = get_task_env(&environment, false, None, false, false)
+        let env = get_task_env(&environment, false, false, false)
             .await
             .unwrap();
         assert_eq!(

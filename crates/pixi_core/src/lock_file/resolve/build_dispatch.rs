@@ -352,7 +352,6 @@ impl<'a> LazyBuildDispatch<'a> {
                     &self.project_env_vars,
                     &self.environment,
                     CurrentEnvVarBehavior::Exclude,
-                    None,
                     false,
                     false,
                 )

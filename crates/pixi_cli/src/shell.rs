@@ -336,8 +336,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let environment = workspace.environment_from_name_or_env_var(args.environment)?;
 
     // Make sure environment is up-to-date, default to install, users can avoid this with frozen or locked.
-    #[allow(unused_variables)]
-    let (lock_file_data, prefix) = get_update_lock_file_and_prefix(
+    let (_, prefix) = get_update_lock_file_and_prefix(
         &environment,
         Some(pixi_reporters::TopLevelProgress::from_global()),
         UpdateMode::QuickValidate,
@@ -351,14 +350,12 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         &InstallFilter::default(),
     )
     .await?;
-    let lock_file = lock_file_data.into_lock_file();
 
     // Get the environment variables we need to set activate the environment in the shell.
     let env = get_activated_environment_variables(
         workspace.env_vars(),
         &environment,
         CurrentEnvVarBehavior::Exclude,
-        Some(&lock_file),
         workspace.config().force_activate(),
         workspace.config().experimental_activation_cache_usage(),
     )

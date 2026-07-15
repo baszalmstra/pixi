@@ -23,7 +23,6 @@ async fn test_pixi_only_env_activation() {
         workspace.env_vars(),
         &default_env,
         CurrentEnvVarBehavior::Exclude,
-        None,
         false,
         false,
     )
@@ -62,7 +61,6 @@ async fn test_full_env_activation() {
         project.env_vars(),
         &default_env,
         CurrentEnvVarBehavior::Include,
-        None,
         false,
         false,
     )
@@ -92,7 +90,6 @@ async fn test_clean_env_activation() {
         project.env_vars(),
         &default_env,
         CurrentEnvVarBehavior::Clean,
-        None,
         false,
         false,
     )
