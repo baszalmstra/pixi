@@ -27,6 +27,7 @@ indicatif = { workspace = true }
 is_executable = { workspace = true }
 itertools = { workspace = true }
 miette = { workspace = true }
+nanoid = { workspace = true }
 pep508_rs = { workspace = true }
 pixi_auth = { workspace = true }
 pixi_config = { workspace = true }
@@ -52,7 +53,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
@@ -64,3 +65,4 @@ xxhash-rust = { workspace = true, features = ["xxh3"] }
 insta = { workspace = true }
 rstest = { workspace = true }
 temp-env = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
