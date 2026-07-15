@@ -311,8 +311,18 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
         // Fail before announcing a task whose environment can't run here at
         // all; by-accident environments proceed and `--platform` overrides.
+        // Classification is marker-first: the installed platforms recorded in
+        // `conda-meta/pixi` answer without the parsed lock file. Only when
+        // that answers `Unsupported` (e.g. a first run with no marker and no
+        // machine-matching declared platform) do we re-classify with the lock
+        // file, whose minimal requirements can still rescue an environment
+        // that runs "by accident". The lock participates in classification
+        // only on that fallback path, so this is equivalent to classifying
+        // with the lock file directly.
         if args.lock_and_install_config.allow_installs()
             && user_platform.is_none()
+            && classify_environment_runnability(&executable_task.run_environment, None)
+                == EnvironmentRunnability::Unsupported
             && classify_environment_runnability(
                 &executable_task.run_environment,
                 Some(lock_file.as_lock_file()),
