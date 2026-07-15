@@ -1,4 +1,5 @@
 mod install_subset;
+mod lazy_lock_file;
 mod outdated;
 mod package_identifier;
 mod platform_rename;
@@ -13,6 +14,7 @@ pub mod virtual_packages;
 
 pub use crate::environment::CondaPrefixUpdater;
 pub use install_subset::{FilteredPackages, InstallSubset};
+pub use lazy_lock_file::LazyLockFile;
 pub use package_identifier::PypiPackageIdentifier;
 use pixi_install_pypi::LockedPypiRecord;
 use pixi_record::PixiRecord;

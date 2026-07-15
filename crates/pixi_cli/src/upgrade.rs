@@ -229,7 +229,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                 .await?
                 .update()
                 .await?;
-            let diff = LockFileDiff::from_lock_files(&original_lock_file, &derived.lock_file);
+            let diff =
+                LockFileDiff::from_lock_files(&original_lock_file, derived.lock_file().await?);
             let json_diff =
                 LockFileJsonDiff::new(Some(workspace.workspace().named_environments()), diff);
             let json = serde_json::to_string_pretty(&json_diff).expect("failed to convert to json");

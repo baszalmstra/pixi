@@ -182,10 +182,10 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     // If we're doing a dry-run, we don't want to write the lock file.
     if !args.dry_run {
-        updated_lock_file.write_to_disk()?;
+        updated_lock_file.write_to_disk().await?;
     }
 
-    let lock_file = updated_lock_file.into_lock_file();
+    let lock_file = updated_lock_file.into_lock_file().await?;
 
     // Determine the diff between the old and new lock file.
     let diff = LockFileDiff::from_lock_files(loaded_lock_file, &lock_file);

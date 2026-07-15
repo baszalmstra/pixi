@@ -351,7 +351,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         &InstallFilter::default(),
     )
     .await?;
-    let lock_file = lock_file_data.into_lock_file();
+    let lock_file = lock_file_data.into_lock_file().await?;
 
     // Get the environment variables we need to set activate the environment in the shell.
     let env = get_activated_environment_variables(

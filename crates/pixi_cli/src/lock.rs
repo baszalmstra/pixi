@@ -1,10 +1,6 @@
 use clap::Parser;
 use miette::{Context, IntoDiagnostic};
-use pixi_core::{
-    WorkspaceLocator,
-    environment::LockFileUsage,
-    lock_file::{LockFileDerivedData, UpdateLockFileOptions},
-};
+use pixi_core::{WorkspaceLocator, environment::LockFileUsage, lock_file::UpdateLockFileOptions};
 use pixi_diff::{LockFileDiff, LockFileJsonDiff};
 
 use crate::cli_config::NoInstallConfig;
@@ -55,7 +51,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     // Use the silent version here since update_lock_file() will display the warning.
     let original_lock_file = workspace.load_lock_file().await?.into_lock_file_or_empty();
     let progress = pixi_reporters::TopLevelProgress::from_global();
-    let (LockFileDerivedData { lock_file, .. }, lock_updated) = workspace
+    let (derived_data, lock_updated) = workspace
         .update_lock_file(
             Some(progress),
             UpdateLockFileOptions {
@@ -70,6 +66,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             },
         )
         .await?;
+    let lock_file = derived_data.into_lock_file().await?;
 
     // Determine the diff between the old and new lock file.
     let diff = LockFileDiff::from_lock_files(&original_lock_file, &lock_file);

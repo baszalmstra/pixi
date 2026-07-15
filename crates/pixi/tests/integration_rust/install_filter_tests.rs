@@ -77,7 +77,12 @@ async fn install_filter_skip_direct_soft_exclusion() {
     let filter = InstallFilter::new().skip_direct(vec!["a".to_string()]);
     let skipped = PackageFilterNames::new(
         &filter,
-        derived.lock_file.environment(env.name().as_str()).unwrap(),
+        derived
+            .lock_file()
+            .await
+            .unwrap()
+            .environment(env.name().as_str())
+            .unwrap(),
         env.best_declared_platform()
             .expect("no best platform for env"),
     )
@@ -105,7 +110,12 @@ async fn install_filter_skip_with_deps_hard_exclusion() {
     let filter = InstallFilter::new().skip_with_deps(vec!["a".to_string()]);
     let skipped = PackageFilterNames::new(
         &filter,
-        derived.lock_file.environment(env.name().as_str()).unwrap(),
+        derived
+            .lock_file()
+            .await
+            .unwrap()
+            .environment(env.name().as_str())
+            .unwrap(),
         env.best_declared_platform()
             .expect("no best platform for env"),
     )
@@ -140,7 +150,12 @@ async fn install_filter_target_package_zoom_in() {
     let filter = InstallFilter::new().target_packages(vec!["a".to_string()]);
     let skipped = PackageFilterNames::new(
         &filter,
-        derived.lock_file.environment(env.name().as_str()).unwrap(),
+        derived
+            .lock_file()
+            .await
+            .unwrap()
+            .environment(env.name().as_str())
+            .unwrap(),
         env.best_declared_platform()
             .expect("no best platform for env"),
     )
@@ -167,7 +182,12 @@ async fn install_filter_target_with_skip_with_deps_stop() {
         .skip_with_deps(vec!["c".to_string()]);
     let skipped = PackageFilterNames::new(
         &filter,
-        derived.lock_file.environment(env.name().as_str()).unwrap(),
+        derived
+            .lock_file()
+            .await
+            .unwrap()
+            .environment(env.name().as_str())
+            .unwrap(),
         env.best_declared_platform()
             .expect("no best platform for env"),
     )

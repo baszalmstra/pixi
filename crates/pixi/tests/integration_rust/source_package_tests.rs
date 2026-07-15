@@ -1378,7 +1378,7 @@ test-source-pkg = {{ path = "./source-package" }}
     assert!(was_updated, "First invocation should update the lock file");
 
     // Verify the package is in the lock file
-    let lock_file = lock_file_data.into_lock_file();
+    let lock_file = lock_file_data.into_lock_file().await.unwrap();
     assert!(
         lock_file.contains_conda_package(
             consts::DEFAULT_ENVIRONMENT_NAME,
@@ -1781,7 +1781,7 @@ my-package = {{ path = "./my-package" }}
     assert!(was_updated, "First invocation should create the lock file");
 
     // Verify the package is in the lock file
-    let lock_file = lock_file_data.into_lock_file();
+    let lock_file = lock_file_data.into_lock_file().await.unwrap();
     assert!(
         lock_file.contains_conda_package(
             consts::DEFAULT_ENVIRONMENT_NAME,
@@ -2107,7 +2107,7 @@ my-package = {{ path = "./my-package" }}
         .await
         .expect("First lock should succeed");
 
-    let lock_file = lock_file_data.into_lock_file();
+    let lock_file = lock_file_data.into_lock_file().await.unwrap();
 
     // Find the source package in the lock file.
     let env = lock_file
@@ -2161,7 +2161,7 @@ my-package = {{ path = "./my-package" }}
         "Second lock invocation should not update the lock file"
     );
 
-    let lock_file_2 = lock_file_data_2.into_lock_file();
+    let lock_file_2 = lock_file_data_2.into_lock_file().await.unwrap();
     let env_2 = lock_file_2
         .environment(consts::DEFAULT_ENVIRONMENT_NAME)
         .unwrap();
@@ -2290,7 +2290,7 @@ my-package = {{ path = "./my-package" }}
         .update_lock_file(None, pixi_core::UpdateLockFileOptions::default())
         .await
         .expect("first solve should succeed");
-    let lock_v1 = lock_data.into_lock_file();
+    let lock_v1 = lock_data.into_lock_file().await.unwrap();
     let foo_versions_v1 = collect_build_dep_versions(&lock_v1, "my-package", "foo");
     assert_eq!(
         foo_versions_v1,
@@ -2330,7 +2330,7 @@ bar = "*"
         was_updated,
         "second solve must re-lock since build-dependencies changed"
     );
-    let lock_v2 = lock_data.into_lock_file();
+    let lock_v2 = lock_data.into_lock_file().await.unwrap();
 
     let foo_versions_v2 = collect_build_dep_versions(&lock_v2, "my-package", "foo");
     assert_eq!(

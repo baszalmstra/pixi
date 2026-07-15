@@ -44,7 +44,8 @@ pub async fn list(
         )
         .await?
         .0
-        .into_lock_file();
+        .into_lock_file()
+        .await?;
 
     // Resolve the platform argument: a workspace-platform name takes
     // priority; a bare conda subdir is accepted as a fallback so the user
