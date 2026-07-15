@@ -876,7 +876,16 @@ pub struct ConfigCliActivation {
 impl ConfigCliActivation {
     pub fn merge_config(self, config: Config) -> Config {
         let mut config = config;
-        config.shell.force_activate = Some(self.force_activate);
+        // Only an explicitly passed flag may override lower layers:
+        // unconditionally writing `Some(self.force_activate)` would clobber a
+        // config-file `shell.force-activate = true` with `Some(false)`
+        // whenever the flag is absent. That was harmless while the
+        // activation cache was opt-in, but with the cache enabled by default
+        // it would silently defeat the documented always-re-run escape
+        // hatch. (`--no-completions` below already follows this rule.)
+        if self.force_activate {
+            config.shell.force_activate = Some(true);
+        }
         if self.no_completions {
             config.shell.source_completion_scripts = Some(false);
         }
@@ -1052,9 +1061,11 @@ impl Default for DetachedEnvironments {
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct ExperimentalConfig {
-    /// The option to opt into the environment activation cache feature.
-    /// This is an experimental feature and may be removed in the future or made
-    /// default.
+    /// Deprecated spelling of the environment activation cache toggle, kept
+    /// from when the feature was experimental. Use
+    /// `shell.use-activation-cache` instead; the cache is now enabled by
+    /// default. This key is still honored when the new key is unset (see
+    /// [`Config::experimental_activation_cache_usage`]).
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_environment_activation_cache: Option<bool>,
@@ -1067,9 +1078,6 @@ impl ExperimentalConfig {
                 .use_environment_activation_cache
                 .or(self.use_environment_activation_cache),
         }
-    }
-    pub fn use_environment_activation_cache(&self) -> bool {
-        self.use_environment_activation_cache.unwrap_or(false)
     }
 
     pub fn is_default(&self) -> bool {
@@ -1479,6 +1487,25 @@ impl Default for Config {
     }
 }
 
+/// Emit a warning that config key `old` is deprecated in favor of `new`.
+///
+/// `source_path` is included in the message so users can find where the
+/// deprecated key came from. Pass `None` for non-file sources (e.g. `pixi
+/// config set`).
+fn create_deprecation_warning(old: &str, new: &str, source_path: Option<&Path>) {
+    let msg = format!(
+        "Please replace '{}' with '{}', the field is deprecated and will be removed in a future release.",
+        console::style(old).red(),
+        console::style(new).green()
+    );
+    match source_path {
+        Some(path) => {
+            tracing::warn!("In '{}': {}", console::style(path.display()).bold(), msg,)
+        }
+        None => tracing::warn!("{}", msg),
+    }
+}
+
 /// Emit a deprecation warning when a config layer (file, CLI flag, or env var)
 /// sets `tls-root-certs` to one of the deprecated spellings.
 ///
@@ -1541,12 +1568,13 @@ impl From<ConfigCli> for Config {
             } else {
                 None
             },
-            experimental: ExperimentalConfig {
-                use_environment_activation_cache: if cli.use_environment_activation_cache {
-                    Some(true)
-                } else {
-                    None
-                },
+            shell: ShellConfig {
+                // The flag predates the promotion of the activation cache out
+                // of `[experimental]`; it maps to the canonical
+                // `shell.use-activation-cache` key so an explicit CLI opt-in
+                // overrides a config-file opt-out.
+                use_activation_cache: cli.use_environment_activation_cache.then_some(true),
+                ..ShellConfig::default()
             },
             pinning_strategy: cli.pinning_strategy,
             allow_symbolic_links: cli.no_symbolic_links.then_some(false),
@@ -1594,6 +1622,19 @@ pub struct ShellConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_activate: Option<bool>,
 
+    /// Whether `pixi run`/`pixi shell`/`pixi shell-hook` may reuse cached
+    /// activation environment variables instead of re-running the
+    /// environment's activation scripts on every invocation. Defaults to
+    /// `true`; set to `false` to neither read nor write the cache.
+    ///
+    /// Replaces the deprecated
+    /// `experimental.use-environment-activation-cache` key, which is still
+    /// honored when this key is unset (see
+    /// [`Config::experimental_activation_cache_usage`]).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_activation_cache: Option<bool>,
+
     /// Whether to source completion scripts from the environment or not.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1610,6 +1651,7 @@ impl ShellConfig {
     pub fn merge(self, other: Self) -> Self {
         Self {
             force_activate: other.force_activate.or(self.force_activate),
+            use_activation_cache: other.use_activation_cache.or(self.use_activation_cache),
             source_completion_scripts: other
                 .source_completion_scripts
                 .or(self.source_completion_scripts),
@@ -1619,6 +1661,7 @@ impl ShellConfig {
 
     pub fn is_default(&self) -> bool {
         self.force_activate.is_none()
+            && self.use_activation_cache.is_none()
             && self.source_completion_scripts.is_none()
             && self.change_ps1.is_none()
     }
@@ -1841,20 +1884,6 @@ impl Config {
         })
         .into_diagnostic()?;
 
-        fn create_deprecation_warning(old: &str, new: &str, source_path: Option<&Path>) {
-            let msg = format!(
-                "Please replace '{}' with '{}', the field is deprecated and will be removed in a future release.",
-                console::style(old).red(),
-                console::style(new).green()
-            );
-            match source_path {
-                Some(path) => {
-                    tracing::warn!("In '{}': {}", console::style(path.display()).bold(), msg,)
-                }
-                None => tracing::warn!("{}", msg),
-            }
-        }
-
         if config.change_ps1.is_some() {
             create_deprecation_warning("change-ps1", "shell.change-ps1", source_path);
             config.shell.change_ps1 = config.change_ps1;
@@ -1863,6 +1892,22 @@ impl Config {
         if config.force_activate.is_some() {
             create_deprecation_warning("force-activate", "shell.force-activate", source_path);
             config.shell.force_activate = config.force_activate;
+        }
+
+        // Unlike the migrations above, the deprecated key is not moved into
+        // `shell.use_activation_cache`: it keeps its lower precedence there
+        // so that the new key wins whenever both are set (see
+        // `Config::experimental_activation_cache_usage`).
+        if config
+            .experimental
+            .use_environment_activation_cache
+            .is_some()
+        {
+            create_deprecation_warning(
+                "experimental.use-environment-activation-cache",
+                "shell.use-activation-cache",
+                source_path,
+            );
         }
 
         warn_deprecated_tls_root_certs(
@@ -2130,6 +2175,7 @@ impl Config {
             "shell.change-ps1",
             "shell.force-activate",
             "shell.source-completion-scripts",
+            "shell.use-activation-cache",
             "tls-no-verify",
             "tls-root-certs",
             "tool-platform",
@@ -2264,8 +2310,24 @@ impl Config {
         self.shell.force_activate.unwrap_or(false)
     }
 
+    /// Whether the environment activation cache may be used (defaults to
+    /// `true`).
+    ///
+    /// Precedence: `shell.use-activation-cache` if set, otherwise the
+    /// deprecated `experimental.use-environment-activation-cache` if set,
+    /// otherwise `true`.
+    pub fn activation_cache_usage(&self) -> bool {
+        self.shell
+            .use_activation_cache
+            .or(self.experimental.use_environment_activation_cache)
+            .unwrap_or(true)
+    }
+
+    /// Deprecated name for [`Config::activation_cache_usage`], from when the
+    /// activation cache lived under `[experimental]`. Kept so existing
+    /// callers compile unchanged.
     pub fn experimental_activation_cache_usage(&self) -> bool {
-        self.experimental.use_environment_activation_cache()
+        self.activation_cache_usage()
     }
 
     /// Retrieve the value for the max_concurrent_solves field.
@@ -2531,6 +2593,15 @@ impl Config {
                 if key == EXPERIMENTAL {
                     if let Some(value) = value {
                         self.experimental = serde_json::de::from_str(&value).into_diagnostic()?;
+                        // Keep the whole-section path consistent with the
+                        // per-key path below.
+                        if self.experimental.use_environment_activation_cache.is_some() {
+                            create_deprecation_warning(
+                                "experimental.use-environment-activation-cache",
+                                "shell.use-activation-cache",
+                                None,
+                            );
+                        }
                     } else {
                         self.experimental = ExperimentalConfig::default();
                     }
@@ -2544,6 +2615,16 @@ impl Config {
                     .unwrap();
                 match subkey {
                     "use-environment-activation-cache" => {
+                        // Kept working for backwards compatibility, but the
+                        // canonical key is `shell.use-activation-cache`. Do
+                        // not nag when the deprecated key is being *unset*.
+                        if value.is_some() {
+                            create_deprecation_warning(
+                                "experimental.use-environment-activation-cache",
+                                "shell.use-activation-cache",
+                                None,
+                            );
+                        }
                         self.experimental.use_environment_activation_cache =
                             value.map(|v| v.parse()).transpose().into_diagnostic()?;
                     }
@@ -2595,6 +2676,10 @@ impl Config {
                 match subkey {
                     "force-activate" => {
                         self.shell.force_activate =
+                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                    }
+                    "use-activation-cache" => {
+                        self.shell.use_activation_cache =
                             value.map(|v| v.parse()).transpose().into_diagnostic()?;
                     }
                     "source-completion-scripts" => {
@@ -2947,10 +3032,10 @@ UNUSED = "unused"
             config.run_post_link_scripts,
             Some(RunPostLinkScripts::Insecure)
         );
-        assert_eq!(
-            config.experimental.use_environment_activation_cache,
-            Some(true)
-        );
+        // The flag lands in the canonical shell key, not the deprecated
+        // experimental one.
+        assert_eq!(config.shell.use_activation_cache, Some(true));
+        assert_eq!(config.experimental.use_environment_activation_cache, None);
         assert_eq!(config.pinning_strategy, Some(PinningStrategy::Semver));
 
         let cli = ConfigCli {
@@ -2976,8 +3061,208 @@ UNUSED = "unused"
             Some(PathBuf::from("path.json"))
         );
         assert_eq!(config.run_post_link_scripts, None);
+        assert_eq!(config.shell.use_activation_cache, None);
         assert_eq!(config.experimental.use_environment_activation_cache, None);
         assert_eq!(config.pinning_strategy, None);
+    }
+
+    /// The activation cache is on by default: when neither the
+    /// `shell.use-activation-cache` key nor the deprecated
+    /// `experimental.use-environment-activation-cache` key is set, the
+    /// accessor reports `true`.
+    #[test]
+    fn test_activation_cache_enabled_by_default() {
+        let config = Config::default();
+        assert!(config.activation_cache_usage());
+        // The deprecated accessor name delegates to the canonical one.
+        assert!(config.experimental_activation_cache_usage());
+
+        let (config, _) = Config::from_toml("", None).unwrap();
+        assert!(config.activation_cache_usage());
+    }
+
+    /// The promoted `shell.use-activation-cache` key parses (it must not be
+    /// reported as an unused key) and switches the cache off.
+    #[test]
+    fn test_activation_cache_shell_key_parses() {
+        let toml = r#"
+            [shell]
+            use-activation-cache = false
+        "#;
+        let (config, unused_keys) = Config::from_toml(toml, None).unwrap();
+        assert!(
+            unused_keys.is_empty(),
+            "`shell.use-activation-cache` should be a recognized key, got unused keys: {unused_keys:?}"
+        );
+        assert_eq!(config.shell.use_activation_cache, Some(false));
+        assert!(!config.experimental_activation_cache_usage());
+    }
+
+    /// When both the new and the deprecated key are set, the new
+    /// `shell.use-activation-cache` key wins, regardless of the values.
+    #[test]
+    fn test_activation_cache_new_key_wins_over_deprecated() {
+        let toml = r#"
+            [shell]
+            use-activation-cache = false
+
+            [experimental]
+            use-environment-activation-cache = true
+        "#;
+        let (config, _) = Config::from_toml(toml, None).unwrap();
+        assert!(!config.experimental_activation_cache_usage());
+
+        let toml = r#"
+            [shell]
+            use-activation-cache = true
+
+            [experimental]
+            use-environment-activation-cache = false
+        "#;
+        let (config, _) = Config::from_toml(toml, None).unwrap();
+        assert!(config.experimental_activation_cache_usage());
+    }
+
+    /// The deprecated `experimental.use-environment-activation-cache` key
+    /// alone is still parsed and honored (it emits a deprecation warning at
+    /// load time, like the old top-level `force-activate` key).
+    #[test]
+    fn test_activation_cache_deprecated_key_still_honored() {
+        let toml = r#"
+            [experimental]
+            use-environment-activation-cache = false
+        "#;
+        let (config, unused_keys) = Config::from_toml(toml, None).unwrap();
+        assert!(unused_keys.is_empty());
+        assert!(!config.experimental_activation_cache_usage());
+
+        let toml = r#"
+            [experimental]
+            use-environment-activation-cache = true
+        "#;
+        let (config, _) = Config::from_toml(toml, None).unwrap();
+        assert!(config.experimental_activation_cache_usage());
+    }
+
+    /// `pixi config set shell.use-activation-cache <value>` roundtrips: the
+    /// set-handler accepts the new key, the value survives serialization
+    /// (as done by `Config::save`), and unsetting falls back to the default
+    /// (on). The deprecated experimental key remains settable.
+    #[test]
+    fn test_activation_cache_set_handler_roundtrip() {
+        let mut config = Config::default();
+        config
+            .set("shell.use-activation-cache", Some("false".to_string()))
+            .unwrap();
+        assert_eq!(config.shell.use_activation_cache, Some(false));
+        assert!(!config.experimental_activation_cache_usage());
+
+        let serialized = toml_edit::ser::to_string_pretty(&config).unwrap();
+        let (roundtripped, unused_keys) = Config::from_toml(&serialized, None).unwrap();
+        assert!(unused_keys.is_empty());
+        assert!(
+            !roundtripped.experimental_activation_cache_usage(),
+            "the opt-out should survive serialization, got: {serialized}"
+        );
+
+        config.set("shell.use-activation-cache", None).unwrap();
+        assert_eq!(config.shell.use_activation_cache, None);
+        assert!(config.experimental_activation_cache_usage());
+
+        // The deprecated key keeps working through the set-handler.
+        config
+            .set(
+                "experimental.use-environment-activation-cache",
+                Some("false".to_string()),
+            )
+            .unwrap();
+        assert!(!config.experimental_activation_cache_usage());
+    }
+
+    /// The new key merges across config layers like any other `[shell]`
+    /// option: a higher-priority layer wins, and a layer that does not
+    /// mention the key leaves the lower layer's value in place.
+    #[test]
+    fn test_activation_cache_merge_across_layers() {
+        // Higher-priority layer's new key beats a lower layer's new key.
+        let (low, _) = Config::from_toml("[shell]\nuse-activation-cache = false", None).unwrap();
+        let (high, _) = Config::from_toml("[shell]\nuse-activation-cache = true", None).unwrap();
+        let merged = low.merge_config(high);
+        assert!(merged.experimental_activation_cache_usage());
+
+        // A layer without the key does not override a lower layer's opt-out.
+        let (low, _) = Config::from_toml("[shell]\nuse-activation-cache = false", None).unwrap();
+        let merged = low.merge_config(Config::default());
+        assert!(!merged.experimental_activation_cache_usage());
+
+        // The new key wins over the deprecated key even when the deprecated
+        // key comes from a higher-priority layer.
+        let (low, _) = Config::from_toml("[shell]\nuse-activation-cache = false", None).unwrap();
+        let (high, _) = Config::from_toml(
+            "[experimental]\nuse-environment-activation-cache = true",
+            None,
+        )
+        .unwrap();
+        let merged = low.merge_config(high);
+        assert!(!merged.experimental_activation_cache_usage());
+    }
+
+    /// The `--use-environment-activation-cache` CLI flag now maps to the
+    /// canonical `shell.use-activation-cache` key (instead of the deprecated
+    /// experimental key) so an explicit CLI opt-in overrides a config-file
+    /// opt-out when the CLI layer is merged on top.
+    #[test]
+    fn test_activation_cache_cli_flag_overrides_config_opt_out() {
+        let cli = ConfigCli {
+            use_environment_activation_cache: true,
+            ..ConfigCli::default()
+        };
+        let cli_config = Config::from(cli);
+        // The flag no longer lands in the deprecated experimental field.
+        assert_eq!(
+            cli_config.experimental.use_environment_activation_cache,
+            None
+        );
+
+        let (file_config, _) =
+            Config::from_toml("[shell]\nuse-activation-cache = false", None).unwrap();
+        let merged = file_config.merge_config(cli_config);
+        assert!(merged.experimental_activation_cache_usage());
+
+        // Without the flag the CLI layer leaves the opt-out untouched.
+        let (file_config, _) =
+            Config::from_toml("[shell]\nuse-activation-cache = false", None).unwrap();
+        let merged = file_config.merge_config(Config::from(ConfigCli::default()));
+        assert!(!merged.experimental_activation_cache_usage());
+    }
+
+    /// An absent `--force-activate` flag must not clobber a config-file
+    /// `shell.force-activate = true` with `Some(false)`. With the activation
+    /// cache enabled by default, that clobber would silently defeat the
+    /// documented always-re-run escape hatch on exactly the commands that
+    /// use the cache (`run`/`shell`/`shell-hook` merge this CLI layer on
+    /// every invocation).
+    #[test]
+    fn test_force_activate_cli_flag_absent_does_not_clobber_config() {
+        let (file_config, _) = Config::from_toml("[shell]\nforce-activate = true", None).unwrap();
+
+        // Flag absent: the config-file opt-in survives.
+        let cli = ConfigCliActivation {
+            force_activate: false,
+            no_completions: false,
+        };
+        let merged = cli.merge_config(file_config.clone());
+        assert!(merged.force_activate());
+
+        // Flag present: it still forces activation on.
+        let (file_config_off, _) =
+            Config::from_toml("[shell]\nforce-activate = false", None).unwrap();
+        let cli = ConfigCliActivation {
+            force_activate: true,
+            no_completions: false,
+        };
+        let merged = cli.merge_config(file_config_off);
+        assert!(merged.force_activate());
     }
 
     #[test]
@@ -3087,6 +3372,7 @@ UNUSED = "unused"
             loaded_from: Vec::from([PathBuf::from_str("test").unwrap()]),
             shell: ShellConfig {
                 force_activate: Some(true),
+                use_activation_cache: Some(false),
                 source_completion_scripts: None,
                 change_ps1: Some(false),
             },
