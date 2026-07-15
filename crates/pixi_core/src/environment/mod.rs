@@ -8,7 +8,9 @@ use miette::{Context, IntoDiagnostic};
 use pixi_consts::consts;
 use pixi_git::credentials::store_credentials_from_url;
 pub use pixi_install_pypi::{ContinuePyPIPrefixUpdate, on_python_interpreter_change};
-use pixi_manifest::{FeaturesExt, HasWorkspaceManifest, PixiPlatform, PixiPlatformName};
+use pixi_manifest::{
+    FeaturesExt, HasWorkspaceManifest, PixiPlatform, PixiPlatformName, WorkspaceManifest,
+};
 use pixi_progress::await_in_progress;
 use pixi_pypi_spec::PixiPypiSource;
 pub use pixi_python_status::PythonStatus;
@@ -16,7 +18,7 @@ use pixi_spec::{GitSpec, PixiSpec};
 use pixi_utils::EnvironmentFingerprint;
 use pixi_utils::{prefix::Prefix, rlimit::try_increase_rlimit_to_sensible};
 use rattler_conda_types::{GenericVirtualPackage, Platform};
-use rattler_lock::{LockFile, LockedPackage};
+use rattler_lock::{LockFile, LockedPackage, UrlOrPath};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::{
@@ -25,7 +27,7 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
 };
-use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
 use crate::workspace;
 use crate::{
@@ -338,6 +340,20 @@ pub(crate) struct EnvironmentFile {
     /// be weaker than [`Self::resolved_platform`]. `None` as above.
     #[serde(default)]
     pub(crate) minimum_supported_platform: Option<PlatformData>,
+    /// Lowercase hex xxh3-64 digest of the raw on-disk bytes of the
+    /// `pixi.lock` this prefix was installed from, recorded so later
+    /// invocations can compare against the lock file without parsing it.
+    /// `None` on environments written by an older pixi, or when the lock file
+    /// could not be read at install time.
+    #[serde(default)]
+    pub(crate) lock_file_digest: Option<String>,
+    /// Whether this environment's locked content (for the platform it was
+    /// installed for) contains any package whose content can change without
+    /// the lock file changing: a conda source package, or a pypi path
+    /// dependency pointing at a directory. `None` on environments written by
+    /// an older pixi.
+    #[serde(default)]
+    pub(crate) contains_source_packages: Option<bool>,
 }
 
 /// The path to the environment file in the `conda-meta` directory of the
@@ -421,6 +437,87 @@ pub(crate) fn read_environment_file(
     };
 
     Ok(Some(env_file))
+}
+
+/// Lowercase hex xxh3-64 digest of the on-disk lock file bytes, for
+/// [`EnvironmentFile::lock_file_digest`].
+///
+/// Returns `None` when the lock file is absent or unreadable: the digest is a
+/// recorded fact for later freshness checks, so recording "unknown" is
+/// preferred over failing the install.
+pub(crate) fn lock_file_digest(lock_file_path: &Path) -> Option<String> {
+    match fs_err::read(lock_file_path) {
+        Ok(bytes) => Some(format!("{:016x}", xxh3_64(&bytes))),
+        Err(e) => {
+            tracing::debug!(
+                "Failed to read lock file at: {:?} for the environment file digest, error: {}",
+                lock_file_path,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Whether the locked environment `environment_name`, for `platform`,
+/// contains any package whose content can change without the lock file
+/// changing: a conda source package, or a pypi path dependency that points at
+/// a directory (a path to a local archive file is content-stable and doesn't
+/// count). Recorded in [`EnvironmentFile::contains_source_packages`].
+///
+/// Relative pypi paths in the lock file are resolved against
+/// `workspace_root`, the directory the lock file lives in.
+///
+/// NOTE: deliberately scoped to a single environment and platform, unlike the
+/// source-package scan in `LockFileDerivedData::cached_prefix` which walks
+/// every environment at `Platform::current()` and consults the manifest for
+/// pypi path dependencies: the marker file this feeds records a fact about
+/// one installed prefix.
+///
+/// The lock platform is resolved via [`crate::lock_file::resolve_lock_platform`]
+/// -- name lookup with a base-subdir fallback -- because that is how
+/// `LockFileDerivedData::update_prefix` selects the packages it installs, and
+/// the recorded flag must describe the installed package set. An environment
+/// or platform that is missing from the lock file has no locked packages, so
+/// it trivially contains no source packages.
+pub(crate) fn environment_contains_source_packages(
+    lock_file: &LockFile,
+    workspace_root: &Path,
+    workspace_manifest: &WorkspaceManifest,
+    environment_name: &str,
+    platform: &PixiPlatform,
+) -> bool {
+    let Some(environment) = lock_file.environment(environment_name) else {
+        return false;
+    };
+    let Some(lock_platform) =
+        crate::lock_file::resolve_lock_platform(lock_file, platform.name(), workspace_manifest)
+    else {
+        return false;
+    };
+
+    let contains_conda_source = environment
+        .conda_packages(lock_platform)
+        .is_some_and(|mut packages| packages.any(|package| package.as_source().is_some()));
+    if contains_conda_source {
+        return true;
+    }
+
+    environment
+        .pypi_packages(lock_platform)
+        .is_some_and(|mut packages| {
+            packages.any(|package| {
+                let UrlOrPath::Path(path) = &**package.location() else {
+                    return false;
+                };
+                let absolute_path = if path.is_absolute() {
+                    PathBuf::from(path.as_str())
+                } else {
+                    workspace_root.join(path.as_str())
+                };
+                absolute_path.is_dir()
+            })
+        })
 }
 
 /// Runs the following checks to make sure the project is in a sane state:
@@ -817,6 +914,226 @@ mod tests {
         let parsed: EnvironmentFile = serde_json::from_str(json).expect("legacy file parses");
         assert!(parsed.resolved_platform.is_none());
         assert!(parsed.minimum_supported_platform.is_none());
+    }
+
+    /// A marker file written by a pixi that predates the recorded install
+    /// facts (`lock_file_digest`, `contains_source_packages`) must still
+    /// deserialize, with both facts absent, so a pixi upgrade doesn't
+    /// invalidate every installed prefix.
+    #[test]
+    fn environment_file_without_recorded_facts_deserializes() {
+        let json = r#"{
+            "manifest_path": "/ws/pixi.toml",
+            "environment_name": "default",
+            "pixi_version": "0.1.0",
+            "environment_lock_file_hash": "deadbeef"
+        }"#;
+        let parsed: EnvironmentFile = serde_json::from_str(json).expect("legacy file parses");
+        assert!(parsed.lock_file_digest.is_none());
+        assert!(parsed.contains_source_packages.is_none());
+    }
+
+    /// The recorded install facts survive a JSON round-trip.
+    #[test]
+    fn environment_file_roundtrips_recorded_facts() {
+        let file = EnvironmentFile {
+            manifest_path: PathBuf::from("/ws/pixi.toml"),
+            environment_name: "default".to_string(),
+            pixi_version: "0.1.0".to_string(),
+            environment_lock_file_hash: LockedEnvironmentHash("deadbeef".to_string()),
+            resolved_platform: None,
+            minimum_supported_platform: None,
+            lock_file_digest: Some("00c0ffee00c0ffee".to_string()),
+            contains_source_packages: Some(true),
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: EnvironmentFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.lock_file_digest.as_deref(), Some("00c0ffee00c0ffee"));
+        assert_eq!(parsed.contains_source_packages, Some(true));
+    }
+
+    /// The digest is a pure function of the lock file bytes: identical bytes
+    /// produce identical lowercase-hex digests, different bytes a different
+    /// one, and a missing file records `None` instead of failing.
+    #[test]
+    fn lock_file_digest_reflects_file_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.lock");
+        let b = dir.path().join("b.lock");
+        let c = dir.path().join("c.lock");
+        fs_err::write(&a, b"lock-content").unwrap();
+        fs_err::write(&b, b"lock-content").unwrap();
+        fs_err::write(&c, b"other-content").unwrap();
+
+        let digest_a = lock_file_digest(&a).expect("readable file digests");
+        assert!(
+            digest_a
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "digest must be lowercase hex, got {digest_a}"
+        );
+        assert_eq!(Some(&digest_a), lock_file_digest(&b).as_ref());
+        assert_ne!(Some(&digest_a), lock_file_digest(&c).as_ref());
+        assert_eq!(lock_file_digest(&dir.path().join("missing.lock")), None);
+    }
+
+    /// Renders a small v6 lock file with a single `default` environment whose
+    /// `linux-64` package list is `packages` (entries from the top-level
+    /// `packages:` section below it).
+    fn lock_with_packages(packages: &str, definitions: &str, base_dir: &Path) -> LockFile {
+        let source = format!(
+            r#"version: 6
+environments:
+  default:
+    channels:
+    - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+{packages}
+packages:
+{definitions}"#
+        );
+        LockFile::from_str_with_base_directory(&source, Some(base_dir)).expect("lock parses")
+    }
+
+    /// Classification of what `contains_source_packages` records: binary-only
+    /// environments are `false`; a conda source package or a pypi path
+    /// dependency pointing at a directory is `true`; a pypi path dependency
+    /// pointing at a file (a local archive) stays `false` because its content
+    /// is fixed.
+    #[test]
+    fn environment_contains_source_packages_classifies_lock_content() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = crate::Workspace::from_str(
+            Path::new("pixi.toml"),
+            r#"
+            [workspace]
+            name = "demo"
+            channels = []
+            platforms = ["linux-64"]
+            "#,
+        )
+        .unwrap();
+        let manifest = &workspace.workspace.value;
+        let platform = PixiPlatform::from_subdir(Platform::Linux64);
+        let contains = |lock: &LockFile| {
+            environment_contains_source_packages(lock, root.path(), manifest, "default", &platform)
+        };
+
+        // Binary conda package only.
+        let binary_only = lock_with_packages(
+            "      - conda: https://conda.anaconda.org/conda-forge/linux-64/foo-1.0-h0.conda",
+            "- conda: https://conda.anaconda.org/conda-forge/linux-64/foo-1.0-h0.conda",
+            root.path(),
+        );
+        assert!(!contains(&binary_only));
+
+        // A conda source package.
+        let conda_source = lock_with_packages(
+            "      - conda: ./pkg-src",
+            r#"- conda: ./pkg-src
+  name: pkg-src
+  version: 0.1.0
+  build: h0_0
+  subdir: linux-64
+  input:
+    hash: 0e5b879b8be1bd55540bc912ca881382625113b8fca75bf88b2e3a9a1093b4d3
+    globs:
+    - pyproject.toml"#,
+            root.path(),
+        );
+        assert!(contains(&conda_source));
+
+        // A pypi path dependency pointing at a directory.
+        fs_err::create_dir(root.path().join("my-pkg")).unwrap();
+        let pypi_dir = lock_with_packages(
+            "      - pypi: ./my-pkg",
+            r#"- pypi: ./my-pkg
+  name: my-pkg
+  version: 0.1.0
+  sha256: 36a293cb2033c1eedb5d407bee54e213ef0a3e2021c9fcc7d040203ad0802074
+  editable: true"#,
+            root.path(),
+        );
+        assert!(contains(&pypi_dir));
+
+        // A pypi path dependency pointing at a file.
+        fs_err::write(root.path().join("my_pkg-0.1.0.tar.gz"), b"archive").unwrap();
+        let pypi_file = lock_with_packages(
+            "      - pypi: ./my_pkg-0.1.0.tar.gz",
+            r#"- pypi: ./my_pkg-0.1.0.tar.gz
+  name: my-pkg
+  version: 0.1.0
+  sha256: 36a293cb2033c1eedb5d407bee54e213ef0a3e2021c9fcc7d040203ad0802074"#,
+            root.path(),
+        );
+        assert!(!contains(&pypi_file));
+
+        // An environment or platform missing from the lock has no packages to
+        // classify.
+        assert!(!environment_contains_source_packages(
+            &binary_only,
+            root.path(),
+            manifest,
+            "missing-env",
+            &platform,
+        ));
+        assert!(!environment_contains_source_packages(
+            &binary_only,
+            root.path(),
+            manifest,
+            "default",
+            &PixiPlatform::from_subdir(Platform::Win64),
+        ));
+    }
+
+    /// The lock platform is resolved the same way the install resolves it:
+    /// when a rich-named workspace platform targets a lock file still keyed by
+    /// the bare subdir, the subdir fallback must find the packages that
+    /// actually get installed instead of silently classifying the environment
+    /// as source-free.
+    #[test]
+    fn environment_contains_source_packages_uses_subdir_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = crate::Workspace::from_str(
+            Path::new("pixi.toml"),
+            r#"
+            [workspace]
+            name = "demo"
+            channels = []
+            platforms = [{ name = "gpu", platform = "linux-64", cuda = "99" }]
+            "#,
+        )
+        .unwrap();
+        let manifest = &workspace.workspace.value;
+        let platform = manifest
+            .workspace
+            .platform_by_name(&PixiPlatformName::try_from("gpu").unwrap())
+            .expect("declared platform exists");
+
+        // The lock keys the platform by bare subdir and contains a conda
+        // source package.
+        let lock = lock_with_packages(
+            "      - conda: ./pkg-src",
+            r#"- conda: ./pkg-src
+  name: pkg-src
+  version: 0.1.0
+  build: h0_0
+  subdir: linux-64
+  input:
+    hash: 0e5b879b8be1bd55540bc912ca881382625113b8fca75bf88b2e3a9a1093b4d3
+    globs:
+    - pyproject.toml"#,
+            root.path(),
+        );
+
+        assert!(environment_contains_source_packages(
+            &lock,
+            root.path(),
+            manifest,
+            "default",
+            platform,
+        ));
     }
 
     /// `PlatformData` stores the platform's composition (subdir + declared

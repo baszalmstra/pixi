@@ -70,7 +70,8 @@ use crate::{
     environment::{
         CondaPrefixUpdated, EnvironmentFile, InstallFilter, LockFileUsage, LockedEnvironmentHash,
         PerEnvironmentAndPlatform, PerGroup, PerGroupAndPlatform, PlatformData,
-        read_environment_file, write_environment_file,
+        environment_contains_source_packages, lock_file_digest, read_environment_file,
+        write_environment_file,
     },
     lock_file::{
         self,
@@ -801,6 +802,34 @@ impl<'p> LockFileDerivedData<'p> {
         // Avoiding writing the cache away before the update is done.
         let (resolved_platform, minimum_supported_platform) =
             self.installed_platform_data(environment).unzip();
+
+        // Record facts a later invocation can read back from the marker
+        // without parsing the lock file: the digest of the on-disk lock file
+        // bytes this prefix was installed from (written to disk before
+        // `prefix()` runs on the solve path; `None` when unreadable), and
+        // whether the environment's locked content contains source packages
+        // (deliberately per-environment -- see the helper's docs for how this
+        // differs from the workspace-wide scan in [`Self::cached_prefix`]).
+        //
+        // A filtered install produces a prefix that doesn't correspond to the
+        // lock file, so follow the invalid-hash convention above and record
+        // no facts a freshness check could mistake for a full install.
+        let (lock_file_digest, contains_source_packages) = if filter.filter_active() {
+            (None, None)
+        } else {
+            (
+                lock_file_digest(&self.workspace.lock_file_path()),
+                self.install_platform(environment).map(|platform| {
+                    environment_contains_source_packages(
+                        &self.lock_file,
+                        self.workspace.root(),
+                        environment.workspace_manifest(),
+                        environment.name().as_str(),
+                        platform,
+                    )
+                }),
+            )
+        };
         write_environment_file(
             &environment.dir(),
             EnvironmentFile {
@@ -810,6 +839,8 @@ impl<'p> LockFileDerivedData<'p> {
                 environment_lock_file_hash: hash,
                 resolved_platform,
                 minimum_supported_platform,
+                lock_file_digest,
+                contains_source_packages,
             },
         )?;
 
